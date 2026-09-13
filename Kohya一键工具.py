@@ -1758,6 +1758,12 @@ FLUX2FZ_TRAIN_SCRIPT = "src/fizgig/scripts/train.py"
 FLUX2FZ_CACHE_LATENTS_SCRIPT = "src/fizgig/scripts/cache_latents.py"
 FLUX2FZ_CACHE_TEXT_SCRIPT = "src/fizgig/scripts/cache_text.py"
 
+# Fizgig 采样必须显式给 CFG scale（GitHub issue #6）：
+# 引擎会给没写负向词的 prompt 注入一个空格当 negative（trainer.py:1078），于是走 CFG 分支，
+# 而 cfg_scale 默认 None → denoise_cfg 里 `guidance * (...)` 直接 TypeError。
+# 3.5 取自 Fizgig 自身默认值（trainer.py:407 defaults["guidance"]、inference.py:46 注释）。
+FIZGIG_SAMPLE_CFG = 3.5
+
 # Klein 9B 模型文件（放 models/flux2/，与 4B 共用目录；国内镜像直链）
 FLUX2FZ_MODEL_LINKS = {
     "dit": ("flux-2-klein-base-9b-fp8.safetensors", "FLUX.2 Klein 9B DiT 底模（fp8 base，约 8.9GB，训练必需）",
@@ -4549,10 +4555,11 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
             logf("[Krea2(Fizgig)] ⚠ 已开启「训练中采样预览」，但 models/krea2/ 缺少 turbo.safetensors（fp8 Turbo，约 13GB，预览必需），本次训练不采样。\n"
                  "下载：软件内「下载Krea2模型」勾选 Turbo，或直链 " + KREA2_MODEL_LINKS["turbo"][2])
         else:
-            _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="fizgig", train_dir=train_dir)
+            _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="fizgig",
+                                           train_dir=train_dir, cfg_scale=FIZGIG_SAMPLE_CFG)
             if _fz_sp:
                 _per_ep = max(1, per_epoch)
-                _s_ep = min(max(1, int(round(100.0 / _per_ep))), max(1, epochs))
+                _s_ep = _fizgig_sample_epochs(params, _per_ep, epochs)
                 cmd += ["--turbo_dit", _sample_turbo,
                         "--vae", files["vae"],
                         "--text_encoder", files["te"],
@@ -4571,6 +4578,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     logf(f"[Krea2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
     logf(f"[Krea2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap} | torch.compile={'开' if _k2_compile else '关'}")
     rc = run_stream(cmd, cwd=fz_dir, env=_fz_env, logf=logf, collect=_log_tail)
+    _warn_fizgig_sample_failure("\n".join(_log_tail), logf)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError("Krea2(Fizgig) 训练失败，退出码 %d，请查看上方日志。" % rc)
@@ -4718,10 +4726,11 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     # ---- 训练中采样出图预览（Fizgig Klein 原生：每 N epoch 用当前 LoRA 出图到 output/sample/）----
     # 不需额外下载 distilled 模型：直接用训练底模采样（约 20 步，比 4 步 distilled 慢但可用）。
     if _sample_preview_enabled(params, vram_gb):
-        _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi", train_dir=train_dir)
+        _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi",
+                                       train_dir=train_dir, cfg_scale=FIZGIG_SAMPLE_CFG)
         if _fz_sp:
             _per_ep = max(1, per_epoch)
-            _s_ep = min(max(1, int(round(100.0 / _per_ep))), max(1, epochs))
+            _s_ep = _fizgig_sample_epochs(params, _per_ep, epochs)
             cmd += ["--sample_prompts", _fz_sp, "--sample_every_n_epochs", str(_s_ep)]
             if _te_fp8:
                 cmd.append("--fp8_text_encoder")
@@ -4735,6 +4744,7 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     logf(f"[FLUX.2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
     logf(f"[FLUX.2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap}")
     rc = run_stream(cmd, cwd=fz_dir, env=_fz_env, logf=logf, collect=_log_tail)
+    _warn_fizgig_sample_failure("\n".join(_log_tail), logf)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError("FLUX.2 Klein 9B(Fizgig) 训练失败，退出码 %d，请查看上方日志。" % rc)
@@ -9332,7 +9342,43 @@ def _guess_sample_subject(train_dir):
         return "1boy, solo"
     return ""
 
-def _write_sample_prompts(output_name, params, mode, resolution=None, engine="kohya", train_dir=None):
+def _fizgig_sample_epochs(params, per_epoch, epochs):
+    """把界面填的「采样预览间隔(步)」换算成 Fizgig 的 --sample_every_n_epochs。
+
+    Fizgig 只支持按 epoch 采样，而界面给的是步数，所以这里换算：
+      填了 N 步  -> 每 max(1, round(N / 每epoch步数)) 个 epoch
+      没填(0/空) -> 沿用原来的「约每 100 步」启发式
+    （此前两处 Fizgig 路径完全没读 sample_interval，界面却写着「Krea2/FLUX.2 生效」——issue #6）
+    """
+    _per = max(1, int(per_epoch or 1))
+    _eps = max(1, int(epochs or 1))
+    try:
+        si = int(params.get("sample_interval") or 0)
+    except Exception:
+        si = 0
+    if si >= 10:
+        return max(1, min(int(round(si / float(_per))), _eps))
+    return min(max(1, int(round(100.0 / _per))), _eps)
+
+
+_FIZGIG_SAMPLE_ERR_MARK = "unsupported operand type(s) for *"
+
+
+def _warn_fizgig_sample_failure(log_text, logf=print):
+    """采样失败会污染训练状态，而训练仍以退出码 0 收尾 —— 必须显式告警。
+
+    Fizgig 的采样循环没有 try/except（trainer.py:1581），异常抛出后会跳过
+    switch_block_swap_for_training()，模型留在「推理态块交换」→ 训练每步全量换块。
+    实测 1.78s/it → 8s/it（GitHub issue #6）。训练照样跑完，只能靠扫日志提醒。
+    """
+    if not log_text or _FIZGIG_SAMPLE_ERR_MARK not in log_text:
+        return
+    logf("[Fizgig] ⚠ 采样预览出错了（CFG scale 缺失），训练虽已跑完，但块交换没还原、速度被明显拖慢。")
+    logf("[Fizgig]   本轮权重仍可用；下一轮建议取消勾选「训练中采样预览」，或升级到已修复该问题的版本。")
+
+
+def _write_sample_prompts(output_name, params, mode, resolution=None, engine="kohya", train_dir=None,
+                          cfg_scale=None):
     """生成 kohya/musubi 训练采样提示词文件；返回路径或 None（未开启/失败）。
 
     engine="musubi" 时追加 musubi 采样专属参数 --w/--h（kohya 引擎不支持该后缀）：
@@ -9384,6 +9430,10 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
     if engine == "musubi":
         res = int(resolution or 1024)
         prompt += f" --w {res} --h {res} --s 20"
+    if cfg_scale:
+        # Fizgig 专属：显式写 CFG scale（--l）。不写的话引擎会注入空格负向词 → 走 CFG 分支
+        # 但 cfg_scale=None → denoise_cfg 崩 TypeError，且异常会跳过块交换还原，训练越跑越慢（issue #6）
+        prompt += f" --l {cfg_scale}"
     d = data_sub("cache", "sample_prompts")
     try:
         os.makedirs(d, exist_ok=True)
