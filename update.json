@@ -1,7 +1,7 @@
 {
-  "version": "v0.16.9",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.16.9/Setup.exe",
+  "version": "v0.16.10",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.16.10/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "9d69e509be89e11db6ba04745522fda71a16d1f4b2f2ac3f67f3f26018f9e981",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.16.9 更新（2026-09-15）· 修复版：\n    修复 AMD 显卡用户（ROCm 版 PyTorch）训练一步都跑不起来的崩溃：\n    · 现象：开启「AMD 兼容模式」后点训练，加载阶段直接退出，报\n      ModuleNotFoundError: No module named torch._C._distributed_c10d（torch._C is not a package）\n    · 原因：Windows ROCm 版 torch 不含分布式扩展，torch.distributed.tensor 无法导入；而 accelerate 在 accelerator.prepare() 里会 import DTensor，一 import 就崩。旧补丁只补了 is_initialized 等接口，没覆盖这个导入，所以训练一步都跑不起来；\n    · 已修：AMD 兼容补丁升级为「导入失败时用占位模块顶上」，并保证 isinstance 判断恒为 False（单卡训练本来就没有 DTensor）。无需你做任何额外操作，更新后直接训练即可。\n    · 顺带更正 Krea2 显存速度基准注释：16G 卡 512px 实测 2.5s/it（旧注释里的 7s/it 未标分辨率，容易误导调优）。\n    本版包含 v0.16.8 的全部改动（Fizgig 采样修复 / 更新包 SHA256 校验 / 安装被拦保护）。"
+  "setup_sha256": "016a4701b188894f9303ca040259b7be519d4d0d3abdee7a9df80925a09d369e",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.16.10 更新（2026-09-15）· 新增优化 + 修复：\n\n【新增】第一引擎（SD1.5 / SDXL 的画风·人物·概念 LoRA）接入两项底层优化：\n    · 底模 fp8：显存 <16G 时自动开启（SDXL 省约 2.4GB、SD1.5 约 0.8GB）。\n      只压 U-Net、文本编码器保持原精度，不影响训练质量；16G 及以上与 AMD 卡不开。\n    · torch.compile：需在「高级参数」手动勾选「torch.compile 加速」。这是目前唯一\n      能真正提速的官方开关。编译需额外显存，故显存 <10G 自动禁用；Windows 下若缺\n      Triton 会自动补装，补装不上或编译失败都会自动回退到标准 SDPA，不会让训练中断。\n\n【修复】视频（H3）LoRA：分辨率与帧数改了不生效\n    · 现象：改了分辨率和帧数，跑起来还是 1280 和 73；手动改配置文件，下次又被覆盖。\n    · 原因：训练配置文件里的分辨率是写死的 1280，而帧数在界面上根本没有入口，所以\n      永远取默认的 73；配置文件每次训练都会重新生成，手改保存不下来。\n    · 已修：「高级参数」新增「帧数（17n+5）」；视频模式也能改分辨率了。两项都会自动\n      对齐到 H3 要求的网格（帧数须为 17n+5：5/22/39/56/73…，分辨率须为 32 的倍数），\n      避免填了不合规的值被引擎悄悄裁掉。\n\n【修复】项目参数不保存：分辨率 / 训练步数 / 帧数此前不随项目存档，重开项目会悄悄回到\n    默认值（Anima·SDXL 变回 1024、SD1.5 变回 512）。现已保存并在打开项目时恢复。\n\n【优化】训练日志新增一行「实际生效」，直接写明本次采用的分辨率 / 抽帧数 / 采样尺寸，\n    以及 torch.compile 是否真的开启，省得再靠猜。"
 }

@@ -1,4 +1,70 @@
-﻿## v0.16.5（2026-09-11）
+﻿## v0.16.10（2026-09-15）
+
+### 新增：第一引擎（SD1.5 / SDXL）接入底模 fp8 与 torch.compile
+
+- **底模 fp8（`--fp8_base_unet`）**：显存 <16G 时自动开启。
+  - 用 `--fp8_base_unet` 而非 `--fp8_base`：**只压 U-Net、不动 Text Encoder** ——
+    LoRA 训练时 U-Net 本就冻结，量化它不影响训练质量；TE 要参与训练，保持 fp16/bf16 更稳。
+  - 实测收益（本机 AniShadow_V5，只读 safetensors 头部统计参数构成）：
+    SDXL U-Net 4.78GB → **省 2.39GB**；SD1.5 U-Net 1.60GB → **省 0.80GB**。
+  - 不开的情况：非 SD 系（FLUX/Anima 各有自己的档）、AMD（ROCm 上 fp8 未验证）、
+    混合精度为 `no`（sd-scripts 断言会直接报错）、显存 ≥16G、底模本身已预量化。
+  - 判定抽成纯函数 `_sd_fp8_base_unet()`（`Kohya一键工具.py:9119`），便于测试。
+- **torch.compile（`--torch_compile`）**：需在「高级参数」**显式勾选**才开。
+  - 这是目前第一引擎**唯一能直接提速**的官方开关。非 LoRA 路径会失效，但 LoRA 训练时
+    `train_unet = not network_train_text_encoder_only`（`train_network.py:1114`）为 True
+    → U-Net 会走 `accelerator.prepare` → accelerate dynamo 真正编译 U-Net。
+  - 安全门控（复用第二引擎那套）：先 Triton 自检 → 缺则自动补装 triton-windows（国内镜像）
+    → 装不上则回退标准 SDPA；**运行期编译崩也自动去掉 `--torch_compile` 重试一次**，
+    不让一个可选加速开关把整轮训练搞失败。
+  - 显存 <10G 自动禁用（编译需额外显存，训练开始易 OOM）。
+  - 顺带放宽 `_log_mentions_compile_failure()`：纳入 dynamo 的报错文案
+    （`torch._dynamo.exc` / `BackendCompilerFailed`），因为 dynamo 的报错比 inductor 更宽。
+
+### 修复：视频（H3）LoRA 分辨率/帧数改了不生效，手改配置文件又被覆盖
+
+- **根因（三个叠加）**：
+  1. `write_h3_train_yaml` 里数据集 `resolution: [1280, 1280]` 与采样 `width/height`
+     是**硬编码字面量**（`Kohya一键工具.py:5024` / `:5050-5051`），改什么都没用；
+  2. `video_frames` **从未被 GUI 写入 params**（`_collect_params` 只有 `video_steps`，
+     界面上也没有「帧数」控件）→ `params.get("video_frames", H3_FRAMES)` 恒回落 **73**；
+  3. 视频模式下 `resolution` 控件被 `grid_remove()` 隐藏 → 用户**没有合法入口**，
+     只能手改 yaml；而 yaml 每次训练都重新生成 → **手改必被覆盖**。
+- **H3 的两条硬约束**（来自 ai-toolkit `.../minimax_h3/minimax_h3.py`）：
+  - **帧数须为 `17n+5`**（5/22/39/56/73/90…）。非网格值**不报错**，引擎会**静默向下裁帧**
+    （`:750-755`）→ 白解码，所以必须**吸附**而不是只校验；
+  - **分辨率须为 32 的倍数**（16x VAE 空间压缩 × 2x2 patch，`:207`）；非倍数被向下吸附（`:1124`）。
+- **修复**：新增 `h3_align_frames()` / `h3_align_resolution()`；`write_h3_train_yaml`
+  改读参数并吸附；采样高按 **16:9 派生再对齐 32**（原写死 720，而 720 并非 32 的倍数）；
+  「高级参数」新增**「帧数（17n+5）」**控件（仅视频模式显示）；**视频模式恢复显示分辨率**；
+  视频预设纳入 `video_frames=73`。
+
+### 修复：分辨率 / 训练步数 / 帧数不随项目存档
+
+- **现象**：用户为省显存把分辨率调低后，重开项目会**静默回落到架构默认值**
+  （Anima/SDXL 1024、SD1.5 512），跑一轮才发觉。
+- **根因**：`_project_dict()` 的 params 白名单（`kohya_gui.py:1905-1921`）里**没有**
+  `resolution` / `video_steps` / `video_frames`。已纳入。
+- 恢复流程本身是安全的：先按项目值回填、再 `_apply_presets()` 只填缺失项，
+  且回填的键会进 `_manual_override`、不被预设覆盖（`:2041-2044`）。
+
+### 优化：训练日志新增「实际生效」行
+
+- 第一引擎：训练摘要行显示 `torch.compile: 开/关`；
+- 视频：打印 `[视频] 实际生效：训练分辨率 NNNpx（=32 的倍数）· 抽帧 N 帧 · 采样 WxH`，
+  吸附发生时额外说明原因（例如「帧数 70 → 73（H3 视频 VAE 只接受 17n+5…）」）。
+
+### 测试
+
+- 第一引擎：27/27 功能验证（fp8 判定表 11 项含 16.0/15.9 边界、compile 自检与回退重试、
+  失败特征识别）；用真实 venv 跑 `--help` 确认 SD1.5/SDXL 都认
+  `--fp8_base_unet` / `--torch_compile` / `--dynamo_backend`。
+- 视频 H3：53/53（吸附表 + **真实生成的 yaml** + GUI 默认值 + 接线断言）；
+  新增回归测试 `H3_RESOLUTION_FRAMES_OK`（含「非网格值必须被吸附」的防回归断言 ——
+  既有的 `test_h3_vram_adapt` 显式传了 `video_frames=73`，恰好绕过这个缺口，故长期未被发现）。
+- `smoke_test.py` + `engine_install_smoke_test.py` 全过。
+
+## v0.16.5（2026-09-11）
 
 ### 修复：Krea2（AI-Toolkit 引擎）16G 显卡「有时能跑、有时直接 OOM」
 - **根因**：档位判定用的是 `vram_gb <= 16` 这个硬边界。16G 卡经 DXGI / nvidia-smi 检测常报 15.6~15.9，
