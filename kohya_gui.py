@@ -1886,10 +1886,52 @@ class App:
         e.focus_set()
 
     def cmd_delete_project(self, name):
-        if not messagebox.askyesno(core.APP_NAME,
+        """删除项目 —— 图集数据（含打标文件）单独确认，它是删除后唯一的"孤儿"。
+
+        2026-09-15 用户反馈：删了项目，打标好的文件还留在磁盘上一直占空间。
+        根因：core.delete_project() 只删 projects/<名>.json，
+        data/dataset/<项目名>/（预处理图片 + .txt 打标 + 各引擎缓存）原样留下 ——
+        而项目一删，这批数据就再没有任何界面入口能找到它，纯占磁盘。
+        （output/<项目名>/ 是**有意保留**的：里面是训练出来的 LoRA 成品。）
+        """
+        _ds = core.project_data_dir(name)
+        _has_ds = bool(_ds) and os.path.isdir(_ds)
+        _n, _b = core.dir_stats(_ds) if _has_ds else (0, 0)
+
+        def _fmt(nb):
+            _mb = nb / 1048576.0
+            return ("%.1f GB" % (_mb / 1024)) if _mb >= 1024 else ("%.0f MB" % _mb)
+
+        _del_data = False
+        if _has_ds:
+            # 「是」= 项目 + 图集数据一起删（推荐）／「否」= 只删项目、数据留着／「取消」= 不动
+            _ans = messagebox.askyesnocancel(
+                core.APP_NAME,
+                f"确定删除项目「{name}」吗？删除后不可恢复。\n\n"
+                f"这个项目还留着图集数据（{_n} 个文件，约 {_fmt(_b)}）：\n"
+                f"    {_ds}\n"
+                f"包含预处理后的图片、打标文件（.txt）和引擎缓存。\n"
+                f"项目删除后无法再从界面访问，留着只会一直占磁盘。\n\n"
+                f"「是」= 项目和图集数据一起删除（释放约 {_fmt(_b)}）\n"
+                f"「否」= 只删项目，数据保留在原处\n"
+                f"「取消」= 什么都不做")
+            if _ans is None:
+                return
+            _del_data = bool(_ans)
+        elif not messagebox.askyesno(
+                core.APP_NAME,
                 f"确定删除项目「{name}」吗？\n删除后不可恢复（训练产物仍在 output 文件夹）。"):
             return
+
         core.delete_project(name)
+        if _del_data:
+            _ok, _n2, _b2 = core.delete_project_data(name)
+            if _ok:
+                self._log(f"[项目] 已删除图集数据（{_n2} 个文件，释放约 {_fmt(_b2)}）")
+            else:
+                self._log(f"[项目] ⚠ 图集数据删除失败（可能有文件被占用），可手动删除：{_ds}")
+        elif _has_ds:
+            self._log(f"[项目] 图集数据已保留（不再从界面访问）：{_ds}")
         self._log(f"[项目] 已删除项目「{name}」")
         if self.current_project == name:
             self._show_home()
@@ -3540,7 +3582,7 @@ class App:
             pass
         w = ctk.CTkToplevel(self.root)
         w.title("数据 / 引擎目录")
-        w.geometry("640x420")
+        w.geometry("640x490")
         w.transient(self.root)
         try:
             from tkinter import filedialog
@@ -3594,6 +3636,59 @@ class App:
                           corner_radius=6, font=ui_font(FONT_BODY), command=_follow_install).pack(side="left", padx=(10, 0))
             ctk.CTkLabel(w, text="提示：迁移后 C 盘 AppData 里的旧数据会被清理；若中途失败会保留源目录，可重试。",
                          font=ui_font(FONT_HINT), text_color=HINT, wraplength=580).pack(anchor="w", padx=18, pady=(10, 0))
+
+            # ---- 无主数据集（删项目时遗留的图集目录）----
+            # 2026-09-15 用户反馈：删了项目，打标好的文件还留在磁盘上一直占空间。
+            # 删除流程已修（cmd_delete_project 现在会问），但**已经漏出来的**需要有地方能清 ——
+            # 项目一删这批数据就没有任何界面入口了，只能靠这里扫出来。
+            ctk.CTkLabel(w, text="已删除项目遗留的数据", font=ui_font(FONT_BODY), text_color=SUB).pack(
+                anchor="w", padx=18, pady=(14, 2))
+            _orph_var = tk.StringVar()
+            ctk.CTkLabel(w, textvariable=_orph_var, font=ui_font(FONT_HINT), text_color=HINT,
+                         wraplength=580, justify="left").pack(anchor="w", padx=18)
+
+            def _refresh_orphans():
+                _it = core.find_orphan_project_dirs()
+                if _it:
+                    _n = sum(x[2] for x in _it)
+                    _mb = sum(x[3] for x in _it) / 1048576.0
+                    _orph_var.set("检测到 %d 个（%d 个文件 / 约 %.0f MB）—— 项目已删除，"
+                                  "留着无法再从界面访问" % (len(_it), _n, _mb))
+                else:
+                    _orph_var.set("无（没有已删除项目遗留的数据）")
+                return _it
+
+            def _clean_orphans():
+                _it = core.find_orphan_project_dirs()
+                if not _it:
+                    messagebox.showinfo(core.APP_NAME, "没有可清理的遗留数据。")
+                    return
+                _mb = sum(x[3] for x in _it) / 1048576.0
+                _names = "\n".join("    · %s（%.0f MB）" % (x[0], x[3] / 1048576.0) for x in _it[:10])
+                if len(_it) > 10:
+                    _names += "\n    …… 以及另外 %d 个" % (len(_it) - 10)
+                if not messagebox.askyesno(
+                        core.APP_NAME,
+                        "将永久删除以下【已删除项目遗留】的数据目录\n"
+                        "（含预处理后的图片与打标文件，不可恢复）：\n\n"
+                        f"{_names}\n\n共 {len(_it)} 个，释放约 {_mb:.0f} MB。是否继续？"):
+                    return
+                _ok, _files, _bytes, _fail = core.delete_orphan_project_dirs()
+                self._log("[清理] 已删除 %d 个遗留数据集（%d 个文件，释放约 %.0f MB）"
+                          % (_ok, _files, _bytes / 1048576.0))
+                if _fail:
+                    self._log("[清理] ⚠ %d 个删除失败（可能被占用）：%s"
+                              % (len(_fail), "、".join(_fail[:5])))
+                _refresh_orphans()
+                messagebox.showinfo(core.APP_NAME,
+                                    "已释放约 %.0f MB。" % (_bytes / 1048576.0)
+                                    + ("\n有 %d 个删除失败，可稍后重试。" % len(_fail) if _fail else ""))
+
+            ctk.CTkButton(w, text="清理遗留数据（删项目后残留）", width=230, height=32,
+                          fg_color="#4a3535", hover_color="#5a4141", text_color="#e0b0b0",
+                          corner_radius=6, font=ui_font(FONT_HINT), command=_clean_orphans).pack(
+                anchor="w", padx=18, pady=(6, 0))
+            _refresh_orphans()
             self._data_dir_win = w
         except Exception as e:
             messagebox.showerror(core.APP_NAME, "打开数据目录设置失败：" + str(e))
@@ -5962,6 +6057,39 @@ class App:
             return False
         return True
 
+    def _modal(self, kind, title, msg, log=None):
+        """统一的「会阻塞主线程的弹窗」入口：**先把日志写出去**，再把窗口提到最前，最后才弹。
+
+        ⚠️ 为什么必须先写日志（2026-09-15 一位 4090 用户实证）：
+            「一键开始训练」在预处理成功后会连弹最多 8 个确认框，而此前**它们一行日志都不写**。
+            用户导出日志看到的是「[OK] 可用图片 20 张」之后什么都没有 —— 既没输出也没报错，
+            只能判断成卡死，实际上软件正在等他点一个没注意到的确认框。
+            日志先行之后，导出日志里会明确出现「[确认] 弹窗等待你操作：…」，
+            一眼就能看出「不是卡死，是在等我点确认」，也能直接定位是哪一个弹窗。
+
+        ⚠️ 为什么必须提窗口：弹窗可能出现在主窗口后面（主窗口最大化、或被别的窗口遮挡），
+            用户根本不知道在等他。deiconify + lift + focus_force 把它顶到前面。
+
+        kind: "yesno"（返回 True/False）| "okcancel"（同）| "warning" | "info"（返回 None）
+        """
+        if log:
+            try:
+                self._log("[确认] 弹窗等待你操作：" + str(log))
+            except Exception:
+                pass
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        _fn = {"yesno": messagebox.askyesno,
+               "okcancel": messagebox.askokcancel,
+               "warning": messagebox.showwarning,
+               "info": messagebox.showinfo}.get(kind, messagebox.askyesno)
+        return _fn(title, msg)
+
     def _ask_fix_cpu_torch(self, params):
         """训练前自愈：NVIDIA 卡 + torch 为 CPU 版时，询问是否自动重装 cu128（须主线程调用）。
         返回 True=要自动重装 cu128；否则不触发。"""
@@ -5979,20 +6107,22 @@ class App:
             return False
         # 方案 B：Krea2（12.9B）8G 显存强提示（fp8 在部分显卡退化 + 重度层换内存，每步数十秒以上）
         if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") and vram < 12:
-            return messagebox.askyesno(
-                core.APP_NAME,
+            return self._modal(
+                "yesno", core.APP_NAME,
                 f"Krea 2 是 12.9B 大模型，建议 16G+ 显存；你的显卡只有约 {vram:.1f}G。\n\n"
                 "8G 显存即使开 fp8 + 层换内存（blocks_to_swap），训练也会非常慢（每步数十秒以上），"
                 "且 fp8 在部分显卡上可能退化成 float32 计算。\n\n"
-                "强烈不建议在此显卡上训练 Krea 2，是否仍要继续？")
+                "强烈不建议在此显卡上训练 Krea 2，是否仍要继续？",
+                log=f"Krea 2 显存不足（约 {vram:.1f}G < 12G），询问是否继续")
 
-        return messagebox.askyesno(
-            core.APP_NAME,
+        return self._modal(
+            "yesno", core.APP_NAME,
             "检测到当前训练环境是 CPU 版 PyTorch（CUDA 不可用）。\n\n"
             "这样训练会全程 CPU，非常慢（每步可能数百秒）。\n\n"
             "是否自动重装 CUDA 版（cu128）PyTorch？\n"
             "· 约 3.3GB，国内镜像，断点续传，可随时点停止\n"
-            "· 选「否」将继续用 CPU 训练（不推荐）")
+            "· 选「否」将继续用 CPU 训练（不推荐）",
+            log="检测到 CPU 版 PyTorch（CUDA 不可用），询问是否自动重装 cu128")
 
     def _warn_no_nvidia(self):
         """显卡兼容检查：N 卡直接放行；AMD 卡走兼容模式；其他保持原警告。返回 True=继续。"""
@@ -6009,12 +6139,13 @@ class App:
             vendor = "unknown"
         if vendor == "amd":
             if not self.amd_var.get():
-                ans = messagebox.askyesno(
-                    core.APP_NAME,
+                ans = self._modal(
+                    "yesno", core.APP_NAME,
                     "检测到 AMD 显卡（Radeon）。\n\n"
                     "本工具默认面向 NVIDIA 优化；AMD 卡需要先开启「AMD 兼容模式（实验性）」\n"
                     "并配置 ROCm 版 PyTorch 或 ZLUDA 训练环境，否则无法正常训练。\n\n"
-                    "是否现在开启 AMD 兼容模式？")
+                    "是否现在开启 AMD 兼容模式？",
+                    log="检测到 AMD 显卡，询问是否开启 AMD 兼容模式")
                 if ans:
                     self.amd_var.set(True)
                     self._log("[AMD] 已开启 AMD 兼容模式（实验性，不承诺稳定）")
@@ -6022,18 +6153,19 @@ class App:
             ok, bk, detail = core.amd_env_status(self._amd_vpy())
             if not ok:
                 self._log(f"[AMD] 环境未就绪：{detail}")
-                messagebox.showwarning(
-                    core.APP_NAME,
+                self._modal(
+                    "warning", core.APP_NAME,
                     "AMD 兼容模式：训练环境未就绪。\n\n"
                     f"检测结果：{detail}\n\n"
                     "请点击顶部「环境检查 / 安装引导」查看两条配置路线（ROCm / ZLUDA）和下载链接。")
                 return False
             self._log(f"[AMD] 兼容模式环境就绪（{bk}），可尝试训练（实验性）")
             return True
-        return messagebox.askyesno(
-            core.APP_NAME,
+        return self._modal(
+            "yesno", core.APP_NAME,
             "未检测到 NVIDIA 显卡。\n"
-            "AMD/Intel 显卡在 Windows 下没有开箱即用支持，需要自行配置 ZLUDA/ROCm，存在兼容性风险。\n\n是否继续？")
+            "AMD/Intel 显卡在 Windows 下没有开箱即用支持，需要自行配置 ZLUDA/ROCm，存在兼容性风险。\n\n是否继续？",
+            log="未检测到 NVIDIA 显卡，询问是否继续")
 
     def _warn_low_vram(self, params):
         """按架构显存建议弹窗警告（须在主线程调用）。返回 True=继续。"""
@@ -6060,11 +6192,12 @@ class App:
         vram = core.detect_vram_gb()
         if vram is None or vram >= need:
             return True
-        return messagebox.askyesno(
-            core.APP_NAME,
+        return self._modal(
+            "yesno", core.APP_NAME,
             f"当前架构：{label}\n"
             f"建议显存：{need}G 及以上；你的显卡约 {vram:.1f}G。\n\n"
-            "训练可能卡顿或显存不足（OOM），工具会自动开启省显存设置。\n是否继续？")
+            "训练可能卡顿或显存不足（OOM），工具会自动开启省显存设置。\n是否继续？",
+            log=f"显存低于建议（{vram:.1f}G < {need}G，{label}），询问是否继续")
 
     def _latest_resume_state(self, params):
         """当前项目下是否存在可续训的快照（**唯一口径**：_ask_resume 与停止提示共用）。
@@ -6099,10 +6232,11 @@ class App:
     def _ask_resume(self, params):
         state = self._latest_resume_state(params)
         if state:
-            return state if messagebox.askyesno(
-                core.APP_NAME,
+            return state if self._modal(
+                "yesno", core.APP_NAME,
                 f"发现上次中断留下的训练进度快照：\n{os.path.basename(state)}\n\n"
-                "要不要从上次断点继续训练？（选否则从头重新训练）") else None
+                "要不要从上次断点继续训练？（选否则从头重新训练）",
+                log=f"发现可续训快照 {os.path.basename(state)}，询问是否从断点继续") else None
         return None
 
     def _anima_merged_ok(self, params):
@@ -6118,13 +6252,14 @@ class App:
                 return True
         except Exception:
             return True
-        return messagebox.askyesno(
-            core.APP_NAME,
+        return self._modal(
+            "yesno", core.APP_NAME,
             "检测到合并版 Anima 底模（内含 Qwen3 文本编码器，适合推理/出图）。\n\n"
             "Anima 训练需要「纯 DiT」底模，直接用这个文件训练会报 Unexpected keys 错误。\n\n"
             "是否自动剥离 DiT 并缓存后再训练？\n"
             "（推荐；大文件首次剥离约 1~3 分钟，之后自动复用缓存）\n"
-            "选「否」将取消本次训练，请改用纯 DiT 底模（如 anima-base-v1.0）。")
+            "选「否」将取消本次训练，请改用纯 DiT 底模（如 anima-base-v1.0）。",
+            log="检测到合并版 Anima 底模，询问是否自动剥离 DiT")
 
     def _confirm_training(self, params, resume=None):
         if params.get("mode") in ("krea2", "krea2_fz", "krea2_at"):
@@ -6200,17 +6335,19 @@ class App:
             )
         if resume:
             msg += f"\n\n（将从断点续训：{os.path.basename(resume)}）"
-        return messagebox.askokcancel(core.APP_NAME, msg)
+        return self._modal("okcancel", core.APP_NAME, msg,
+                           log="请核对训练参数后点「确定」开始训练")
 
     def _handle_auto_confirm(self, params, stats, ok_n=None):
         if ok_n is None:
             ok_n = stats.get("ok", 0) + stats.get("skipped_existing", 0)
         min_n = core.MIN_IMAGES.get(params["mode"], 20)
         if ok_n < min_n:
-            messagebox.showwarning(
-                core.APP_NAME,
+            self._modal(
+                "warning", core.APP_NAME,
                 f"可用图片太少：处理后只有 {ok_n} 张（{core.MODE_LABELS.get(params['mode'])} 至少需要 {min_n} 张）。\n"
-                "请补充更多清晰、有效的图片后再试。")
+                "请补充更多清晰、有效的图片后再试。",
+                log=f"可用图片不足（仅 {ok_n} 张，最少需要 {min_n} 张）")
             self._set_busy(False)
             return
         self._log(f"[OK] 可用图片 {ok_n} 张")
@@ -6739,7 +6876,9 @@ class LabelEditorWindow:
             _title += " · 项目：" + self.project
         self.win.title(_title)
         self.win.geometry("1140x780")
-        self.win.minsize(920, 640)
+        # 最小高度 640 → 680：本版在标签框下新增了「中文对照」行，右侧面板的固定高度
+        # 变大了；640 时底部批量工具条会被压缩到 ~84%（第二行按钮有被裁的风险，实测）。
+        self.win.minsize(920, 680)
         self.win.transient(master)
         self.win.configure(fg_color=BG)
         # 每个项目独立数据集：dataset/<项目名>/train_character（不混用其他项目的数据）
@@ -6751,6 +6890,19 @@ class LabelEditorWindow:
         self._tagdict = None      # 离线中英词典（进程级共享单例，词典窗/统计共用）
         self._dict_win = None     # 中英词典窗引用（避免重复开多个）
         self._ver = 0             # 标签内容版本号（词典窗频率缓存失效用）
+        # 撤销栈（只留最近一次批量修改）：{"label": 描述, "files": {txt 路径: 原始内容}}
+        # 批量删除/替换/统计窗删除前都先快照 —— 误操作可一键还原
+        # （2026-09-15 用户反馈：老忘按 Ctrl，导致前面选择删除的标签没了）
+        self._undo = None
+        # 缩略图自适应尺寸：旧版写死 220x140，窗口拉大也不变（用户反馈「太小、下面明明有空间」）
+        self._prev_size = [420, 280]
+        self._prev_job = None     # 尺寸变化后重绘的去抖句柄
+        # 图片列表多选模式：默认关（单选）。做成**常驻可见的开关**而不是让用户记 Ctrl ——
+        # 「可见」才是"忘了按 Ctrl"的正解，而不是让用户背快捷键（范式见 gui/queue_window.py）
+        try:
+            self._multi = bool(core._load_app_settings().get("label_editor_multi", False))
+        except Exception:
+            self._multi = False
         self._build_ui()
         self.refresh()
 
@@ -6776,12 +6928,21 @@ class LabelEditorWindow:
         left = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         self.list_title = ctk.CTkLabel(left, text="图片列表（0 张）", font=ui_font(FONT_BODY), text_color=TITLE_C)
-        self.list_title.pack(anchor="w", padx=12, pady=(10, 6))
+        self.list_title.pack(anchor="w", padx=12, pady=(10, 2))
+        # 多选开关常驻显示：用户不必再记「要按 Ctrl」
+        self.multi_var = tk.BooleanVar(value=self._multi)
+        self.chk_multi = ctk.CTkCheckBox(left, text="多选模式", variable=self.multi_var,
+                                         font=ui_font(FONT_HINT), text_color=HINT,
+                                         checkbox_width=16, checkbox_height=16, border_width=1,
+                                         fg_color=ACC, hover_color=ACC_H, border_color=BORDER,
+                                         command=self._toggle_multi)
+        self.chk_multi.pack(anchor="w", padx=12, pady=(0, 6))
         lf = ctk.CTkFrame(left, fg_color="transparent")
         lf.pack(fill="both", expand=True, padx=8, pady=(0, 10))
         self.listbox = tk.Listbox(lf, bg=CARD2, fg=TXT, selectbackground=SELBAR, selectforeground="#ffffff",
                                   font=ui_font(FONT_BODY), highlightthickness=0, borderwidth=0,
-                                  activestyle="none", exportselection=False, selectmode="extended")
+                                  activestyle="none", exportselection=False,
+                                  selectmode=("extended" if self._multi else "browse"))
         self.listbox.pack(side="left", fill="both", expand=True)
         sb = ctk.CTkScrollbar(lf, command=self.listbox.yview)
         sb.pack(side="right", fill="y")
@@ -6793,9 +6954,24 @@ class LabelEditorWindow:
         right = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
         right.grid(row=0, column=1, sticky="nsew")
         ctk.CTkLabel(right, text="预览", font=ui_font(FONT_BODY), text_color=TITLE_C).pack(anchor="w", padx=12, pady=(10, 4))
-        self.preview = ctk.CTkLabel(right, text="（选中左侧图片后显示缩略图）", font=ui_font(FONT_HINT), text_color=HINT,
-                                    width=220, height=140)
-        self.preview.pack(anchor="w", padx=12)
+        # ⚠️ 缩略图必须放进一个**固定尺寸、禁止尺寸传播**的容器。
+        # 否则会形成正反馈：缩略图被 <Configure> 放大 → 撑大容器的请求尺寸 → 再次触发
+        # <Configure> → 缩略图再放大…… 一路涨到把 body 的请求高度顶爆，
+        # 底部的批量工具条就分不到 pack 空间、直接 unmapped —— 表现为"功能组件全没了"。
+        #
+        # 这里必须用**原生 tk.Frame**：CTkFrame 是复合控件，pack_propagate(False) 转发不到
+        # 内部 canvas，实测设了 1236x700 却仍然被撑到 1248x1017（2026-09-15 踩坑）。
+        self.prev_box = tk.Frame(right, width=self._prev_size[0], height=self._prev_size[1],
+                                 bg=CARD, highlightthickness=0, bd=0)
+        self.prev_box.pack(anchor="w", padx=12)
+        self.prev_box.pack_propagate(False)
+        self.preview = ctk.CTkLabel(self.prev_box, text="（选中左侧图片后显示缩略图）",
+                                    font=ui_font(FONT_HINT), text_color=HINT)
+        self.preview.pack(fill="both", expand=True)
+        # 缩略图跟着窗口大小走（旧版写死 220x140，用户把窗口拉大它纹丝不动）。
+        # ⚠️ 必须 add="+"：CTkFrame 内部用 <Configure> 维护自己的 canvas/圆角，
+        # 直接 bind 会把它顶掉，控件自身就画不出来了。CTk 控件的绑定一律要叠加。
+        self.win.bind("<Configure>", self._on_right_resize, add="+")
         self.fname_var = tk.StringVar()
         ctk.CTkLabel(right, textvariable=self.fname_var, font=ui_font(FONT_HINT), text_color=SUB, anchor="w").pack(anchor="w", padx=12, pady=(4, 0))
         ctk.CTkLabel(right, text="标签内容（可直接修改，保存后写入同名 .txt，支持多行）", font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", padx=12, pady=(10, 4))
@@ -6803,6 +6979,11 @@ class LabelEditorWindow:
                                       border_width=1, border_color=BORDER, font=ui_font(FONT_BODY), wrap="word")
         self.caption.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         self.caption.bind("<KeyRelease>", self._mark_dirty)
+        # 当前标签的中文对照（只读）。**绝不参与保存** —— .txt 里永远只有英文标签。
+        self.zh_var = tk.StringVar()
+        self.zh_label = ctk.CTkLabel(right, textvariable=self.zh_var, font=ui_font(FONT_HINT), text_color=SUB,
+                                     anchor="w", justify="left", wraplength=720)
+        self.zh_label.pack(anchor="w", fill="x", padx=12, pady=(0, 4))
         save_row = ctk.CTkFrame(right, fg_color="transparent"); save_row.pack(fill="x", padx=12, pady=(0, 10))
         self.btn_save_one = ctk.CTkButton(save_row, text="💾 保存当前标签", width=136, height=30, fg_color=CARD2,
                                           hover_color="#343a46", border_width=1, border_color=BORDER,
@@ -6854,6 +7035,10 @@ class LabelEditorWindow:
                                           hover_color="#343a46", border_width=1, border_color=BORDER, text_color=TXT,
                                           corner_radius=6, font=ui_font(FONT_HINT), command=self._do_organize)
         self.btn_organize.pack(side="left", padx=(8, 0))
+        self.btn_undo = ctk.CTkButton(r2, text="↩ 撤销上次修改", width=128, height=30, fg_color=CARD2, hover_color="#343a46",
+                                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                                      font=ui_font(FONT_HINT), state="disabled", command=self._do_undo)
+        self.btn_undo.pack(side="left", padx=(8, 0))
         self.btn_del_img = ctk.CTkButton(r2, text="🗑 删除选中图片", width=116, height=30, fg_color="#4a3535", hover_color="#5a4141",
                                          border_width=1, border_color="#5a4141", text_color="#e0b0b0", corner_radius=6,
                                          font=ui_font(FONT_HINT), command=self._do_delete_image)
@@ -6915,12 +7100,13 @@ class LabelEditorWindow:
         self.caption.delete("1.0", "end")
         self.caption.insert("1.0", it["caption"])
         self._load_preview(it["img"])
+        self._update_zh(it["caption"])
         self._dirty.discard(idx)
 
     def _load_preview(self, img_path):
         try:
             im = Image.open(img_path).convert("RGB")
-            im.thumbnail((220, 140))
+            im.thumbnail(tuple(self._prev_size))
             photo = ImageTk.PhotoImage(im)
             self._thumbs[img_path] = photo
             # 缩略图缓存上限：只保留最近 50 张，超出释放旧 PhotoImage（避免 GDI 对象累积）
@@ -6933,6 +7119,130 @@ class LabelEditorWindow:
             self.preview.configure(image=photo, text="")
         except Exception:
             self.preview.configure(image="", text="（无法预览）")
+
+    # ---------- 缩略图自适应 / 多选开关 / 中文对照 ----------
+    def _on_right_resize(self, e=None):
+        """右侧区域尺寸变化 → 重算缩略图可用尺寸（去抖，避免拖动窗口时反复解码重绘）。
+
+        ⚠️ 只调 self.prev_box（`pack_propagate(False)` 的固定尺寸容器），**不要**去改
+        self.preview 的请求尺寸 —— 那会把尺寸回流给父容器，重新点燃放大正反馈。
+        """
+        if e is None:
+            return
+        # ⚠️ 这里**只允许依赖窗口尺寸本身**，绝不去量别的控件（工具条/顶栏）的高度。
+        # 量 chrome 会立刻成环：缩略图高度 → body 的请求高度 → 工具条能否分到 pack 空间
+        # → 工具条高度 → chrome → 缩略图高度…… 实测 40 轮 update 里回调被触发 566 次
+        # （死循环），布局整体崩坏、底部工具条 unmapped —— 用户看到的就是「功能组件全没了」。
+        #
+        # ⚠️ 预留量也不能写死物理像素：winfo_* 返回的是**物理像素**，而窗口 geometry 用的是
+        # 逻辑像素（本机 150% 缩放，1140x780 实际 1710x1170）。所以用 ScalingTracker 把
+        # 「逻辑预留」折算成物理预留。
+        ww = max(400, int(self.win.winfo_width()))
+        wh = max(400, int(self.win.winfo_height()))
+        try:
+            _sc = float(ctk.ScalingTracker.get_widget_scaling(self.win)) or 1.0
+        except Exception:
+            _sc = 1.0
+        # 除缩略图外必须占用的高度（本机实测 @150%：顶栏 42 + 底部工具条 177 +
+        # 右侧固定件 591 + 间距 ≈ 848 物理像素）。预留 590 逻辑像素覆盖它并留余量，
+        # 保证底部工具条在任何窗口尺寸下都分得到 pack 空间。
+        w = max(220, int(ww * 0.55))
+        h = max(120, wh - int(590 * _sc))
+        if abs(w - self._prev_size[0]) < 24 and abs(h - self._prev_size[1]) < 24:
+            return
+        self._prev_size = [w, h]
+        try:
+            self.prev_box.configure(width=w, height=h)
+        except Exception:
+            pass
+        if self._prev_job:
+            try:
+                self.win.after_cancel(self._prev_job)
+            except Exception:
+                pass
+        self._prev_job = self.win.after(220, self._refresh_preview)
+
+    def _refresh_preview(self):
+        self._prev_job = None
+        if self._current is not None and 0 <= self._current < len(self.records):
+            self._load_preview(self.records[self._current]["img"])
+
+    def _toggle_multi(self):
+        """切换图片列表的单选/多选。开关常驻可见 —— 看得见就不会忘按 Ctrl。"""
+        self._multi = bool(self.multi_var.get())
+        try:
+            self.listbox.configure(selectmode=("extended" if self._multi else "browse"))
+        except Exception:
+            pass
+        try:
+            _s = core._load_app_settings()
+            _s["label_editor_multi"] = self._multi
+            core._save_app_settings(_s)
+        except Exception:
+            pass
+        self._set_status("多选模式已开启" if self._multi else "多选模式已关闭")
+
+    def _update_zh(self, text=None):
+        """刷新「中文对照」行（**只读**，绝不写回 .txt）。
+
+        只显示词典里确实有的词条；整段一个都没命中就清空这一行 —— 这样自然语言
+        caption（Krea2/FLUX.2 的长句）拆出来只有一段且查不到词条，会自动不显示，
+        不会甩一句半吊子机翻误导用户。
+        """
+        if text is None:
+            try:
+                text = self.caption.get("1.0", "end")
+            except Exception:
+                text = ""
+        shown = []
+        try:
+            d = self.get_tagdict()
+            if d:
+                for t in [p.strip() for p in re.split(r"[,，]", text or "") if p.strip()]:
+                    zh = d.to_zh(t)
+                    if zh and zh != t:
+                        shown.append(f"{t} / {zh}")
+        except Exception:
+            shown = []
+        if shown:
+            self.zh_var.set("中文对照：" + "　".join(shown[:12]) + ("…" if len(shown) > 12 else ""))
+        else:
+            self.zh_var.set("")
+
+    # ---------- 撤销 ----------
+    def _push_undo(self, label, snapshot):
+        """记录一次可撤销的批量修改（只保留最近一次：够用，且实现简单、状态不易错）。"""
+        if not snapshot:
+            return
+        self._undo = {"label": label, "files": dict(snapshot)}
+        try:
+            self.btn_undo.configure(state="normal")
+        except Exception:
+            pass
+
+    def _do_undo(self):
+        if not self._undo:
+            messagebox.showinfo("撤销", "没有可撤销的批量修改。")
+            return
+        _u = self._undo
+        n = len(_u["files"])
+        if not messagebox.askyesno("撤销", f"把 {n} 个标签文件还原到上一次批量修改之前？\n\n（{_u['label']}）"):
+            return
+        self._begin_batch("正在撤销上次批量修改…")
+        try:
+            ok = core.restore_captions(_u["files"], logf=self._log_app)
+            msg = f"已撤销「{_u['label']}」：还原 {ok}/{n} 个文件。"
+            self._set_status(msg)
+            self._log_app("[标签] " + msg)
+            self._undo = None
+            try:
+                self.btn_undo.configure(state="disabled")
+            except Exception:
+                pass
+        except Exception as e:
+            messagebox.showerror("撤销失败", str(e))
+        finally:
+            self._end_batch()
 
     def _mark_dirty(self, _e=None):
         if self._current is not None:
@@ -6949,6 +7259,7 @@ class LabelEditorWindow:
             it["caption"] = text
             self._ver = getattr(self, "_ver", 0) + 1
             self._dirty.discard(self._current)
+            self._update_zh(text)
             if not quiet:
                 self._set_status(f"已保存: {os.path.basename(it['txt'])}")
             self._log_app(f"[标签] 已保存 {it['txt']}")
@@ -6956,13 +7267,13 @@ class LabelEditorWindow:
             messagebox.showerror("保存失败", f"写入失败：{e}")
 
     def _do_delete_image(self):
-        """删除选中的一张或多张图片（左侧可 Ctrl/Shift 多选），连同同名 txt/npz。"""
+        """删除选中的一张或多张图片（多选需先勾「多选模式」），连同同名 txt/npz。"""
         try:
             sel = [int(i) for i in self.listbox.curselection() if 0 <= int(i) < len(self.records)]
         except Exception:
             sel = []
         if not sel:
-            messagebox.showinfo("删除图片", "请先在左侧选中要删除的图片（可 Ctrl/Shift 多选）。")
+            messagebox.showinfo("删除图片", "请先在左侧选中要删除的图片。")
             return
         names = []
         for i in sel:
@@ -7009,13 +7320,40 @@ class LabelEditorWindow:
         return removed
 
     def _do_remove(self):
+        """批量删除标签：**先预演再确认**，并留下可撤销快照。
+
+        原先这里直接覆写全部 .txt、一次确认都没有。用户反馈「老忘按 Ctrl，把前面选择
+        删除的标签也删了」—— 而删除不可逆，所以补两道闸：
+          ① 干跑一遍，算出「将影响多少张图 / 移除多少个标签」再让用户确认；
+          ② 动手前快照原文，误操作可一键撤销。
+        """
         tags = self.del_entry.get().strip()
         if not tags:
             messagebox.showinfo("批量删除标签", "请先输入要删除的标签（逗号分隔）。")
             return
+        # ① 干跑：不写盘，先看代价
+        try:
+            _f, _n = core.batch_remove_tags(self.train_dir, tags, logf=lambda _s: None, dry_run=True)
+        except Exception as e:
+            messagebox.showerror("批量删除失败", str(e))
+            return
+        if not _f:
+            messagebox.showinfo("批量删除标签",
+                                f"没有找到匹配的标签：{tags}\n\n（精确匹配、不删子串，未改动任何文件）")
+            return
+        if not messagebox.askyesno(
+                "批量删除标签",
+                f"将从【全部 {_f} 张图】中移除这些标签：\n\n{tags}\n\n"
+                f"共移除 {_n} 个标签，直接覆写同名 .txt。\n"
+                f"（删完可用工具条上的「↩ 撤销上次修改」还原）\n\n是否继续？"):
+            return
+        # ② 动手前快照
+        snapshot = {}
         self._begin_batch("正在批量删除标签…（批量操作会覆盖未保存的手动修改）")
         try:
-            files, removed = core.batch_remove_tags(self.train_dir, tags, logf=self._log_app)
+            files, removed = core.batch_remove_tags(self.train_dir, tags, logf=self._log_app,
+                                                    snapshot=snapshot)
+            self._push_undo("批量删除标签：" + tags, snapshot)
             msg = f"批量删除完成：修改 {files} 个文件，删除 {removed} 个标签。"
             self._set_status(msg)
             self._log_app("[标签] " + msg)
@@ -7025,14 +7363,32 @@ class LabelEditorWindow:
             self._end_batch()
 
     def _do_replace(self):
+        """批量替换：同样先预演再确认 + 可撤销（替换留空即等于删除，风险同级）。"""
         find = self.rep_find.get().strip()
         if not find:
             messagebox.showinfo("批量替换", "请先输入要替换的原标签。")
             return
         to = self.rep_to.get().strip()
+        try:
+            _f = core.batch_replace_tags(self.train_dir, find, to, logf=lambda _s: None, dry_run=True)
+        except Exception as e:
+            messagebox.showerror("批量替换失败", str(e))
+            return
+        if not _f:
+            messagebox.showinfo("批量替换", f"没有找到标签「{find}」（精确匹配，未改动任何文件）")
+            return
+        if not messagebox.askyesno(
+                "批量替换",
+                f"将把【全部 {_f} 张图】里的标签「{find}」\n"
+                f"替换为「{to or '（空 = 删除该标签）'}」，直接覆写同名 .txt。\n"
+                f"（完成后可用「↩ 撤销上次修改」还原）\n\n是否继续？"):
+            return
+        snapshot = {}
         self._begin_batch("正在批量替换标签…（批量操作会覆盖未保存的手动修改）")
         try:
-            files = core.batch_replace_tags(self.train_dir, find, to, logf=self._log_app)
+            files = core.batch_replace_tags(self.train_dir, find, to, logf=self._log_app,
+                                            snapshot=snapshot)
+            self._push_undo(f"批量替换：{find} → {to or '（删除）'}", snapshot)
             msg = f"批量替换完成：修改 {files} 个文件（{find} → {to or '（删除）'}）。"
             self._set_status(msg)
             self._log_app("[标签] " + msg)
@@ -7092,7 +7448,7 @@ class LabelEditorWindow:
         w.transient(self.win)
         w.configure(fg_color=BG)
         top = ctk.CTkFrame(w, fg_color="transparent"); top.pack(fill="x", padx=16, pady=(14, 6))
-        ctk.CTkLabel(top, text="标签出现频率（Ctrl/Shift 多选 → 删除选中，从全部图片移除）",
+        ctk.CTkLabel(top, text="标签出现频率（出现次数 / 中文）",
                      font=ui_font(FONT_BODY), text_color=TITLE_C).pack(side="left")
         ctk.CTkButton(top, text="🗑 删除选中标签", width=132, height=28, fg_color="#4a3535", hover_color="#5a4141",
                       border_width=1, border_color="#5a4141", text_color="#e0b0b0", corner_radius=6,
@@ -7107,6 +7463,33 @@ class LabelEditorWindow:
         lb.configure(yscrollcommand=sb.set)
         w._lb = lb
         w._tags = []
+        # 多选开关（与图片列表共用同一个偏好）。用户反馈「有时候多选标签，忘记按 Ctrl 了，
+        # 导致前面选择删除的标签没了」—— 让模式**可见**，比让用户记住快捷键可靠。
+        _mv = tk.BooleanVar(value=self._multi)
+
+        def _apply_multi():
+            self._multi = bool(_mv.get())
+            try:
+                lb.configure(selectmode=("extended" if self._multi else "browse"))
+            except Exception:
+                pass
+            try:
+                self.multi_var.set(self._multi)     # 与主窗口开关保持一致
+            except Exception:
+                pass
+            try:
+                _s = core._load_app_settings()
+                _s["label_editor_multi"] = self._multi
+                core._save_app_settings(_s)
+            except Exception:
+                pass
+            self._set_status("多选模式已开启" if self._multi else "多选模式已关闭")
+
+        ctk.CTkCheckBox(top, text="多选模式", variable=_mv,
+                        font=ui_font(FONT_HINT), text_color=HINT,
+                        checkbox_width=16, checkbox_height=16, border_width=1,
+                        fg_color=ACC, hover_color=ACC_H, border_color=BORDER,
+                        command=_apply_multi).pack(side="left", padx=(14, 0))
         _zd = self.get_tagdict()
         for tag, cnt in stats:
             zh = _zd.to_zh(tag) if _zd else None
@@ -7123,20 +7506,23 @@ class LabelEditorWindow:
         except Exception:
             tags = []
         if not tags:
-            messagebox.showinfo("标签统计", "请先选中要删除的标签（可 Ctrl/Shift 多选）。")
+            messagebox.showinfo("标签统计", "请先选中要删除的标签。")
             return
         shown = "、".join(tags[:10]) + ("…" if len(tags) > 10 else "")
         if not messagebox.askyesno("删除标签",
                 f"确定从全部图片中删除选中的 {len(tags)} 个标签吗？\n\n{shown}"):
             return
         total_files = total_removed = 0
+        snapshot = {}
         for tag in tags:
             try:
-                files, removed = core.batch_remove_tags(self.train_dir, tag, logf=self._log_app)
+                files, removed = core.batch_remove_tags(self.train_dir, tag, logf=self._log_app,
+                                                        snapshot=snapshot)
                 total_files += int(files or 0)
                 total_removed += int(removed or 0)
             except Exception as e:
                 self._log_app(f"[标签] 删除「{tag}」失败：{e}")
+        self._push_undo("统计窗删除标签：" + "、".join(tags[:6]), snapshot)
         self._log_app(f"[标签] 统计窗批量删除 {len(tags)} 个标签：涉及 {total_files} 个文件，移除 {total_removed} 个词")
         try:
             win.destroy()
@@ -7163,7 +7549,7 @@ class LabelEditorWindow:
     def _begin_batch(self, status):
         self._dirty.clear()
         self._set_status(status)
-        for b in (self.btn_del, self.btn_rep, self.btn_pin, self.btn_stats, self.btn_dict, self.btn_organize, self.btn_del_img, self.btn_save_one):
+        for b in (self.btn_del, self.btn_rep, self.btn_pin, self.btn_stats, self.btn_dict, self.btn_organize, self.btn_del_img, self.btn_save_one, self.btn_undo):
             try:
                 b.configure(state="disabled")
             except Exception:
@@ -7176,6 +7562,11 @@ class LabelEditorWindow:
                 b.configure(state="normal")
             except Exception:
                 pass
+        # 撤销按钮单独处理：只有真的留有快照时才放开（否则会变成"能点但没东西可撤"）
+        try:
+            self.btn_undo.configure(state=("normal" if self._undo else "disabled"))
+        except Exception:
+            pass
         self.refresh()
 
     def _set_status(self, text):

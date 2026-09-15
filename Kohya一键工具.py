@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.16.10"
+APP_VERSION = "0.16.11"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4414,6 +4414,34 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
     return ([], swap, "动态 fp8 + blocks_to_swap=%d" % swap)
 
 
+def _fizgig_preview_swap(vram_gb):
+    """Fizgig 训练中「采样预览」的 Turbo 该分块换出多少（0=不分块，整模型常驻显存）。
+
+    为什么必须单独给预览设一个：预览用的是**第二个模型**（fp8 Turbo，turbo.safetensors 约 13GB），
+    它和训练中常驻的 int8 底模**叠加**。不设 block swap 时整个常驻显存 ——
+    16G 档的卡（实测 15.67G）直接爆预算，之后 1~2 个 epoch 明显降速。
+
+    2026-09-15 用户实测（4080 SUPER 15.67G，Krea2 512px，每 2 epoch 预览一次）：
+      引擎自报每 epoch 步速：2.02 / 2.18 → **12.74 / 9.95 / 7.56** → 3.55 / 2.49 / 2.63 → …
+      全程平均 6.22 s/it，而**没预览过的前两个 epoch 只有 2.0 s/it**；
+      单次预览直接耗时 107 / 68 / 55 / 45 / 48 / 44 秒（其中约 74s 是重新加载+量化 Turbo）。
+      → 预览本身只占约 7% 的总时间，**超过一半的额外耗时来自它把显存压爆之后的换页**。
+
+    引擎侧本来就为小显存卡设计了这个组合（`sample_previews` 注释）：
+      blocks_to_swap>0 → 以 CPU 为加载设备 + forward-only 分块换入；`--preview_int8` 的量化
+      也刻意放在 CPU 上做（"so a swapped (CPU-loaded) model doesn't need the whole int8 model
+      resident on GPU"）。参数名：`--preview_blocks_to_swap`（CLI 默认 0）。
+    """
+    tier = round(vram_gb) if vram_gb is not None else None
+    if tier is None or tier >= 24:
+        return 0
+    if tier >= 18:
+        return 12
+    if tier >= 12:
+        return 20
+    return 26
+
+
 def _fizgig_klein_quant_swap(vram_gb, requested, dit_prequant=True, backend=None):
     """Fizgig Klein 9B 量化档 + blocks_to_swap。
 
@@ -4620,9 +4648,21 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
                 if vram_gb is not None and vram_gb <= 16.5:
                     _s_res = min(_s_res, 512)
                     cmd += ["--preview_int8"]
-                    logf("[Krea2(Fizgig)] ⚠ 16G 档开采样预览：预览分辨率已压到 512 + int8（Fizgig 预览失败会自动停用、不影响训练）；想更稳可取消勾选「训练中采样预览」")
+                # 预览模型分块换出：不设时整个 fp8 Turbo（~13GB）会常驻显存，与训练侧常驻的
+                # int8 底模叠加，把 16G 档的卡压爆 → 之后 1~2 个 epoch 从 2 s/it 掉到 12.7 s/it。
+                # 引擎支持 int8 + block swap 组合（量化刻意放在 CPU 上做，见 _fizgig_preview_swap）。
+                _pv_swap = _fizgig_preview_swap(vram_gb)
+                if _pv_swap:
+                    cmd += ["--preview_blocks_to_swap", str(_pv_swap)]
                 cmd += ["--sample_width", str(_s_res), "--sample_height", str(_s_res)]
                 logf(f"[Krea2(Fizgig)] 采样预览：每 {_s_ep} epoch（约每 {_s_ep * _per_ep} 步）用 Turbo + 当前 LoRA 出一张预览图 → {os.path.join(out_dir, 'sample')}")
+                if _pv_swap:
+                    logf(f"[Krea2(Fizgig)] 预览模型已分块换出 {_pv_swap} 块（--preview_blocks_to_swap）"
+                         f"，预览分辨率 {_s_res}{'、int8 快速矩阵乘' if (vram_gb is not None and vram_gb <= 16.5) else ''}："
+                         "避免 Turbo 整模型（~13GB）常驻显存拖慢训练 —— 预览单张会略慢，但训练全程不降速。")
+                else:
+                    logf("[Krea2(Fizgig)] ⚠ 采样预览需额外常驻一个 ~13GB Turbo 模型，可能拖慢训练；"
+                         "显存紧张时建议取消勾选「训练中采样预览」。")
     # 首次运行提示：AMD 需加载/量化 26GB 底模并编译内核，LoRA 创建后到首个步数可能几分钟无输出
     logf("[Krea2(Fizgig)] 提示：首次运行需加载并量化 26GB 底模、编译内核，前几分钟可能无步数输出，属正常现象，请耐心等待。")
     logf(f"[Krea2(Fizgig)] 底模(RAW): {files['raw']}")
@@ -8389,10 +8429,47 @@ def _split_tags(caption):
     return [p.strip() for p in re.split(r"[,，]", caption or "") if p.strip()]
 
 
-def batch_remove_tags(train_dir, tags, logf=print):
+def _read_caption_raw(txt_path):
+    """原样读取 caption 文件内容（**含原有换行/空白**，撤销用）。失败返回 None。
+
+    撤销必须用原始内容而不是重新拼装的标签串 —— save_caption 会 strip + 补换行。
+
+    ⚠️ 必须 `newline=""`：默认的通用换行处理会把 CRLF 归一成 LF，读的时候丢掉 \r，
+    写回时就变成 LF —— 换行符被改写，就不是字节级还原了。而 save_caption 在 Windows
+    上写的正是 CRLF（默认 newline 会做转换），所以这里一旦归一，撤销会悄悄改掉全部行尾。
+    """
+    try:
+        with open(txt_path, "r", encoding="utf-8", newline="") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def restore_captions(snapshot, logf=print):
+    """把快照 {txt 路径: 原内容} 写回，用于撤销上一次批量操作。返回恢复的文件数。"""
+    n = 0
+    for txt, raw in dict(snapshot or {}).items():
+        if raw is None:
+            continue
+        try:
+            with open(txt, "w", encoding="utf-8", newline="") as f:
+                f.write(raw)
+            n += 1
+        except Exception as e:
+            logf(f"[标签] 撤销写入失败 {txt}: {e}")
+    return n
+
+
+def batch_remove_tags(train_dir, tags, logf=print, dry_run=False, snapshot=None):
     """从全部标签中删除指定标签（支持逗号分隔多个；精确匹配、忽略大小写）。
 
     返回 (处理文件数, 删除标签个数)。
+
+    - dry_run=True：只统计「将影响多少文件 / 将移除多少标签」，**绝不写盘**。
+      供界面在动手前给出确认（2026-09-15 用户反馈：批量删除一次确认都没有，
+      忘记按 Ctrl 误操作就直接覆写了标签）。
+    - snapshot：传入 dict 时，把每个将被改写 txt 的原始内容记进去，供撤销还原。
+      只登记真正会变动的文件，所以通常很小（纯文本）。
     """
     tag_list = [t.strip() for t in re.split(r"[,，]", tags or "") if t.strip()]
     if not tag_list:
@@ -8406,6 +8483,12 @@ def batch_remove_tags(train_dir, tags, logf=print):
         parts = _split_tags(item["caption"])
         kept = [p for p in parts if p.lower() not in low_tags]
         if len(kept) != len(parts):
+            if dry_run:
+                files += 1
+                removed += len(parts) - len(kept)
+                continue
+            if snapshot is not None and txt not in snapshot:
+                snapshot[txt] = _read_caption_raw(txt)
             try:
                 save_caption(txt, ", ".join(kept))
                 files += 1
@@ -8415,10 +8498,11 @@ def batch_remove_tags(train_dir, tags, logf=print):
     return files, removed
 
 
-def batch_replace_tags(train_dir, find, replace, logf=print):
+def batch_replace_tags(train_dir, find, replace, logf=print, dry_run=False, snapshot=None):
     """把全部标签中「精确等于 find」的标签替换为 replace（不替换子串，避免误伤）。
 
-    返回处理文件数。
+    返回处理文件数。dry_run / snapshot 语义同 batch_remove_tags
+    （替换同样是不可逆覆盖 —— replace 留空等于「删除该标签」，所以也要能预演和撤销）。
     """
     find = (find or "").strip()
     if not find:
@@ -8432,6 +8516,11 @@ def batch_replace_tags(train_dir, find, replace, logf=print):
         parts = _split_tags(item["caption"])
         new_parts = [replace if p == find else p for p in parts]
         if new_parts != parts:
+            if dry_run:
+                files += 1
+                continue
+            if snapshot is not None and txt not in snapshot:
+                snapshot[txt] = _read_caption_raw(txt)
             try:
                 save_caption(txt, ", ".join(new_parts))
                 files += 1
@@ -9579,20 +9668,59 @@ def _fizgig_sample_epochs(params, per_epoch, epochs):
     return min(max(1, int(round(100.0 / _per))), _eps)
 
 
+# Fizgig v5.0.0 采样失败时引擎自己打印的那一句（逐字，trainer.py 两个采样调用点共用）：
+#   [preview] epoch N preview failed (...) — disabling previews for the rest of the run.
+_FIZGIG_SAMPLE_OFF_MARK = "disabling previews for the rest of the run"
+# 旧引擎（采样循环无 try/except）会把原始异常串留在日志里；保留兼容，别删。
 _FIZGIG_SAMPLE_ERR_MARK = "unsupported operand type(s) for *"
 
 
 def _warn_fizgig_sample_failure(log_text, logf=print):
-    """采样失败会污染训练状态，而训练仍以退出码 0 收尾 —— 必须显式告警。
+    """采样预览失败 / 被引擎自动关闭时，给用户一句能看懂的说明。返回是否命中。
 
-    Fizgig 的采样循环没有 try/except（trainer.py:1581），异常抛出后会跳过
-    switch_block_swap_for_training()，模型留在「推理态块交换」→ 训练每步全量换块。
-    实测 1.78s/it → 8s/it（GitHub issue #6）。训练照样跑完，只能靠扫日志提醒。
+    ⚠️ 2026-09-15 更正（逐字核对 Fizgig v5.0.0 源码，魔搭镜像与 GitHub v5.0.0 的
+    trainer.py sha256 完全一致）：
+
+    这里原先是这么写的 ——「采样循环没有 try/except（trainer.py:1581），异常抛出后会跳过
+    switch_block_swap_for_training()，模型留在推理态块交换 → 训练每步全量换块，
+    实测 1.78s/it → 8s/it」。**该机制在 v5.0.0 已不存在**：
+
+      · 两个采样调用点（epoch-0 的 Sample at Start、以及每个 epoch）都包在
+        try/except/finally 里；finally 会 `gc.collect()` + `torch.cuda.empty_cache()`，
+        并在 `blocks_to_swap > 0` 时执行 `move_to_device_except_swap_blocks()` +
+        `switch_block_swap_for_training()`，把训练 DiT 还原回训练态；
+      · 且 except 里会置 `do_previews = False` —— **一次失败后，本轮后续 epoch 不再出预览图**；
+      · 那条注释引用的 `trainer.py:1581`，在 v5.0.0 里是 `train_krea2()` 的签名参数注释
+        （`slider_pairs`），行号早已失效（该文件现有 3800+ 行）。
+
+    因此有两点连带后果：
+      1. 旧文案说的「速度被明显拖慢」不再成立（状态会还原）；
+      2. 旧触发条件也失效了 —— 引擎 except 只打印**异常类型名**、不打完整异常消息，
+         所以 `unsupported operand type(s) for *` 这个 mark 根本不会进日志。
+         真正该匹配的是引擎那句 `disabling previews for the rest of the run`。
+
+    现在真正需要告诉用户的是：**预览出错了，引擎已自动关掉后续预览** ——
+    训练与权重保存不受影响，但后面看不到出图了。这才是用户会困惑的点
+    （勾了预览、跑着跑着预览没了，日志里却只有一行英文。
+      2026-09-15 第二个用户报告「速度越跑越慢」时就在排查这个问题）。
     """
-    if not log_text or _FIZGIG_SAMPLE_ERR_MARK not in log_text:
-        return
-    logf("[Fizgig] ⚠ 采样预览出错了（CFG scale 缺失），训练虽已跑完，但块交换没还原、速度被明显拖慢。")
-    logf("[Fizgig]   本轮权重仍可用；下一轮建议取消勾选「训练中采样预览」，或升级到已修复该问题的版本。")
+    if not log_text:
+        return False
+    if _FIZGIG_SAMPLE_OFF_MARK not in log_text and _FIZGIG_SAMPLE_ERR_MARK not in log_text:
+        return False
+    # 尽力取出失败发生的 epoch，让用户知道「从第几个 epoch 起没有预览了」
+    _ep = ""
+    _m = re.search(r"\[preview\] epoch (\d+) preview failed", log_text)
+    if _m:
+        _ep = _m.group(1)
+    logf("[Fizgig] ⚠ %s，引擎已自动关闭本轮后续预览 —— 之后的 epoch 不会再出预览图。"
+         % (("第 %s 个 epoch 的采样预览失败" % _ep) if _ep else "采样预览失败"))
+    logf("[Fizgig]   影响范围：只影响预览图。训练本身与 LoRA 保存都正常，本轮权重可用。")
+    logf("[Fizgig]   最常见原因：显存不够 —— 预览要额外加载一个约 13GB 的 Turbo 模型"
+         "（本版本已自动做分块换出，仍失败多半是训练分辨率偏高或桌面程序占用过多）。")
+    logf("[Fizgig]   想继续看到预览：① 训练前关掉占显存的桌面程序（浏览器/动态壁纸/QQ 微信等）；"
+         "② 或降低训练分辨率；③ 或改为训练结束后单独出图。")
+    return True
 
 
 def _write_sample_prompts(output_name, params, mode, resolution=None, engine="kohya", train_dir=None,

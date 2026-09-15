@@ -13,6 +13,8 @@ __all__ = [
     "_settings_path", "save_data_setting",
     "dataset_train_dir", "projects_dir", "_project_path", "list_projects",
     "load_project", "save_project", "delete_project", "default_project_name",
+    "project_data_dir", "project_output_dir", "dir_stats", "delete_project_data",
+    "find_orphan_project_dirs", "delete_orphan_project_dirs",
 ]
 
 def get_kohya_dir():
@@ -224,6 +226,133 @@ def delete_project(name):
     except Exception:
         pass
     return False
+
+def project_data_dir(name):
+    """项目的图集目录（预处理后的图片 + 打标文件 + 各引擎缓存）。
+
+    范围就是 data/dataset/<项目名>/ —— 底下装 train / train_character（图片与 .txt 打标）
+    以及 krea2_cache / flux2_cache / fizgig_cache / fizgig_klein_cache 等派生产物。
+    项目改名时 GUI 会整体 rename 这个目录（kohya_gui.cmd_rename_project），
+    可见它就是「一个项目的数据边界」，删除项目时理应一并处理。
+    """
+    proj = _sanitize_dirname(name)
+    return os.path.join(data_dir(), "dataset", proj) if proj else ""
+
+
+def project_output_dir(name):
+    """项目的训练产物目录（LoRA 成品 / 采样图 / 训练日志）。
+
+    ⚠️ **有意不随项目删除** —— 里面是用户训练出来的模型成品，删项目不等于不要模型。
+    （也是删除确认框里一直写「训练产物仍在 output 文件夹」的原因。）
+    """
+    proj = _sanitize_dirname(name)
+    return os.path.join(data_dir(), "output", proj) if proj else ""
+
+
+def dir_stats(d):
+    """目录的 (文件数, 总字节)；不存在或读不到返回 (0, 0)。"""
+    n = 0
+    total = 0
+    if not d or not os.path.isdir(d):
+        return 0, 0
+    try:
+        for root, _dirs, files in os.walk(d):
+            for f in files:
+                n += 1
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return n, total
+
+
+def delete_project_data(name):
+    """删除项目的图集目录（预处理图片 + 打标文件 + 引擎缓存）。
+
+    返回 (ok, 文件数, 字节数)：n/bytes 是删除前测得的量，供调用方报「释放了多少」。
+    **不含** output/<项目名> 的训练产物（见 project_output_dir），由调用方决定。
+
+    背景（2026-09-15 用户反馈）：delete_project() 只删 projects/<名>.json，
+    图集目录原封不动 —— 项目一旦删除，这批数据再没有任何界面入口，
+    却一直占着磁盘（一个项目的预处理图集常有几百 MB 到数 GB）。
+    """
+    d = project_data_dir(name)
+    if not d or not os.path.isdir(d):
+        return True, 0, 0
+    # 保险丝：只允许删 data/dataset/<单层>/ —— 项目名经 _sanitize_dirname 已去掉路径分隔符，
+    # 这里再校验一次父目录，避免任何异常输入把 rmtree 指到 dataset 或数据根上。
+    if os.path.basename(os.path.dirname(os.path.abspath(d))) != "dataset":
+        return False, 0, 0
+    n, size = dir_stats(d)
+    import shutil
+    try:
+        shutil.rmtree(d)
+        return True, n, size
+    except Exception:
+        return False, n, size
+
+
+# 旧版共享数据集目录（不属于任何项目）：dataset_train_dir() 在 project 为空时就写这里，
+# 清理「无主数据」时必须排除，否则会把「没开项目」模式的数据一起删掉。
+_LEGACY_SHARED_DATASET_DIRS = ("train", "train_character")
+
+
+def find_orphan_project_dirs():
+    """找出没有对应项目文件的图集目录 —— 即删除项目时遗漏、之后无人认领的孤儿数据。
+
+    返回 [(名称, 路径, 文件数, 字节数), ...]，按占用从大到小（大的先清，收益最直观）。
+
+    判定方式：目录名（= 项目名，list_projects 用项目名存 json）在 projects/ 里找不到同名
+    .json。已知的误判边界：项目名含路径非法字符时 json 名与目录名同为原始名，仍然一致；
+    真正需要排除的是旧版共享目录（见上）。
+    """
+    root = os.path.join(data_dir(), "dataset")
+    if not os.path.isdir(root):
+        return []
+    known = set()
+    try:
+        for fn in os.listdir(projects_dir()):
+            if fn.lower().endswith(".json"):
+                known.add(os.path.splitext(fn)[0])
+    except Exception:
+        pass
+    out = []
+    try:
+        for name in os.listdir(root):
+            if name in _LEGACY_SHARED_DATASET_DIRS or name.startswith("."):
+                continue
+            p = os.path.join(root, name)
+            if not os.path.isdir(p) or name in known:
+                continue
+            n, b = dir_stats(p)
+            out.append((name, p, n, b))
+    except Exception:
+        pass
+    out.sort(key=lambda x: x[3], reverse=True)
+    return out
+
+
+def delete_orphan_project_dirs():
+    """删除全部无主图集目录。返回 (成功项数, 文件数, 字节数, 失败项名称列表)。
+
+    每次调用都重新扫一遍（而不是复用调用方手里的旧列表）—— 避免用户看到确认框之后
+    又新建了同名项目，把新数据误删。
+    """
+    import shutil
+    ok_n = files = size = 0
+    failed = []
+    for name, p, n, b in find_orphan_project_dirs():
+        try:
+            shutil.rmtree(p)
+            ok_n += 1
+            files += n
+            size += b
+        except Exception:
+            failed.append(name)
+    return ok_n, files, size, failed
+
 
 def default_project_name():
     """生成默认项目名：项目_MMDD_HHMM。"""

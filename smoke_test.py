@@ -391,6 +391,190 @@ def test_lora_naming():
     assert os.path.isfile(os.path.join(d, "krea2_lora-000008.safetensors"))  # 原文件保留（续训/已完成检测仍认它）
 
 
+def test_project_data_cleanup():
+    """删除项目要能一并清掉图集数据（含打标文件），并能清理已经遗留的孤儿数据。
+
+    2026-09-15 用户反馈：删了项目，打标好的文件还留在磁盘上一直占空间。
+    根因：delete_project() 只删 projects/<名>.json，data/dataset/<项目名>/
+    （预处理图片 + .txt 打标 + 各引擎缓存）原样留下 —— 而项目一删，
+    这批数据再没有任何界面入口能找到它。
+    """
+    import tempfile
+    import shutil
+    import Kohya一键工具 as core
+    from kohya_core import paths as _P
+
+    tmp = tempfile.mkdtemp()
+    _real_data_dir = _P.data_dir
+    # ⚠️ 必须改 kohya_core.paths 里的引用：data_sub/projects_dir 等查的是
+    # 本模块 globals，改 Kohya一键工具.data_dir 对它们无效（会写进真实数据目录）。
+    _P.data_dir = lambda: tmp
+    try:
+        core.save_project("测试项目", {"name": "测试项目", "mode": "style"})
+        ds = core.project_data_dir("测试项目")
+        os.makedirs(os.path.join(ds, "train_character"), exist_ok=True)
+        for i in range(3):
+            open(os.path.join(ds, "train_character", "a%d.png" % i), "wb").write(b"x" * 100)
+            open(os.path.join(ds, "train_character", "a%d.txt" % i), "w", encoding="utf-8").write("1girl")
+        os.makedirs(os.path.join(ds, "krea2_cache"), exist_ok=True)
+        open(os.path.join(ds, "krea2_cache", "c.bin"), "wb").write(b"y" * 50)
+        assert core.dir_stats(ds) == (7, 365), core.dir_stats(ds)
+
+        # 复现原问题：删项目后图集数据仍在（既有行为，正是用户踩到的）
+        core.delete_project("测试项目")
+        assert os.path.isdir(ds), "前置条件不符：删项目后图集数据应仍在"
+
+        # 新函数：清图集数据；output 训练产物不归它管，必须原样保留
+        out_d = core.project_output_dir("测试项目")
+        os.makedirs(out_d, exist_ok=True)
+        open(os.path.join(out_d, "成品.safetensors"), "wb").write(b"z")
+        ok, n, b = core.delete_project_data("测试项目")
+        assert ok and (n, b) == (7, 365), (ok, n, b)
+        assert not os.path.isdir(ds), "图集数据未删净"
+        assert os.path.isdir(out_d), "delete_project_data 不该动训练产物目录"
+        assert core.delete_project_data("测试项目")[0] is True, "重复删除应幂等"
+        assert core.delete_project_data("")[0] is True, "空项目名必须安全返回"
+
+        # ---- 孤儿（已删项目遗留）检测 ----
+        os.makedirs(os.path.join(tmp, "dataset", "train_character"), exist_ok=True)   # 旧版共享目录
+        os.makedirs(os.path.join(tmp, "dataset", "已删项目", "train"), exist_ok=True)
+        open(os.path.join(tmp, "dataset", "已删项目", "train", "x.txt"), "w", encoding="utf-8").write("t")
+        core.save_project("活项目", {"name": "活项目"})
+        os.makedirs(os.path.join(tmp, "dataset", "活项目", "train_character"), exist_ok=True)
+        names = [x[0] for x in core.find_orphan_project_dirs()]
+        assert "已删项目" in names, names
+        assert "活项目" not in names, "有对应项目的目录被误判成孤儿：%s" % names
+        assert "train_character" not in names, "旧版共享目录被误判成孤儿：%s" % names
+
+        ok_n, files, size, failed = core.delete_orphan_project_dirs()
+        assert (ok_n, files, size, failed) == (1, 1, 1, []), (ok_n, files, size, failed)
+        assert not os.path.isdir(os.path.join(tmp, "dataset", "已删项目"))
+        assert os.path.isdir(os.path.join(tmp, "dataset", "活项目")), "误删了活项目的数据"
+        assert os.path.isdir(os.path.join(tmp, "dataset", "train_character")), "误删了旧版共享目录"
+    finally:
+        _P.data_dir = _real_data_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_label_editor_safety():
+    """标签批量操作的两道闸：预演（绝不写盘）+ 快照/撤销（字节级还原）。
+
+    2026-09-15 用户反馈：多选标签时忘了按 Ctrl，把前面选择要删的标签也删了。
+    根因是批量删除/替换直接覆写全部 .txt，既无确认也无撤销。
+    """
+    import tempfile
+    import shutil
+    from pathlib import Path
+    import Kohya一键工具 as core
+    from kohya_core import paths as _P
+
+    tmp = tempfile.mkdtemp()
+    _real_data_dir = _P.data_dir
+    _P.data_dir = lambda: tmp          # 与 paths 内部保持一致，别写进真实数据目录
+    try:
+        ds = os.path.join(tmp, "dataset", "proj", "train_character")
+        os.makedirs(ds)
+        # ⚠️ list_dataset_images **以图片为驱动**（只遍历图片再配对同名 .txt），
+        # 所以只有 .txt 没有配对图片的文件根本不会被列出 —— 每个用例都要有同名图片。
+        raw = {                                   # stem -> 原始内容
+            "a": "1girl, solo, blue_hair\n",      # 带换行
+            "b": "1girl, solo",                   # 无换行
+            "c": "solo, blue_hair \n",            # 带尾随空格
+        }
+        for stem, txt in raw.items():
+            open(os.path.join(ds, stem + ".txt"), "w", encoding="utf-8", newline="").write(txt)
+            open(os.path.join(ds, stem + ".png"), "wb").write(b"x")
+        open(os.path.join(ds, "d.png"), "wb").write(b"x")   # 没有 txt 的图不该被算进去
+
+        def _tp(stem):
+            return os.path.join(ds, stem + ".txt")
+
+        def _read(stem):
+            return open(_tp(stem), encoding="utf-8", newline="").read()
+
+        # ---- ① dry_run 只统计，绝不写盘 ----
+        assert core.batch_remove_tags(ds, "solo", dry_run=True) == (3, 3)
+        for stem, txt in raw.items():
+            assert _read(stem) == txt, "dry_run 改写了文件 %s" % stem
+        assert core.batch_remove_tags(ds, "不存在的标签", dry_run=True) == (0, 0)
+
+        # ---- ② snapshot 记的是原始内容，同时正常写盘 ----
+        snap = {}
+        assert core.batch_remove_tags(ds, "solo", snapshot=snap) == (3, 3)
+        for stem, txt in raw.items():
+            assert snap[_tp(stem)] == txt, "快照不是原始内容：%r" % snap.get(_tp(stem))
+            assert "solo" not in _read(stem), "没删干净 %s" % stem
+
+        # ---- ③ 撤销：字节级还原（含无换行 / 尾随空格两种形态）----
+        assert core.restore_captions(snap) == 3
+        for stem, txt in raw.items():
+            assert _read(stem) == txt, "撤销未还原 %s -> %r（应为 %r）" % (stem, _read(stem), txt)
+
+        # ---- ④ 替换同样支持预演 + 快照 + 撤销 ----
+        assert core.batch_replace_tags(ds, "blue_hair", "aqua_hair", dry_run=True) == 2
+        assert _read("a") == raw["a"], "替换的 dry_run 改写了文件"
+        snap2 = {}
+        assert core.batch_replace_tags(ds, "blue_hair", "aqua_hair", snapshot=snap2) == 2
+        assert "aqua_hair" in _read("a")
+        assert core.restore_captions(snap2) == 2
+        assert _read("a") == raw["a"], "替换的撤销未还原"
+
+        # ---- ⑤ 工具自己写的文件（Windows 上 save_caption 写 CRLF）也必须字节级还原 ----
+        # 这条是防回归：_read_caption_raw 若用默认 newline 读，CRLF 会被归一成 LF，
+        # 撤销就把整个数据集的行尾悄悄改掉了。
+        open(os.path.join(ds, "e.png"), "wb").write(b"x")
+        p_e = os.path.join(ds, "e.txt")
+        core.save_caption(p_e, "1girl, crlfmarker")
+        e_raw = open(p_e, encoding="utf-8", newline="").read()
+        snap3 = {}
+        assert core.batch_remove_tags(ds, "crlfmarker", snapshot=snap3) == (1, 1)
+        assert core.restore_captions(snap3) == 1
+        assert open(p_e, encoding="utf-8", newline="").read() == e_raw, \
+            "工具自写文件未字节级还原（行尾被改写）"
+
+        # ---- ⑥ 源码接线：GUI 必须真的用了这两道闸 ----
+        gsrc = Path(os.path.join(os.path.dirname(core.__file__), "kohya_gui.py")).read_text(encoding="utf-8-sig")
+        csrc = Path(core.__file__).read_text(encoding="utf-8-sig")
+        assert "dry_run=True" in gsrc, "批量删除/替换没有预演步骤"
+        assert gsrc.count("snapshot=snapshot") >= 3, "不是所有不可逆批量操作都留了撤销快照"
+        assert "def _push_undo" in gsrc and "def _do_undo" in gsrc, "缺少撤销实现"
+        assert "def restore_captions" in csrc, "缺少还原实现"
+        # 缩略图不再写死尺寸（用户反馈「太小、下面明明有不少空间」）
+        assert "im.thumbnail((220, 140))" not in gsrc, "缩略图仍是硬编码 220x140"
+        assert "def _on_right_resize" in gsrc, "缩略图未接自适应"
+        # 多选开关：图片列表与标签统计窗都要有，且偏好持久化
+        assert "label_editor_multi" in gsrc, "多选偏好未持久化"
+        # 两处开关的文案都是纯「多选模式」（用户要求不要多余的括号说明）
+        assert gsrc.count('text="多选模式"') >= 2, "图片列表/标签统计窗未都加多选开关"
+
+        # ---- ⑦ 缩略图自适应的三条防回归（2026-09-15 实测踩过的坑，都很隐蔽）----
+        import re as _re
+        # ① 绑定必须 add="+"：CTkFrame 内部用 <Configure> 维护自己的 canvas/圆角，
+        #    直接 bind 会把它顶掉，控件自身就画不出来。
+        assert 'self._on_right_resize, add="+"' in gsrc, \
+            "自适应绑定没用 add='+'，会覆盖 CTk 控件的内部 <Configure> 处理器"
+        # ② _on_right_resize 里绝不许量其它控件的高度 —— 那会成环：
+        #    缩略图高度 → body 的请求高度 → 底部工具条能否分到 pack 空间 → 工具条高度
+        #    → 预留量 → 缩略图高度…… 实测 40 轮 update 触发回调 566 次（死循环），
+        #    布局整体崩坏、工具条 unmapped，表现为「标签编辑器功能组件全没了」。
+        _m = _re.search(r"    def _on_right_resize\(self.*?\n(?=    def )", gsrc, _re.S)
+        assert _m, "找不到 _on_right_resize 实现"
+        _body = _m.group(0)
+        # 唯一允许的输入是**窗口自身**的尺寸；把窗口测量摘掉后，不应再有别的尺寸测量
+        _stripped = (_body.replace("self.win.winfo_width()", "")
+                          .replace("self.win.winfo_height()", ""))
+        for _bad in ("winfo_width()", "winfo_height()", "winfo_reqheight()"):
+            assert _bad not in _stripped, \
+                "_on_right_resize 里量了其它控件的 %s —— 会形成布局死循环，绝不能加回来" % _bad
+        # ③ 缩略图容器必须是原生 tk.Frame：CTkFrame 是复合控件，
+        #    pack_propagate(False) 转发不到内部 canvas，实测设 1236x700 仍被撑到 1248x1017。
+        assert "self.prev_box = tk.Frame(" in gsrc, "缩略图容器不是原生 tk.Frame（propgate 不生效）"
+        assert "self.prev_box.pack_propagate(False)" in gsrc, "缩略图容器未禁止尺寸传播"
+    finally:
+        _P.data_dir = _real_data_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -402,6 +586,8 @@ def main():
     check("Anima 合并包识别/剥离/缓存", test_anima_ckpt)
     check("采样预览不污染监控 + Fizgig 断点查找", test_monitor_sampling_and_fizgig_resume)
     check("训练完成按项目名导出成品", test_lora_naming)
+    check("删项目清理图集数据 + 遗留数据清理", test_project_data_cleanup)
+    check("标签批量操作：预演 + 快照撤销", test_label_editor_safety)
     print("-" * 40)
     if FAILED:
         print("✘ 失败 %d 项: %s" % (len(FAILED), "、".join(FAILED)))

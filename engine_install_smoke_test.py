@@ -1904,6 +1904,79 @@ def test_probe_onnxruntime_import(base: Path):
     assert "② 安装训练内核" in src, "缺重建训练环境指引"
     print("PROBE_ONNXRUNTIME_IMPORT_OK")
 
+def test_fizgig_preview_swap(base: Path):
+    """Krea2 训练中「采样预览」必须分块换出 Turbo，别让它额外常驻整模型拖慢训练。
+
+    2026-09-15 用户实测（RTX 4080 SUPER 15.67G，Krea2 512px，每 2 epoch 预览一次）：
+      引擎自报每 epoch 步速：2.02 / 2.18（还没预览过）→ **12.74 / 9.95 / 7.56** → 3.55 / 2.49 / 2.63
+      全程平均 6.22 s/it，而没预览过的前两个 epoch 只有 2.0 s/it。
+      单次预览直接耗时 107/68/55/45/48/44 秒（其中约 74s 是重复加载+量化 Turbo）。
+      → 预览本身只占约 7% 的总时间，**超过一半的额外耗时来自它把显存压爆之后的换页**。
+
+    修法：给预览传 --preview_blocks_to_swap（CLI 默认 0 = 整个 ~13GB 常驻显存）。
+    引擎的 sample_previews 本就为小显存卡设计了该组合：blocks_to_swap>0 时以 CPU 为加载设备、
+    走 forward-only 分块换入，--preview_int8 的量化也刻意在 CPU 上做。
+    """
+    # 1) 档位表（含边界）
+    assert core._fizgig_preview_swap(None) == 0, "拿不到显存时不该硬塞分块换出"
+    assert core._fizgig_preview_swap(32) == 0
+    assert core._fizgig_preview_swap(24) == 0
+    assert core._fizgig_preview_swap(20) == 12          # 18~23G
+    assert core._fizgig_preview_swap(18) == 12
+    assert core._fizgig_preview_swap(16) == 20          # 12~17G ← 用户那台 15.67 取整 16
+    assert core._fizgig_preview_swap(15.67) == 20
+    assert core._fizgig_preview_swap(12) == 20
+    assert core._fizgig_preview_swap(10) == 26
+    assert core._fizgig_preview_swap(8) == 26
+    # 2) 接线：预览参数块里必须真的用上它
+    # 注意：用传参处 `"--preview_blocks_to_swap"` 当锚点 —— 不能用 `--preview_int8`，
+    # 因为那个字面量也出现在 _fizgig_preview_swap 的 docstring 里（位于调用点之前）。
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    j = src.find('"--preview_blocks_to_swap"')
+    assert j != -1, "预览参数块未传 --preview_blocks_to_swap"
+    seg = src[max(0, j - 900):j + 200]
+    assert "_fizgig_preview_swap(vram_gb)" in seg, "预览未按显存档位算分块换出"
+    print("FIZGIG_PREVIEW_SWAP_OK")
+
+def test_fizgig_sample_off_warned(base: Path):
+    """Fizgig 采样被引擎自动关闭时必须告知用户（旧告警已失效，必须更正）。
+
+    2026-09-15 逐字核对 Fizgig v5.0.0 源码（魔搭镜像与 GitHub v5.0.0 的 trainer.py
+    sha256 一致）后更正：
+
+      · 旧文案说「采样循环没有 try/except（trainer.py:1581），异常会跳过
+        switch_block_swap_for_training() → 每步全量换块 → 1.78→8s/it」——
+        **该机制在 v5.0.0 不存在**：两个采样调用点都已有 try/except/finally，
+        finally 会还原训练 DiT 的块交换状态；且 `trainer.py:1581` 现在是
+        `train_krea2()` 的签名参数注释（行号早已失效）。
+      · 旧的触发条件也失效：引擎 except 只打印**异常类型名**、不打完整异常消息，
+        所以 mark "unsupported operand type(s) for *" 根本不会进日志 → 死代码。
+
+    真正该告知用户的是引擎的另一个行为：一次预览失败后 `do_previews = False`，
+    **本轮后续 epoch 不再出预览图** —— 用户勾了预览却"跑着跑着没了"，日志里只有一行英文。
+    """
+    # 1) 新 mark：命中真实引擎日志，并解析出失败的 epoch
+    line = ("[preview] epoch 3 preview failed (CUDA OOM - this card is too small for the Turbo preview); "
+            "disabling previews for the rest of the run. Training continues and LoRAs still save normally.")
+    out = []
+    assert core._warn_fizgig_sample_failure(line, logf=out.append) is True, "未命中「引擎已自动关闭预览」的日志"
+    blob = "\n".join(out)
+    assert "已自动关闭本轮后续预览" in blob, blob
+    assert "第 3 个 epoch" in blob, "未解析出失败的 epoch：%s" % blob
+    assert "只影响预览图" in blob, "未说明影响范围（用户最关心训练受不受影响）"
+    # 2) 旧引擎 mark 仍要兼容（别删）
+    assert core._warn_fizgig_sample_failure(
+        "unsupported operand type(s) for *", logf=lambda s: None) is True, "旧引擎 mark 不再兼容"
+    # 3) 无关日志不得误报
+    assert core._warn_fizgig_sample_failure(
+        "steps: 5%| 51/1024 [01:00<19:00, 2.10s/it]", logf=lambda s: None) is False, "无关日志被误报"
+    assert core._warn_fizgig_sample_failure("", logf=lambda s: None) is False
+    # 4) 源码层面：已失效的旧结论必须清掉
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert "disabling previews for the rest of the run" in src, "缺新的引擎日志 mark"
+    assert "块交换没还原" not in src, "仍残留已失效的旧结论文案"
+    print("FIZGIG_SAMPLE_OFF_WARNED_OK")
+
 def test_preprocess_skip_is_visible(base: Path):
     """预处理重跑时的「静默跳过」必须可见，且必须在打标阶段之前打印。
 
@@ -2893,6 +2966,39 @@ def test_modelscope_ptw_preferred(base: Path):
     assert "_order_bases_by_speed" in src, "缺「下载前实测测速选源」"
     assert "PIP_INDEX_PRIMARY" in src, "缺国内 PyPI 主源常量（中科大）"
     print("MODELSCOPE_PTW_PREFERRED_OK")
+def test_modal_dialogs_logged(base: Path):
+    """训练前的阻塞弹窗必须先写日志 —— 否则用户看到的就是「卡死、没反应、也没报错」。
+
+    2026-09-15 一位 4090 用户实证：导出日志停在「[OK] 可用图片 20 张」之后再无任何输出。
+    实际是 _ask_fix_cpu_torch 弹了「检测到 CPU 版 PyTorch，是否重装 cu128」的确认框 ——
+    而这些确认框**一行日志都不写**、又可能藏在主窗口后面，用户只能判断成卡死。
+
+    守两件事：
+      ① 统一入口 _modal 必须「先写日志、再弹窗」（顺序不能颠倒）；
+      ② 训练流程里的确认函数不得再出现裸 messagebox（否则又回到不写日志的老问题）。
+    """
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    # 1) 统一入口存在，且先写日志再弹窗
+    i = g.find("def _modal(self")
+    assert i != -1, "缺少统一弹窗入口 _modal"
+    seg = g[i:i + 2200]
+    assert "_log(" in seg, "_modal 没有写日志"
+    assert seg.find("_log(") < seg.find("messagebox."), "_modal 必须先写日志再弹窗"
+    # 2) 训练流程里的确认函数，不得再出现裸 messagebox
+    for fn in ("def _ask_fix_cpu_torch(self", "def _warn_no_nvidia(self", "def _warn_low_vram(self",
+               "def _ask_resume(self", "def _anima_merged_ok(self", "def _confirm_training(self",
+               "def _handle_auto_confirm(self"):
+        j = g.find(fn)
+        assert j != -1, "找不到 %s" % fn
+        k = g.find("\n    def ", j + 1)
+        body = g[j:] if k < 0 else g[j:k]
+        for bad in ("messagebox.askyesno", "messagebox.askokcancel", "messagebox.showwarning"):
+            assert bad not in body, "%s 里还有裸 %s —— 弹窗前不写日志，用户会以为卡死" % (fn, bad)
+    # 3) 日志要有可检索前缀：支持时一眼看出「不是卡死，是在等我点确认」
+    assert "弹窗等待你操作" in g, "弹窗日志缺少可检索前缀"
+    print("MODAL_DIALOGS_LOGGED_OK")
+
+
 def main():
     # 每条用例独立 try/except：任何一条失败（常见于「实现改了、断言没跟着改」）都不再中断整个套件。
     # 否则后面几十条用例会被一条过期断言全部吞掉 —— v0.15.11~v0.16.5 就踩过：
@@ -2977,6 +3083,9 @@ def main():
         test_preprocess_silent_failure_diagnosed(base)
         test_wd14_onnx_isolated(base)
         test_probe_onnxruntime_import(base)
+        test_fizgig_preview_swap(base)
+        test_fizgig_sample_off_warned(base)
+        test_modal_dialogs_logged(base)
         test_preprocess_skip_is_visible(base)
         test_krea2_style_subdir_consistency(base)
         test_project_open_robust(base)
