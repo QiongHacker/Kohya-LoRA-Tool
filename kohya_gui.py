@@ -4522,7 +4522,8 @@ class App:
         if not messagebox.askyesno(
                 core.APP_NAME,
                 "确定要停止当前任务吗？\n\n"
-                "· 训练中途停止：进度快照已保留，下次运行会自动询问是否断点续训\n"
+                "· 训练中途停止：若已到达存档点，下次会询问是否续训；\n"
+                "  ⚠ 引擎每隔若干步才写一次快照 —— 没到第一个存档点就停，本次进度将无法续训\n"
                 "· 预处理/安装中途停止：已完成的文件会保留\n\n是否停止？"):
             return
         self._log("[停止] 正在请求停止当前任务…")
@@ -4550,7 +4551,7 @@ class App:
             (getattr(self, "btn_refresh_base", None), "重新扫描默认模型文件夹，把新放入的底模列进下拉。"),
             (getattr(self, "btn_download_base", None), "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别）。"),
             (getattr(self, "btn_one_click", None), "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
-            (getattr(self, "btn_stop", None), "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后进度快照会保留，下次可断点续训。"),
+            (getattr(self, "btn_stop", None), "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后若已到存档点会保留快照、下次可断点续训；未到存档点则本次进度无法续训。"),
             (getattr(self, "btn_krea2_models", None), "打开 Krea2 模型文件夹（models/krea2），把 RAW/VAE/文本编码器 3 个文件放进去；软件内提供国内镜像下载链接。"),
             (getattr(self, "btn_krea2_guide", None), "打开 Krea2 训练详细逐步引导（装环境→下模型→选图→预处理→训练→出图，含常见问题）。"),
             (getattr(self, "btn_h3_models", None), "打开 MiniMax H3 模型文件夹（models/minimax_h3），把下载的 DiT/文本编码器/VAE 文件放进去。"),
@@ -5317,7 +5318,28 @@ class App:
                 self._log("[停止] 检测到训练 loss 为 NaN/Inf（数值异常），已自动停止，避免卡在保存。"
                          "常见原因：AMD RDNA2（RX 6000）+ bf16、模型/数据问题。请更新到最新版或检查数据。")
             else:
-                self._log("[停止] 训练已手动停止，进度快照已保留，下次可断点续训")
+                # 据实告知，不能无条件承诺「快照已保留」。
+                # 引擎只在**存档点**写快照（Fizgig/Krea2 是每个 epoch 一次），提前停止很可能一个都没有。
+                # 2026-09-15 用户实证：停在 step 10/1024（第一个存档点在第 64 步），被两次告知
+                # 「快照已保留、可断点续训」，去续训发现没有 —— 用户非常着急。
+                # 这是「承诺与事实不符」的缺陷，不是续训机制本身的缺陷。
+                _st = self._latest_resume_state(params)
+                if _st:
+                    self._log(f"[停止] 训练已手动停止。已保留快照 {os.path.basename(_st)}，"
+                              "下次点训练会询问是否从该断点继续。")
+                else:
+                    self._log("[停止] ⚠ 训练已手动停止，但【本次没有产生可续训的快照】，"
+                              "下次只能从头训练。")
+                    _spe = self._steps_per_state(params)
+                    _cur = int(getattr(self._train_mon, "step", 0) or 0)
+                    if _spe and _cur:
+                        _left = _spe - (_cur % _spe)
+                        self._log(f"       原因：引擎每 {_spe} 步写一次快照，本次停在第 {_cur} 步、"
+                                  f"还没到第一个存档点。**下次跑到第 {_cur + _left} 步之后再停**就能续训"
+                                  f"（还差 {_left} 步）。")
+                    else:
+                        self._log("       原因：引擎只在每个存档点写快照，本次停止在第一个存档点之前。"
+                                  "想保住进度，至少跑完第一个 epoch 再停。")
         except Exception as e:
             self._log(f"[ERROR] 训练失败：{e}")
             traceback.print_exc()
@@ -6044,17 +6066,38 @@ class App:
             f"建议显存：{need}G 及以上；你的显卡约 {vram:.1f}G。\n\n"
             "训练可能卡顿或显存不足（OOM），工具会自动开启省显存设置。\n是否继续？")
 
+    def _latest_resume_state(self, params):
+        """当前项目下是否存在可续训的快照（**唯一口径**：_ask_resume 与停止提示共用）。
+
+        为什么必须共用：以前「停止时」无条件承诺「进度快照已保留」，而「续训时」用的是另一套
+        查找逻辑 —— 两处口径不一致时，就会出现「说好了能续、去找却没有」的落差。
+        2026-09-15 用户实证：Fizgig 停在第 10/1024 步（第一个快照在第 64 步），被告知两次
+        「快照已保留」，去续训发现没有，非常着急。
+        """
+        try:
+            _proj = (self.current_project or "").strip() or (params or {}).get("project") or ""
+            _odir = core.data_sub("output", _proj) if _proj else core.data_sub("output")
+            _name = core.output_name_for((params or {}).get("mode"), (params or {}).get("style_preset"))
+            # 第四引擎（Fizgig）断点目录是 {name}-NNNNNN-state（按 epoch 命名），另有专门查找
+            if (params or {}).get("mode") in ("krea2_fz", "flux2_fz"):
+                return core.find_fizgig_state(_odir, _name)
+            return core.find_latest_state(_odir, _name)
+        except Exception:
+            return None
+
+    def _steps_per_state(self, params):
+        """每两个存档点之间隔多少步（用于告诉用户「再跑多少步就能续训」）。取不到返回 0。"""
+        try:
+            _total = int(getattr(self._train_mon, "total", 0) or 0)
+            _ep = int((params or {}).get("epochs") or 0)
+            if _total > 0 and _ep > 0:
+                return max(1, _total // _ep)
+        except Exception:
+            pass
+        return 0
+
     def _ask_resume(self, params):
-        output_name = core.output_name_for(params["mode"], params.get("style_preset"))
-        # 断点续训要在当前项目的输出目录里找快照：
-        # params 里通常没有 project 字段（_collect_params 不生成），直接用 self.current_project。
-        _proj = (self.current_project or "").strip() or (params.get("project") or "").strip()
-        _odir = core.data_sub("output", _proj) if _proj else core.data_sub("output")
-        # 第四引擎（Fizgig）断点目录是 {name}-NNNNNN-state（按 epoch），用专门查找
-        if params.get("mode") in ("krea2_fz", "flux2_fz"):
-            state = core.find_fizgig_state(_odir, output_name)
-        else:
-            state = core.find_latest_state(_odir, output_name)
+        state = self._latest_resume_state(params)
         if state:
             return state if messagebox.askyesno(
                 core.APP_NAME,

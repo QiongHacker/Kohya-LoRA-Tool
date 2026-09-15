@@ -859,6 +859,11 @@ def _run_wd14_onnx(output_dir, logf=print, threshold=0.35):
     if not onnx_p:
         logf("[WD14] 内置打标：未找到 wd14_tagger_model 里的 model.onnx/selected_tags.csv")
         return False
+    # 面包屑：onnxruntime / cv2 都是 native 代码，一旦硬崩（DLL 冲突 / AVX 不兼容 /
+    # provider 初始化失败）**不是 Python 异常，try/except 拦不住，也没有 traceback** ——
+    # 日志只会「停在某一行之后再无输出」。所以每个高风险步骤前都留一行，崩溃点一眼可见。
+    # 2026-09-15 qionglora 用户实测：输出正好停在这条调用之后、下一行之前。
+    logf("[WD14] 内置打标：正在加载 onnxruntime…")
     try:
         import onnxruntime as ort
     except Exception:
@@ -979,6 +984,113 @@ def _run_wd14_onnx(output_dir, logf=print, threshold=0.35):
     return True
 
 
+def _classify_ort_probe(rc, out):
+    """把「探测 onnxruntime」的结果分类成人类可读的原因（纯函数，便于单测）。
+
+    返回 (ok, detail)：
+      · ok=True  → 能正常 import
+      · ok=False → detail 指出是「native 崩溃 / 未安装 / 加载失败」中的哪一种
+
+    为什么必须分类：三种情况的**修法完全不同** ——
+      · native 崩溃 → 重装 onnxruntime、不行就重建训练环境（DLL 级故障，`import` 就死）
+      · 未安装     → pip 装上即可
+      · 加载失败   → 看报错（版本不匹配等）
+    混为一谈就会给出错的修复指引。
+    """
+    out = (out or "").strip()
+    if rc == 0 and "ORT_OK" in out:
+        return True, ""
+    if not out:
+        # 零输出 + 非零退出 = 进程被 native 崩溃直接带走（DLL 装载失败 / VC 运行库缺失 /
+        # 包半损坏）。**没有 traceback**，最容易被误判成「缺包」——
+        # 2026-09-15 qionglora 用户实测就是这一类（cmd 里闪退、直接回提示符）。
+        return False, ("import 阶段直接崩溃（退出码 %s、零输出）→ DLL 级故障，没有 traceback"
+                       % rc)
+    _last = out.splitlines()[-1].strip()
+    if "No module named" in out:
+        return False, "未安装（%s）" % _last
+    return False, "加载失败（退出码 %s）：%s" % (rc, _last)
+
+
+def _probe_onnxruntime_import(vpy, logf=print, timeout=180):
+    """探测 onnxruntime 能否正常 import，并区分「崩溃 / 未安装 / 加载失败」。
+
+    为什么必须放子进程：`import onnxruntime` 若发生 native 崩溃（DLL 加载失败 / VC 运行库缺失 /
+    包半损坏），**不是 Python 异常** —— 在进程内 import 会直接把当前整个进程带走，
+    `try/except Exception` 一个字都拦不住，也不会留下 traceback。
+
+    2026-09-15 qionglora 用户实证（cmd 手工验证）：
+        venv\\Scripts\\python.exe -c "import onnxruntime; ..."   → 闪退、零输出、直接回提示符
+        venv\\Scripts\\python.exe -c "import cv2; ..."           → ModuleNotFoundError（普通缺包）
+    即：cv2 只是没装（代码本就有处理），**真正的杀手是 onnxruntime 的 import 崩溃**。
+
+    返回 (ok, detail)。
+    """
+    if not vpy:
+        return False, "拿不到解释器路径"
+    code = "import onnxruntime; print('ORT_OK', onnxruntime.__version__)"
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except Exception as e:
+        return False, "探测异常：%s" % e
+    return _classify_ort_probe(r.returncode, (r.stdout or "") + (r.stderr or ""))
+
+
+def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35):
+    """在**独立子进程**里跑内置打标 —— 隔离 native 硬崩。
+
+    背景（2026-09-15 qionglora 用户实测）：`_run_wd14_onnx` 里的 `import onnxruntime`
+    / 模型加载都是 native 代码，一旦硬崩（DLL 冲突 / AVX 不兼容 / provider 初始化失败）
+    **不是 Python 异常，try/except 拦不住、也没有 traceback**，会把整个 preprocess.py
+    一起带走 —— 而此刻**图片其实已经处理好了，只差标签**。
+    用户看到的是「预处理失败」，实际损失的是整批图片的成果（本次就是 18 张）。
+
+    隔离后：崩了只损失标签（走既有的兜底 caption），预处理成果全部保留。
+
+    子进程的 stdout/stderr **直接继承**父进程 —— 父进程已被工具接管成管道，
+    输出自然流进日志；配合 build_env() 的 PYTHONUNBUFFERED=1，崩溃前的内容也不会丢。
+    """
+    if not sys.executable:
+        logf("[WD14] 内置打标：拿不到解释器路径，回退进程内执行")
+        return _run_wd14_onnx(output_dir, logf=logf, threshold=threshold)
+    # 显式把脚本目录作为 argv 传进去并用 sys.path.insert，**不依赖 PYTHONPATH 传递** ——
+    # 环境变量在某些宿主（测试框架 / 被清过 env 的调用链）里不保证生效，
+    # 那样子进程会直接 ModuleNotFoundError 而对生产行为毫无帮助。
+    _here = os.path.dirname(os.path.abspath(__file__))
+    code = ("import sys; sys.path.insert(0, sys.argv[3]);"
+            "import preprocess as P;"
+            "sys.exit(0 if P._run_wd14_onnx(sys.argv[1], threshold=float(sys.argv[2])) else 1)")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = _here          # 双保险
+    env["PYTHONUNBUFFERED"] = "1"
+    logf("[WD14] 内置打标：在独立子进程中运行（隔离 onnxruntime 的 native 崩溃）…")
+    try:
+        rc = subprocess.run([sys.executable, "-c", code, output_dir, str(threshold), _here],
+                            env=env, timeout=1800).returncode
+    except Exception as e:
+        logf(f"[WD14] ⚠ 内置打标子进程启动失败：{e}；改用兜底标签继续")
+        return False
+    if rc != 0:
+        logf(f"[WD14] ⚠ 内置打标子进程异常退出（退出码 {rc}）—— 内置打标第一步就是 "
+             "`import onnxruntime`，它发生 native 崩溃时零输出、无 traceback。"
+             "已跳过自动打标（**图片处理结果不受影响**），改用兜底 caption 继续。")
+        # 主动定位 + 给出可执行修复步骤。对着空白日志发呆正是「零门槛」的反面。
+        _ok_ort, _why_ort = _probe_onnxruntime_import(sys.executable)
+        if _ok_ort:
+            logf("[WD14] 定位：onnxruntime 本身可正常 import → 崩溃点在其后的模型加载/推理。")
+            logf("[WD14]   建议：重跑一次本流程；若反复崩溃，重跑【② 安装训练内核】重建训练环境。")
+        else:
+            logf(f"[WD14] 定位：onnxruntime 不可用 —— {_why_ort}")
+            logf("[WD14]   修复步骤（按顺序试）：")
+            logf('[WD14]     1) 重装 onnxruntime：')
+            logf(f'[WD14]        "{sys.executable}" -m pip install --force-reinstall onnxruntime')
+            logf("[WD14]     2) 仍崩溃则重跑【② 安装训练内核】重建训练环境（会装匹配的版本）")
+        logf("[WD14]   影响：本次未生成精细标签，缺标签图片用兜底 caption —— "
+             "流程不中断，但训练效果会变差，建议修好后再训。")
+        return False
+    return True
+
 def _run_wd14_auto(output_dir, logf=print, script=None):
     """自动打标总入口：官方脚本（GPU/CPU 回退）优先，失败/缺失改用内置 onnx 打标。"""
     script = script or find_wd14_tagger()
@@ -988,7 +1100,7 @@ def _run_wd14_auto(output_dir, logf=print, script=None):
         logf("[WD14] 官方打标脚本失败，自动改用内置打标（onnx）重试…")
     else:
         logf("[WD14] 未找到 kohya 官方打标脚本，改用内置打标（onnx，不依赖第一引擎）…")
-    return _run_wd14_onnx(output_dir, logf=logf)
+    return _run_wd14_onnx_isolated(output_dir, logf=logf)
 
 
 def _sd_scripts_root(script=None):
@@ -1617,6 +1729,7 @@ def main():
     watermarked = 0
     seen_hashes = {}
     user_captions = {}  # stem -> 原图自带 .txt 内容（人物模式优先保留）
+    skip_names = []     # 因「已存在同名输出」而跳过的图（原先完全静默，用户看不到做了什么）
     for name in files:
         # name 可能是相对路径（子文件夹递归时用 / 分隔）；输出名用 __ 扁平化，避免重名
         _rel = name.replace("/", os.sep)
@@ -1626,7 +1739,13 @@ def main():
         out_img = os.path.join(output_dir, stem + ".png")
         out_txt = os.path.join(output_dir, stem + ".txt")
         if os.path.exists(out_img) and not args.overwrite:
+            # 原先这里是**纯静默 continue**：重跑时（典型场景：先单独点了「数据预处理」，
+            # 再点「一键开始训练」——后者自带预处理，会把同一批图重跑一遍）
+            # 会「18 张全部跳过、屏幕上一个字都没有」，用户以为在跑，实际什么都没做。
+            # 2026-09-15 qionglora 用户实测：控制台 INFO 段之后直接跳到 [WD14]，
+            # 中间一条 [OK] 都没有 —— 排查时非常容易误判成「图片处理失败」。
             skipped += 1
+            skip_names.append(name)
             continue
         if args.dedup:
             h = _md5_file(raw_img)
@@ -1707,6 +1826,21 @@ def main():
             print(f"  [FAIL] {name}: {e}")
             if os.environ.get("PREPROCESS_DEBUG"):
                 traceback.print_exc()
+
+    # 跳过汇总：重跑（典型：先单独点「数据预处理」，再点「一键开始训练」——
+    # 后者自带预处理会把同一批图重跑一遍）时全部图都会被跳过。
+    # 原先屏幕上一个字都没有，用户完全无法判断到底做了什么，
+    # 还容易把「静默跳过」误读成「图片处理失败」（2026-09-15 qionglora 用户实测）。
+    if skipped:
+        print(f"[INFO] 输出目录已有 {skipped} 张同名图片，本次跳过未重新处理"
+              f"（需要重做请清空输出目录，或改用覆盖模式）")
+        for _n in skip_names[:5]:
+            print(f"  [跳过] {_n}")
+        if len(skip_names) > 5:
+            print(f"  … 另有 {len(skip_names) - 5} 张同样跳过")
+        if skipped == len(files):
+            print("[INFO] 提示：本次全部图片都已存在，等价于「没有重新处理图片」，"
+                  "只会补做打标/标签环节。")
 
     # ---- 人物模式：WD14 / 内置打标 / 兜底 / 还原自带标签 / 插入 trigger ----
     if mode == "character" and not args.no_caption and (ok + skipped):

@@ -165,6 +165,13 @@ def build_env(extra_dirs=()):
     # UnicodeEncodeError（accelerator.print 输出含中文项目名/trigger/caption 时崩溃）。
     # setdefault 不覆盖用户已有的 PYTHONIOENCODING；run_stream 父进程本就按 utf-8 解码。
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # 关键：子进程 stdout 被 run_stream 接管成 PIPE 后，Python 默认用「块缓冲」(4~8KB)，
+    # 而不是控制台下的行缓冲。后果是 —— 进程正常退出时缓冲会 flush，日志完整；
+    # 但进程**中途硬崩**（DLL 加载失败 / 段错误 / 被安全软件杀 / 进程树被清理）时
+    # **缓冲区整块丢失，父进程一个字都收不到**，于是报错变成「预处理失败，请查看上方日志」
+    # 而上方日志是空的（2026-09-15 qionglora 用户实测：preprocess.py 两轮零输出）。
+    # 强制无缓冲后，崩溃前已打印的内容一定先落进父进程日志，失败才可诊断。
+    env["PYTHONUNBUFFERED"] = "1"
     # huggingface_hub 1.x 默认走 Xet 协议（直连 cas-server.xethub.hf.co），国内常报
     # 401/超时且绕过 hf-mirror 镜像（如第三引擎下载 12GB+ 模型失败）；全局禁用，
     # 回退经典 HTTP 下载（走 HF_ENDPOINT 镜像）。

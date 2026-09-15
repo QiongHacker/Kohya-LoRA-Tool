@@ -1773,6 +1773,160 @@ def test_build_env_utf8_output(base: Path):
     assert "中文测试" in r2.stdout
     print("BUILD_ENV_UTF8_OUTPUT_OK")
 
+def test_build_env_unbuffered_output(base: Path):
+    """子进程「零输出就失败」的根因：管道下 Python 用块缓冲，硬崩时缓冲整块丢失。
+
+    2026-09-15 qionglora 用户实测：preprocess.py 连续两轮「零输出 + 非零退出」，
+    日志只剩一句「请查看上方日志」，用户和作者都无从下手（连报错都收不到）。
+    修法：build_env 强制 PYTHONUNBUFFERED=1，让崩溃前已打印的内容一定先落进父进程日志。
+    """
+    import os as _os
+    # 子进程打印一行后走 os._exit —— 跳过 flush，模拟「硬崩/被杀」
+    code = "import os, sys; sys.stdout.write('BEFORE-CRASH\\n'); os._exit(3)"
+    # 1) 复现：不带 PYTHONUNBUFFERED 时，父进程一个字都收不到（测试前提）
+    bad_env = dict(_os.environ)
+    bad_env.pop("PYTHONUNBUFFERED", None)
+    got = []
+    rc = core.run_stream([sys.executable, "-c", code], env=bad_env, logf=got.append)
+    assert rc == 3, f"退出码应为 3，实际 {rc}"
+    # 注意：用「整行相等」判定 —— run_stream 会把命令本身回显一行（以 "$ " 开头），
+    # 而命令里就含 BEFORE-CRASH 字面量，用子串匹配会误判。
+    assert not any(x.strip() == "BEFORE-CRASH" for x in got), \
+        f"前提不成立（竟然收到了输出，说明未走块缓冲）：{got}"
+    # 2) 修复：build_env 必须带 PYTHONUNBUFFERED=1，同样场景能拿到崩溃前日志
+    env = core.build_env()
+    assert env.get("PYTHONUNBUFFERED") == "1", ("build_env 缺 PYTHONUNBUFFERED", env.get("PYTHONUNBUFFERED"))
+    got2 = []
+    rc2 = core.run_stream([sys.executable, "-c", code], env=env, logf=got2.append)
+    assert rc2 == 3, f"退出码应为 3，实际 {rc2}"
+    assert any(x.strip() == "BEFORE-CRASH" for x in got2), f"PYTHONUNBUFFERED 未生效，仍收不到输出：{got2}"
+    print("BUILD_ENV_UNBUFFERED_OK")
+
+def test_preprocess_silent_failure_diagnosed(base: Path):
+    """预处理失败必须自带诊断：主动自检 + 可复现命令，不能只说「请查看上方日志」。
+
+    背景同上：上方日志为空时，「请查看上方日志」是零信息量报错。
+    """
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    # 1) 零信息量的老文案必须消失
+    assert 'raise RuntimeError("预处理失败，请查看上方日志")' not in src, "仍残留零信息量报错"
+    # 2) 失败路径必须接上主动自检
+    assert "_diagnose_preprocess_failure(vpy, cmd, logf)" in src, "预处理失败路径未接自检"
+    # 3) 自检内容：逐项探测 + 导入污染检查 + 给出可复现命令
+    i = src.find("def _diagnose_preprocess_failure(")
+    assert i != -1, "缺 _diagnose_preprocess_failure"
+    d = src[i:src.find("\ndef ", i + 10)]
+    for k in ("from PIL import Image", "import numpy", "import ctypes",
+              '" ".join(str(x) for x in cmd)',          # 复现命令
+              "argparse.py", "subprocess.py"):           # 标准库同名污染检查
+        assert k in d, f"自检缺内容：{k}"
+    # 4) 误报修正：force 兜底模式下不得再断言「Pillow/numpy 不可用」
+    j = src.find("def _ensure_preprocess_deps(")
+    seg = src[j:src.find("\ndef ", j + 10)]
+    assert "首次失败原因未明" in seg, "force 模式仍会误报缺依赖"
+    print("PREPROCESS_SILENT_FAILURE_DIAGNOSED_OK")
+
+def test_wd14_onnx_isolated(base: Path):
+    """内置打标必须隔离到子进程：native 硬崩不得带走整个预处理。
+
+    2026-09-15 qionglora 用户实测：onnxruntime 加载阶段 native 崩溃（**无 traceback**，
+    try/except 拦不住）把整个 preprocess.py 一起带走 → 报「预处理失败」，
+    而 18 张图片其实**已经处理好了，只差标签**。
+    修法：打标放进子进程（崩了只丢标签、走既有兜底 caption），并在 native 风险步骤前留面包屑。
+    """
+    src = (ROOT / "preprocess.py").read_text(encoding="utf-8")
+    # 1) 隔离实现存在，且总入口已改用它
+    assert "def _run_wd14_onnx_isolated(" in src, "缺子进程隔离实现"
+    assert "return _run_wd14_onnx_isolated(output_dir, logf=logf)" in src, "总入口未接隔离版"
+    # 2) native 崩溃没有 traceback，必须有面包屑才能定位
+    assert "正在加载 onnxruntime…" in src, "缺崩溃定位面包屑"
+    # 3) 行为：外层子进程必须「正常收尾并拿到 bool」，而不是被内层一起带走
+    out_dir = base / "wd14iso" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    code = ("import sys; sys.path.insert(0, sys.argv[2]);"
+            "import preprocess as P;"
+            "sys.exit(0 if P._run_wd14_onnx_isolated(sys.argv[1], logf=print) else 3)")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT)          # 双保险（生产代码已改为不依赖它）
+    env["PYTHONIOENCODING"] = "utf-8"
+    r = subprocess.run([sys.executable, "-c", code, str(out_dir), str(ROOT)],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=900, env=env)
+    blob = (r.stdout or "") + (r.stderr or "")
+    # 0 = 打标成功；3 = 打标失败但**外层存活**。两者都合法（取决于本机有无 onnxruntime），
+    # 但不能是被 native 崩溃带走的异常码。
+    assert r.returncode in (0, 3), f"外层进程异常收尾 rc={r.returncode}：{blob[-900:]}"
+    assert "独立子进程中运行" in blob, f"未走隔离路径：{blob[-900:]}"
+    if r.returncode == 3:
+        # 失败必须是「可读诊断」，不能又变成静默
+        assert ("异常退出" in blob) or ("未找到" in blob) or ("缺 onnxruntime" in blob), \
+            f"打标失败时缺可读诊断：{blob[-900:]}"
+    print("WD14_ONNX_ISOLATED_OK")
+
+def test_probe_onnxruntime_import(base: Path):
+    """onnxruntime 探测必须区分「native 崩溃」与「未安装 / 加载失败」。
+
+    2026-09-15 qionglora 用户 cmd 实测（本测试据此固化）：
+        python -c "import onnxruntime; ..."  → 闪退、零输出、直接回提示符（DLL 级 native 崩溃）
+        python -c "import cv2; ..."          → ModuleNotFoundError（普通缺包，代码本就有处理）
+    两者修法完全不同（崩溃要重装/重建环境，缺包只要装上），诊断必须分开，否则给出的
+    修复指引就是错的。
+    """
+    code = ("import sys; sys.path.insert(0, sys.argv[1]);"
+            "import preprocess as P;"
+            "cases = ["
+            "  (3, ''),"                                              # native 崩溃：零输出
+            "  (1, \"ModuleNotFoundError: No module named 'onnxruntime'\"),"   # 没装
+            "  (0, 'ORT_OK 1.20.0'),"                                 # 正常
+            "  (1, 'ImportError: DLL load failed'),"                  # 装坏了
+            "];"
+            "print('CASES', [P._classify_ort_probe(rc, out) for rc, out in cases])")
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    r = subprocess.run([sys.executable, "-c", code, str(ROOT)],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=300, env=env)
+    blob = (r.stdout or "") + (r.stderr or "")
+    assert r.returncode == 0, f"探测脚本异常 rc={r.returncode}：{blob[-600:]}"
+    got = [l for l in blob.splitlines() if l.startswith("CASES")]
+    assert got, f"未拿到分类结果：{blob[-600:]}"
+    # 顺序断言：四类必须被分开，且「崩溃」要排在「未安装」之前（对应用例顺序）
+    i_crash = got[0].find("import 阶段直接崩溃")
+    i_miss = got[0].find("未安装")
+    i_ok = got[0].find("(True, '')")
+    i_fail = got[0].find("加载失败")
+    assert -1 not in (i_crash, i_miss, i_ok, i_fail), f"有一类没被识别：{got[0]}"
+    assert i_crash < i_miss < i_ok < i_fail, f"分类顺序/归属不对：{got[0]}"
+    # 源码须保留可执行的修复指引（重装命令 + 重建训练环境）
+    src = (ROOT / "preprocess.py").read_text(encoding="utf-8")
+    assert "--force-reinstall onnxruntime" in src, "缺重装指引"
+    assert "② 安装训练内核" in src, "缺重建训练环境指引"
+    print("PROBE_ONNXRUNTIME_IMPORT_OK")
+
+def test_preprocess_skip_is_visible(base: Path):
+    """预处理重跑时的「静默跳过」必须可见，且必须在打标阶段之前打印。
+
+    2026-09-15 qionglora 用户：先单独点「数据预处理」（图片写好但打标已失败、降级成兜底
+    caption），再点「一键开始训练」——后者自带预处理会重跑一遍，此时 18 张图全部
+    「已存在 → 静默跳过」，屏幕上一个字都没有；接着打标阶段 native 崩溃，
+    整个预处理被判失败。运行汇总在文件**末尾**，崩了就永远看不到，用户无从判断发生了什么。
+    """
+    src = (ROOT / "preprocess.py").read_text(encoding="utf-8")
+    # 1) 跳过必须被记录并汇总（不再纯静默 continue）
+    assert "skip_names.append(name)" in src, "跳过仍是静默 continue"
+    assert "本次跳过未重新处理" in src, "缺跳过汇总提示"
+    assert "[跳过]" in src, "缺逐张跳过明细"
+    # 2) 顺序断言：汇总必须在打标阶段之前 —— 打标是当前最脆的一环，
+    #    崩在后面就看不到汇总（旧版汇总在文件末尾，正是被这个吃掉）
+    i_skip = src.find("本次跳过未重新处理")
+    i_tag = src.find("# ---- 人物模式：WD14")
+    assert i_skip != -1 and i_tag != -1, "锚点缺失"
+    assert i_skip < i_tag, "跳过汇总打在了打标阶段之后，打标一崩仍然看不到"
+    # 3) 全部跳过时要明说「等价于没重新处理」，避免用户误以为在跑
+    assert "没有重新处理图片" in src, "缺「等价于没重新处理」提示"
+    print("PREPROCESS_SKIP_VISIBLE_OK")
+
 def test_krea2_style_subdir_consistency(base: Path):
     """Krea2/Qwen-Image 画风子模式：预处理输出 train_character，训练必须读 train_character（防「缺少预处理数据」）。"""
     src_all = Path(core.__file__).read_text(encoding="utf-8-sig")
@@ -2608,6 +2762,42 @@ def test_resume_monitor_seed(base: Path):
     mon.on_line("steps: 210/544 [00:05<00:20, 1.00it/s, loss=0.5]")
     assert mon.snapshot()["step"] == 210
     print("RESUME_MONITOR_SEED_OK")
+
+def test_resume_promise_is_truthful(base: Path):
+    """停止训练时的「可续训」承诺必须与事实一致。
+
+    2026-09-15 用户实证：Fizgig 停在第 10/1024 步（引擎每个 epoch 才写一次快照，
+    第一个存档点在第 64 步）—— 一个快照都没有，却被**两处**无条件告知
+    「进度快照已保留，下次可断点续训」；用户跑去续训发现没有，非常着急。
+
+    注意：这是「承诺与事实不符」，**不是续训机制本身的缺陷** ——
+    机制（步数映射 / 旧成品误吞 / 看门狗误杀 / --resume 接线）此前已修过多版且都是对的，
+    但没能碰到用户真正的痛点。本测试守住「别再说做不到的承诺」。
+    """
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    # 1) 旧的无条件承诺必须消失
+    assert "进度快照已保留，下次可断点续训" not in g, "仍残留无条件承诺（日志/确认框）"
+    assert "训练中断后进度快照会保留" not in g, "悬停提示仍无条件承诺"
+    # 2) 快照查找必须是唯一口径：_ask_resume 与停止提示共用 _latest_resume_state
+    assert "def _latest_resume_state(self, params):" in g, "缺统一快照查找"
+    i = g.find("def _ask_resume(self, params):")
+    assert i != -1, "_ask_resume 缺失"
+    assert "_latest_resume_state(params)" in g[i:i + 600], "_ask_resume 未走统一口径"
+    # 3) 停止分支按「是否真有快照」分流，并给出补救指引
+    # 注意：文件里有多个 `except core.StopRequested:`（预处理也有一个），
+    # 用 find 会命中错的那个 —— 所以直接拿「本次无快照」这句文案锚定训练停止分支。
+    j = g.find("没有产生可续训的快照")
+    assert j != -1, "没找到「本次无快照」的如实告知"
+    seg = g[max(0, j - 1600):j + 900]
+    assert "_latest_resume_state(params)" in seg, "停止分支未检查快照是否存在"
+    assert "没有产生可续训的快照" in seg, "缺「本次无快照」的如实告知"
+    assert "第一个存档点" in seg, "缺原因说明"
+    assert "_steps_per_state" in seg and "还差 {_left} 步" in seg, "缺「还差多少步到存档点」引导"
+    # 4) 停止确认框要提前说明限制，别等停了才发现
+    k = g.find("确定要停止当前任务吗？")
+    assert k != -1, "没找到停止确认框"
+    assert "没到第一个存档点就停" in g[k:k + 400], "确认框未提前说明存档点限制"
+    print("RESUME_PROMISE_TRUTHFUL_OK")
 def test_stuck_100_watchdog(base: Path):
     """100% 卡住自动停止：进程还活着且无新步数超时 → stop_active_process。"""
     import time as _time
@@ -2735,6 +2925,7 @@ def main():
         test_fourth_engine_train_pipeline(base)
         test_fizgig_deps_self_heal(base)
         test_resume_monitor_seed(base)
+        test_resume_promise_is_truthful(base)
         test_stuck_100_watchdog(base)
         test_concept_mode(base)
         test_modelscope_ptw_preferred(base)
@@ -2782,6 +2973,11 @@ def main():
         test_h3_integrity_and_nvfp4_required(base)
         test_video_preprocess_no_auto_train(base)
         test_build_env_utf8_output(base)
+        test_build_env_unbuffered_output(base)
+        test_preprocess_silent_failure_diagnosed(base)
+        test_wd14_onnx_isolated(base)
+        test_probe_onnxruntime_import(base)
+        test_preprocess_skip_is_visible(base)
         test_krea2_style_subdir_consistency(base)
         test_project_open_robust(base)
         test_run_stream_default_utf8(base)

@@ -6205,6 +6205,67 @@ def _write_at_image_template(mode, params, output_name, out_dir=None, train_dir=
 
 # ---------- 预处理 / UI / 训练 ----------
 
+def _diagnose_preprocess_failure(vpy, cmd, logf=print):
+    """预处理失败后的主动自检（2026-09-15 新增）。
+
+    为什么需要：run_stream 用管道接管子进程输出，而 Python 在管道下是**块缓冲**。
+    子进程若「零输出 + 非零退出」，几乎必然是**在初始化阶段硬崩**
+    （DLL 加载失败 / 段错误 / 被安全软件终止），崩溃前的内容整块丢失 ——
+    日志里一个字都没有，只留一句「请查看上方日志」。这对用户和排障方都是零信息
+    （2026-09-15 qionglora 用户实测就是这个死局）。
+
+    这里把能问的都问一遍，并给出**能让用户亲眼看到真实报错**的复现命令 ——
+    控制台是行缓冲，同一条命令手工跑就能看到报错（这正是"日志为空"的对症解法）。
+    """
+    logf("[预处理] " + "-" * 44)
+    logf("[预处理] 自动自检：子进程没有任何输出就退出了，先定位是环境哪一环坏")
+
+    def _probe(label, code):
+        try:
+            r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                logf("    · %-16s 正常" % label)
+                return True
+            _t = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+            logf("    · %-16s 失败 → %s" % (label, _t[-1] if _t else "(无输出, rc=%s)" % r.returncode))
+            return False
+        except Exception as e:
+            logf("    · %-16s 探测异常：%s" % (label, e))
+            return False
+
+    if not os.path.isfile(vpy):
+        logf("    · 训练 venv 的 python 不存在：%s" % vpy)
+    else:
+        _probe("python 启动", "print(1)")
+        _probe("标准库 ctypes", "import ctypes")
+        _probe("Pillow", "from PIL import Image")
+        _probe("numpy", "import numpy")
+    # 导入污染：脚本所在目录是 sys.path[0]，同名文件会顶掉真模块。
+    # preprocess.py 内已有针对 PIL/numpy 的同类提示，这里补齐**标准库**同名 ——
+    # 那种情况会让脚本在打印任何东西之前就崩，正好对应「零输出」。
+    try:
+        _script = ""
+        for _a in list(cmd)[1:]:
+            if str(_a).lower().endswith("preprocess.py"):
+                _script = str(_a)
+                break
+        if _script:
+            _sd = os.path.dirname(os.path.abspath(_script))
+            _bad = [os.path.join(_sd, _n) for _n in
+                    ("numpy.py", "numpy", "PIL.py", "PIL", "json.py", "os.py", "re.py",
+                     "shutil.py", "subprocess.py", "argparse.py", "traceback.py", "sys.py")
+                    if os.path.exists(os.path.join(_sd, _n))]
+            if _bad:
+                logf("[预处理] ⚠ 检测到会顶掉正常模块的残留文件/文件夹，请删除后重试：")
+                for _b in _bad:
+                    logf("        " + _b)
+    except Exception:
+        pass
+    logf("[预处理] 请在 cmd 窗口手工执行下面这条命令 —— 真实报错会直接显示在屏幕上：")
+    logf("    " + " ".join(str(x) for x in cmd))
+    logf("[预处理] " + "-" * 44)
+
+
 def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
     """确保 kohya venv 可 import PIL.Image + numpy（预处理必需）。
 
@@ -6247,7 +6308,14 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
              "重跑【② 安装训练内核】自动重建训练环境；手动验证命令：")
         logf(f'  {vpy} -c "import ctypes"')
         return False
-    logf("[预处理] kohya venv 的 Pillow/numpy 不可用（或强制重装），正在自动补装…")
+    if force:
+        # force 模式是「第一次跑失败之后」的兜底自愈，此时**并不知道**是不是依赖问题。
+        # 旧文案无条件断言「Pillow/numpy 不可用」，会把未知原因的失败误导成缺依赖 ——
+        # 2026-09-15 qionglora 用户实测：日志先打印「不可用」，紧接着自检却打印
+        # 「补装完成」，等于自证 numpy/Pillow 本来就是好的，白花一轮还带偏排查方向。
+        logf("[预处理] 首次失败原因未明，先排除依赖因素：强制重装 Pillow/numpy 后重试…")
+    else:
+        logf("[预处理] kohya venv 的 Pillow/numpy 不可用，正在自动补装…")
     env = build_env()
     for _round in range(2):
         _ok = False
@@ -7095,7 +7163,13 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         logf("[预处理] 已补装依赖（强制），自动重试预处理…")
         rc = run_stream(cmd, logf=logf)
     if rc != 0:
-        raise RuntimeError("预处理失败，请查看上方日志")
+        # 「请查看上方日志」在上方为空时是零信息量的（2026-09-15 qionglora 用户就卡在这）。
+        # 先跑一次主动自检，再报错 —— 报错必须自带下一步。
+        _diagnose_preprocess_failure(vpy, cmd, logf)
+        raise RuntimeError(
+            "预处理失败（退出码 %s）：请把上方【自动自检】结果发给作者；"
+            "同时建议用其中给出的命令在 cmd 窗口手工执行一次 —— 真实报错会直接显示在屏幕上。"
+            % rc)
     logf("[预处理] 完成。configs/dataset_config.toml 已自动更新。")
 
 
