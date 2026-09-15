@@ -157,7 +157,7 @@ _PRESET_BASE = {
     "krea2_at": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "8", "resolution": "1024"},
     "flux2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "1024"},
     "flux2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "768"},
-    "video": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
+    "video": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000", "video_frames": "73"},
     "qwen_image": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
     "zimage": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
 }

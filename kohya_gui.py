@@ -120,12 +120,29 @@ def _scale_param(value, factor):
 PARAM_LABELS = {
     "rank": "rank", "alpha": "alpha", "unet_lr": "学习率", "te_lr": "文本编码器学习率",
     "repeats": "repeats", "max_epochs": "最大epoch", "resolution": "分辨率",
-    "video_steps": "训练步数",
+    "video_steps": "训练步数", "video_frames": "帧数",
     # 只在旧项目迁移提示里点名用；故意不进 PARAM_ORDER（不占「已手动设定」提示条）
     "noise_offset": "噪声偏移(noise_offset)", "min_snr_gamma": "min_snr_gamma",
 }
 PARAM_ORDER = ("rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs",
-               "resolution", "video_steps")
+               "resolution", "video_steps", "video_frames")
+
+
+def default_resolution(mode, base_type):
+    """GUI 分辨率控件留空时的分模式默认值。
+
+    视频（H3）= 1280、Klein9B = 768、Krea2/FLUX.2 系 = 1024，其余按架构表
+    （Anima/SDXL 1024、SD1.5 512）。
+    此前视频模式也会落到 base_type 的默认（Anima 就是 1024），与 H3 的 1280 不一致，
+    所以单独分支出来、并抽成函数便于测试。
+    """
+    if mode == "video":
+        return str(core.H3_RESOLUTION)
+    if mode == "flux2_fz":
+        return str(core.FLUX2FZ_RESOLUTION)
+    if mode in ("krea2", "krea2_fz", "krea2_at", "flux2"):
+        return "1024"
+    return str(core.RESOLUTIONS.get(base_type, 512))
 
 # 安装包目前未做代码签名（签名证书年费数千元），Windows / 第三方杀软常报
 # "无法识别的应用" 或 "检测到威胁"。这段提示放在「发现新版本」确认框里，
@@ -1909,8 +1926,15 @@ class App:
                 "te_lr": params.get("te_lr"),
                 "repeats": params.get("repeats"),
                 "max_epochs": params.get("max_epochs"),
+                # 分辨率此前**没进白名单**：用户为省显存调低分辨率后，重开项目 / 新建项目会
+                # 静默回落到架构默认值（Anima/SDXL 1024、SD1.5 512），要跑一轮才发觉（2026-09-15）。
+                "resolution": params.get("resolution"),
                 "save_every": params.get("save_every"),
                 "sample_interval": params.get("sample_interval") or 0,
+                # 视频（H3）两项同理：video_steps / video_frames 之前也都没保存，
+                # 重开项目会回落到预设默认（2000 步 / 73 帧）。
+                "video_steps": params.get("video_steps"),
+                "video_frames": params.get("video_frames"),
                 "optimizer": params.get("optimizer") or "auto",
                 "strong_bind": bool(params.get("strong_bind", True)),
                 "clean_concept": bool(params.get("clean_concept", True)),
@@ -2418,7 +2442,8 @@ class App:
             if self.mode == "video":
                 self.preset_summary.configure(
                     text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
-                         f"学习率 {lr} · 训练步数 {pre.get('video_steps')} · 视频 24fps{stag}")
+                         f"学习率 {lr} · 训练分辨率 {pre.get('resolution')}px · "
+                         f"训练步数 {pre.get('video_steps')} · 帧数 {pre.get('video_frames')} · 视频 24fps{stag}")
             else:
                 self.preset_summary.configure(
                     text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
@@ -2998,35 +3023,43 @@ class App:
                 pass
         except Exception:
             pass
-        # 视频/AI图像模式：repeats/max_epochs/分辨率 无效，隐藏；显示"训练步数"
+        # 视频/AI图像模式：repeats/max_epochs 无效，隐藏；显示"训练步数"（视频另显示"帧数"）
         try:
             _adv = getattr(self, "_adv_frames", {})
             _use_steps = self.mode in ("video", "qwen_image", "zimage")
-            _show_reso = self.mode in ("qwen_image", "zimage")   # AI 图像：按步训练但分辨率可调（8G 建议 512，训练端会自动钳制）
-            for _k in ("repeats", "max_epochs", "resolution"):
+            for _k in ("repeats", "max_epochs"):
                 _f = _adv.get(_k)
                 if _f is not None:
                     try:
-                        if _k == "resolution":
-                            if _show_reso:
-                                _f.grid()          # Qwen/Z-Image 显示分辨率
-                            elif _use_steps:
-                                _f.grid_remove()   # 视频模式仍隐藏分辨率
-                            else:
-                                _f.grid()
-                        elif _use_steps:
+                        if _use_steps:
                             _f.grid_remove()
                         else:
                             _f.grid()
                     except Exception:
                         pass
-            _vf = _adv.get("video_steps")
-            if _vf is not None:
+            # 训练分辨率：所有模式都显示。
+            # 视频模式此前把它隐藏了 —— 当时 H3 的 yaml 里分辨率是**硬编码 1280**，
+            # 改了也不生效；结果用户没有合法入口，只能去手改 yaml，
+            # 而 yaml 每次训练都会被重新生成覆盖（2026-09-15 用户反馈）。
+            # 现在 yaml 已改读该参数，所以必须让它可见。
+            _rf = _adv.get("resolution")
+            if _rf is not None:
                 try:
-                    if _use_steps:
-                        _vf.grid()
+                    _rf.grid()
+                except Exception:
+                    pass
+            # 训练步数：按步训练的模式（视频 / Qwen / Z-Image）显示
+            # 帧数：只有视频（H3）用得上，Qwen/Z-Image 是单帧图像
+            for _k in ("video_steps", "video_frames"):
+                _f = _adv.get(_k)
+                if _f is None:
+                    continue
+                try:
+                    _show = _use_steps if _k == "video_steps" else (self.mode == "video")
+                    if _show:
+                        _f.grid()
                     else:
-                        _vf.grid_remove()
+                        _f.grid_remove()
                 except Exception:
                     pass
         except Exception:
@@ -4317,7 +4350,9 @@ class App:
         g.pack(fill="x")
         items = [("rank", "rank"), ("alpha", "alpha"), ("学习率", "unet_lr"),
                  ("文本编码器学习率", "te_lr"), ("repeats", "repeats"), ("最大 epoch", "max_epochs"),
-                 ("训练分辨率", "resolution"), ("训练步数", "video_steps")]
+                 ("训练分辨率", "resolution"), ("训练步数", "video_steps"),
+                 # 帧数：仅视频（H3）用；H3 视频 VAE 只接受 17n+5 网格，故标签直接写明
+                 ("帧数（17n+5）", "video_frames")]
         for i, (label, key) in enumerate(items):
             f = ctk.CTkFrame(g, fg_color="transparent"); f.grid(row=0, column=i, padx=10, pady=8, sticky="w")
             ctk.CTkLabel(f, text=label, font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
@@ -4330,7 +4365,7 @@ class App:
             self._adv_frames[key] = f
         # 模型保存间隔：画风/人物=每 N 步，Krea2/FLUX.2=每 N 轮（留空用默认）
         sf = ctk.CTkFrame(g, fg_color="transparent")
-        sf.grid(row=1, column=0, columnspan=9, sticky="w", padx=10, pady=(0, 8))
+        sf.grid(row=1, column=0, columnspan=10, sticky="w", padx=10, pady=(0, 8))
         ctk.CTkLabel(sf, text="模型保存间隔", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         _sv = self.param_vars.setdefault("save_every", tk.StringVar())
         self._bind_param_edit("save_every", _sv)
@@ -4592,8 +4627,9 @@ class App:
             "te_lr": float(_getv("te_lr", "1.5e-4")),
             "repeats": int(float(_getv("repeats", "5"))),
             "max_epochs": int(float(_getv("max_epochs", "8"))),
-            "resolution": int(float(_getv("resolution", str(core.FLUX2FZ_RESOLUTION) if self.mode == "flux2_fz" else ("1024" if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2") else str(core.RESOLUTIONS.get(self.base_type, 512)))))),
+            "resolution": int(float(_getv("resolution", default_resolution(self.mode, self.base_type)))),
             "video_steps": int(float(_getv("video_steps", "2000"))),
+            "video_frames": int(float(_getv("video_frames", str(core.H3_FRAMES)))),
             "save_every": (lambda _s: int(_s) if str(_s).isdigit() else None)(_getv("save_every", "")),
             "sample_interval": (lambda _s: int(_s) if str(_s).isdigit() and int(_s) > 0 else 0)(_getv("sample_interval", "")),
             "train_text_encoder": not self.unet_only_var.get(),

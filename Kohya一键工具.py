@@ -3196,6 +3196,48 @@ H3_FPS = 24
 H3_MAX_STEPS = 3000            # 视频训练步数上限（防过拟合）
 H3_DEFAULT_STEPS = 2000        # 默认总训练步数
 H3_FRAMES = 73                 # 默认抽帧数（17n+5=73，约 3 秒 @24fps）
+# H3 的两条硬约束（来自 ai-toolkit minimax_h3.py，2026-09-15 核对）：
+#   1) 帧数必须落在 17n+5 网格上（5/22/39/56/73/90…）。
+#      非网格值**不会报错**，引擎会静默向下裁帧并只打一行 warning
+#      （minimax_h3.py:750-755「trimming N-frame clips to M frames」）→ 白解码一批帧。
+#   2) 分辨率必须是 32 的倍数（16x VAE 空间压缩 × 2x2 transformer patch，
+#      minimax_h3.py:207）；非倍数会被向下吸附（:1124）。
+# 所以用户填的值必须**吸附**而不是只校验，否则界面显示与实际生效永远对不上。
+H3_FRAME_STEP = 17
+H3_FRAME_BASE = 5
+H3_ALIGN = 32
+H3_RESOLUTION = 1280           # 默认训练分辨率（预设表 video 档也是 1280）
+H3_USER_RESOLUTIONS = ("512", "640", "768", "896", "1024", "1152", "1280")   # 全部是 32 的倍数
+H3_USER_FRAMES = ("5", "22", "39", "56", "73", "90", "107")                   # 17n+5，含约 3 秒 @24fps 的 73
+
+
+def h3_align_frames(n):
+    """把帧数吸附到最近的 17n+5 网格（5/22/39/56/73/90…）。
+
+    取**最近**而非向下：向下会让 70 掉到 56（差 14 帧），用户会觉得"我填的数被吃了"；
+    取最近得到 73，既贴近用户意图，又保证在网格上、不会被引擎再裁一次。
+    非数字/非法值回落到默认 H3_FRAMES。
+    """
+    try:
+        n = int(n)
+    except Exception:
+        return H3_FRAMES
+    if n <= H3_FRAME_BASE:
+        return H3_FRAME_BASE
+    k = int(round((n - H3_FRAME_BASE) / float(H3_FRAME_STEP)))
+    return max(H3_FRAME_BASE, k * H3_FRAME_STEP + H3_FRAME_BASE)
+
+
+def h3_align_resolution(n):
+    """把分辨率向下对齐到 32 的倍数（H3 的 16x VAE 压缩 × 2x2 patch）。
+
+    向下（不用四舍五入）与引擎内部行为一致，也偏向省显存。
+    """
+    try:
+        n = int(n)
+    except Exception:
+        return H3_RESOLUTION
+    return max(H3_ALIGN, (n // H3_ALIGN) * H3_ALIGN)
 
 # H3 模型文件（放 models/minimax_h3/，不内置；国内镜像直链）
 H3_MODEL_LINKS = {
@@ -4958,7 +5000,22 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
     lr = float(params.get("unet_lr", 2e-4))
     steps = int(params.get("video_steps", H3_DEFAULT_STEPS))
     steps = max(100, min(H3_MAX_STEPS, steps))
-    frames = int(params.get("video_frames", H3_FRAMES))
+    # 帧数 / 分辨率必须吸附到 H3 的硬约束网格（理由见 H3_FRAME_STEP / H3_ALIGN 的常量注释）：
+    # 此前 resolution 与 sample 宽高是写死的 1280/720，video_frames 又从未被界面写入，
+    # 于是用户改了这两项都不生效；而手改 yaml 会被本函数下次生成时覆盖（2026-09-15 用户反馈）。
+    _req_frames = params.get("video_frames", H3_FRAMES)
+    frames = h3_align_frames(_req_frames)
+    if str(_req_frames).strip() != str(frames):
+        logf("[视频] 帧数 %s → %d（H3 视频 VAE 只接受 17n+5：5/22/39/56/73/90…，"
+             "不吸附会被引擎静默裁帧、白解码）" % (_req_frames, frames))
+    _req_reso = params.get("resolution") or H3_RESOLUTION
+    reso = h3_align_resolution(_req_reso)
+    if str(_req_reso).strip() != str(reso):
+        logf("[视频] 分辨率 %s → %d（H3 要求 32 的倍数）" % (_req_reso, reso))
+    # 采样保持 16:9，并同样对齐到 32 的倍数（原来写死 1280x720，而 720 其实不是 32 的倍数）
+    sample_h = h3_align_resolution(max(H3_ALIGN, reso * 9 // 16))
+    logf("[视频] 实际生效：训练分辨率 %dpx（=%d 的倍数）· 抽帧 %d 帧 · 采样 %dx%d"
+         % (reso, H3_ALIGN, frames, reso, sample_h))
     trig = params.get("trigger") or ""
     if vpy:
         try:
@@ -4970,7 +5027,7 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
     _opt_yaml = _optimizer_yaml_name(_opt_k)
     # 记录实际生效值（参数报告 / 使用模板读取）
     _record_effective(engine="AI Toolkit (ai-toolkit)", optimizer=_opt_k, total_steps=steps,
-                      note="视频：抽帧 %d 帧" % frames)
+                      resolution=reso, note="视频：抽帧 %d 帧 · 采样 %dx%d" % (frames, reso, sample_h))
     model_dir = h3_models_dir().replace("\\", "/")
     # 显存适配：照搬 ai-toolkit 官方 / RunComfy 社区配置（H3 为 33B 视频模型）
     #  - low_vram: true —— 官方默认开启；DiT(约19.5G)+Qwen3-VL-32B TE(约14.6G) 无法同时常驻
@@ -5021,7 +5078,7 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        - folder_path: " + _yq(video_dir) + "\n"
         "          caption_ext: \"txt\"\n"
         "          num_frames: " + str(frames) + "\n"
-        "          resolution: [1280, 1280]\n"
+        "          resolution: [" + str(reso) + ", " + str(reso) + "]\n"
         "      train:\n"
         "        batch_size: 1\n"
         "        steps: " + str(steps) + "\n"
@@ -5047,8 +5104,8 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "      sample:\n"
         "        sampler: \"flowmatch\"\n"
         "        sample_every: 250\n"
-        "        width: 1280\n"
-        "        height: 720\n"
+        "        width: " + str(reso) + "\n"
+        "        height: " + str(sample_h) + "\n"
         "        num_frames: " + str(frames) + "\n"
         "        fps: 24\n"
         "        prompts:\n"

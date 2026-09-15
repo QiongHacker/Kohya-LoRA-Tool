@@ -1623,6 +1623,63 @@ def test_h3_vram_adapt(base: Path):
     assert any("19.5GB" in m for m in miss24), miss24
     print("H3_VRAM_ADAPT_OK")
 
+def test_h3_resolution_frames(base: Path):
+    """H3 训练 yaml 必须采用用户的分辨率/帧数，并吸附到引擎的硬约束网格。
+
+    背景（2026-09-15 用户反馈）：yaml 里 `resolution: [1280, 1280]` 与采样 `width/height`
+    曾是**硬编码字面量**，`video_frames` 又从未被 GUI 写入 params → 用户改这两项都不生效；
+    而手改 yaml 会被下次生成覆盖，表现为「改了还是会变回配置里的 1280 和 73」。
+    （test_h3_vram_adapt 显式传了 video_frames=73，正好绕过这个缺口，所以没被早期测试发现。）
+
+    两条约束来自 ai-toolkit
+    （extensions_built_in/diffusion_models/minimax_h3/minimax_h3.py）：
+      - 帧数须为 17n+5（5/22/39/56/73/90…），否则引擎**静默向下裁帧**（:750-755）
+      - 分辨率须为 32 的倍数（16x VAE 空间压缩 × 2x2 patch，:207）
+    """
+    import io as _io
+    out = base / "h3_rf"
+    out.mkdir(exist_ok=True)
+    p = {"project": "t", "rank": 32, "alpha": 32, "unet_lr": 2e-4,
+         "video_steps": 100, "trigger": "x"}
+
+    def gen(extra, tag):
+        cfg = out / ("rf_%s.yaml" % tag)
+        core.write_h3_train_yaml(dict(p, **extra), str(base / "videos"), str(base / "out"),
+                                 str(cfg), vpy=None, logf=lambda *a: None, vram_gb=8)
+        return _io.open(str(cfg), encoding="utf-8").read()
+
+    # 用户给的值必须被采用（不再写死 1280 / 恒 73）
+    t = gen({"resolution": 768, "video_frames": 56}, "user")
+    assert "resolution: [768, 768]" in t, t
+    assert "num_frames: 56" in t, t
+    assert "width: 768" in t, t
+    assert "height: 416" in t, t          # 768*9//16=432，再向下对齐到 32 的倍数 = 416
+
+    # 不在网格上的值要被吸附（而不是原样透传、再被引擎静默裁掉）
+    assert "num_frames: 73" in gen({"video_frames": 70}, "snap_f"), "帧数未吸附到 17n+5"
+    assert "resolution: [704, 704]" in gen({"resolution": 720}, "snap_r"), "分辨率未吸附到 32 倍数"
+
+    # 未提供时回落默认
+    t3 = gen({}, "default")
+    assert "resolution: [1280, 1280]" in t3, t3
+    assert "num_frames: 73" in t3, t3
+    assert "height: 704" in t3, t3        # 720 不是 32 的倍数
+
+    # 吸附纯函数
+    for src, exp in ((73, 73), (70, 73), (60, 56), (5, 5), (1, 5)):
+        assert core.h3_align_frames(src) == exp, (src, core.h3_align_frames(src))
+    for src, exp in ((1280, 1280), (768, 768), (720, 704), (100, 96), (10, 32)):
+        assert core.h3_align_resolution(src) == exp, (src, core.h3_align_resolution(src))
+
+    # GUI 侧接线（源码断言，避免 import customtkinter）：帧数控件、项目存档、视频分辨率默认值
+    _g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8-sig")
+    assert '("帧数（17n+5）", "video_frames")' in _g, "高级参数缺「帧数」控件"
+    assert '"video_frames": int(float(_getv("video_frames"' in _g, "未收集 video_frames"
+    assert '"resolution": params.get("resolution"),' in _g, "项目存档未保存 resolution"
+    assert 'return str(core.H3_RESOLUTION)' in _g, "视频分辨率默认值未单独分支"
+    assert core.H3_RESOLUTION == 1280
+    print("H3_RESOLUTION_FRAMES_OK")
+
 def test_video_caption_args(base: Path):
     """video_caption.py 的 args 引用必须全部有定义（修复 args.model 未定义导致视频自动打标必崩）。"""
     vc = (ROOT / "video_caption.py").read_text(encoding="utf-8")
@@ -2719,6 +2776,7 @@ def main():
         test_diagnose_optimizer_failure_scenarios(base)
         test_anima_rdna2_no_half_vae(base)
         test_h3_vram_adapt(base)
+        test_h3_resolution_frames(base)
         test_video_caption_args(base)
         test_preprocess_python_fallback(base)
         test_h3_integrity_and_nvfp4_required(base)
