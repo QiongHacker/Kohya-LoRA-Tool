@@ -2419,12 +2419,19 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
 
 
 def _log_mentions_compile_failure(tail):
-    """训练子进程日志是否出现 torch.compile / Triton 编译类致命错误（用于自动去掉 --compile 重试）。"""
+    """训练子进程日志是否出现 torch.compile / Triton 编译类致命错误（用于自动去掉编译参数重试）。
+
+    覆盖两条链路：第二引擎 musubi 的 --compile（per-block）与第一引擎 sd-scripts 的
+    --torch_compile（accelerate dynamo）。dynamo 的报错文案比 inductor 更宽
+    （BackendCompilerFailed / torch._dynamo.exc.Unsupported 等），一并纳入；
+    多命中只会让「回退重试」更早触发，方向是安全的（宁可退成 SDPA，也不要整轮训练崩掉）。
+    """
     blob = "\n".join(tail or [])
     return any(m in blob for m in (
         "TritonMissing", "Cannot find a working triton", "cannot find a working triton",
         "TritonError", "TritonAssertionError", "torch._inductor.exc",
         "CompilationError", "InductorError",
+        "torch._dynamo.exc", "BackendCompilerFailed", "DynamoError",
     ))
 
 
@@ -2455,17 +2462,18 @@ def _compile_probe_code():
     )
 
 
-def _ensure_compile_ready(mvpy, logf=print):
+def _ensure_compile_ready(mvpy, logf=print, label="Krea2"):
     """torch.compile 开启前的安全自检（v0.11.2）。
 
-    返回 (ok, note)。ok=True 才允许给训练命令加 --compile；否则调用方应回退标准 SDPA。
-    - 探针：在 musubi venv 里跑真实 CUDA forward+backward（torch.compile 小图），
+    返回 (ok, note)。ok=True 才允许给训练命令加编译参数；否则调用方应回退标准注意力。
+    - 探针：在目标 venv 里跑真实 CUDA forward+backward（torch.compile 小图），
       TritonMissing / inductor 不可用会在此暴露；
     - 自检失败 → 自动补装 triton-windows（阿里云/清华国内镜像）→ 再自检；
-    - 仍失败 → 返回 False，调用方去掉 --compile 继续训练，绝不中断。
+    - 仍失败 → 返回 False，调用方去掉编译参数继续训练，绝不中断。
+    label：日志前缀（第一引擎传「训练」，第二引擎沿用默认「Krea2」）。
     """
     if not mvpy or not os.path.isfile(mvpy):
-        return False, "musubi venv 不存在"
+        return False, "训练环境 venv 不存在"
     _probe = _compile_probe_code()
 
     def _run():
@@ -2473,7 +2481,7 @@ def _ensure_compile_ready(mvpy, logf=print):
 
     if _run() == 0:
         return True, "Triton 自检通过（真实 forward+backward 成功）"
-    logf("[Krea2] ⚠ torch.compile 自检失败（可能缺 Triton），自动补装 triton-windows==%s（国内镜像）…" % TRITON_WINDOWS_PIN)
+    logf("[%s] ⚠ torch.compile 自检失败（可能缺 Triton），自动补装 triton-windows==%s（国内镜像）…" % (label, TRITON_WINDOWS_PIN))
     try:
         _venv = os.path.dirname(os.path.dirname(mvpy))
         if run_pip_in_venv(_venv, ["triton-windows==%s" % TRITON_WINDOWS_PIN], logf) != 0:
@@ -9115,6 +9123,32 @@ def _safetensors_is_prequantized(path):
         return False
 
 
+def _sd_fp8_base_unet(family, amd_mode, mixed, vram_gb, base_model):
+    """第一引擎 SD/SDXL 是否给 U-Net 加 fp8 底模（sd-scripts 的 --fp8_base_unet）。
+
+    判定依据：
+      · 只有 SD 系（SD1.5/SDXL）用；FLUX 另有自己的 fp8 档，Anima 官方不支持 fp8；
+      · AMD(ROCm) 不加 —— fp8 在 ROCm 上没验证过；
+      · 混合精度必须是 fp16/bf16（sd-scripts 的断言要求，mixed_precision=no 会直接报错）；
+      · 显存 >=16G 不加 —— 那档不缺显存，fp8 在部分卡上反而略慢；
+      · 底模本身已是 fp8/int8 预量化则不加（再量化会冲突报错）。
+
+    实测收益（本机 AniShadow_V5，只读 safetensors 头部统计）：
+      SDXL U-Net 4.78GB → 省 2.39GB；SD1.5 U-Net 1.60GB → 省 0.80GB。
+    用 --fp8_base_unet 而非 --fp8_base：只压 U-Net、不动 Text Encoder。
+    LoRA 训练时 U-Net 本就冻结，量化它不影响质量；TE 要参与训练，保持 fp16/bf16 更稳。
+    """
+    if family != "sd":
+        return False
+    if amd_mode:
+        return False
+    if mixed not in ("fp16", "bf16"):
+        return False
+    if vram_gb is not None and vram_gb >= 16:
+        return False
+    return not _safetensors_is_prequantized(base_model)
+
+
 def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", allow_nf4=True, prequantized=False):
     """按显存档位 + 用户请求（auto/nf4/int8/fp8）决定量化方式，返回 (quant, detail)。
 
@@ -9867,6 +9901,35 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     ]
     if base_type == "sdxl" and not train_te:
         cmd.append("--cache_text_encoder_outputs")
+    # ① 底模 fp8（仅 SD 系）：sd-scripts 官方参数，实现在父类 train_network.py:1236-1254，
+    #    SDXL 的 SdxlNetworkTrainer 不覆盖 train()，所以同样生效（此前只有 FLUX 用了 fp8）。
+    #    用 --fp8_base_unet：只量化 U-Net、不动 Text Encoder —— LoRA 训练时 U-Net 本就冻结，
+    #    量化它不影响训练质量；而 TE 要参与训练，保持 fp16/bf16 更稳。
+    #    实测收益（本机 AniShadow_V5）：SDXL U-Net 4.78GB → 省 2.39GB；SD1.5 1.60GB → 省 0.80GB
+    #    （fp8 会把卷积也一起压一半，所以 SD1.5 这种卷积主导的 UNet 同样受益）。
+    #    不加的情况：AMD（ROCm 上 fp8 未验证）、底模本身已是预量化 fp8。
+    if _sd_fp8_base_unet(family, amd_mode, mixed, vram_gb, base_model):
+        cmd.append("--fp8_base_unet")
+        logf("[训练] U-Net fp8 已开启（--fp8_base_unet）：省显存，Text Encoder 保持 %s 不受影响" % mixed)
+    # ② torch.compile（仅 SD 系，用户显式勾选才开）：
+    #    LoRA 训练时 train_unet=True（train_network.py:1114）→ U-Net 会走 accelerator.prepare
+    #    → accelerate dynamo 真正编译 U-Net（这是唯一能直接提速的官方开关；非 LoRA 路径会失效）。
+    #    Windows 下依赖 Triton：先自检，缺则自动补装 triton-windows；装不上/编译崩都自动回退，不中断训练。
+    _sd_compile = str(params.get("compile") or "").lower() in ("1", "true", "on", "开")
+    _sd_compile_ok = False
+    if family == "sd" and _sd_compile:
+        if vram_gb is not None and vram_gb < 10:
+            logf("[训练] ⚠ 显存 <10G：torch.compile 编译需额外显存、训练开始易 OOM，已自动禁用（标准 SDPA 继续）。")
+        else:
+            _ok_c, _note_c = _ensure_compile_ready(vpy, logf, label="训练")
+            if _ok_c:
+                _sd_compile_ok = True
+                cmd.append("--torch_compile")
+                logf("[训练] torch.compile 已开启（%s）" % _note_c)
+                if vram_gb is not None and vram_gb < 16:
+                    logf("[训练] ⚠ 编译需额外显存：若训练开始 OOM，请取消勾选「torch.compile 加速」")
+            else:
+                logf("[训练] ⚠ torch.compile 已自动禁用（%s），本次用标准 SDPA 继续训练，不会中断。" % _note_c)
     if family == "sd":
         # SD1.5 / SDXL 质量增强（预设表 _PRESET_SD_EXTRA，仅这两个架构带）
         _sq_args, _sq_txt = sd_quality_args(params)
@@ -9897,6 +9960,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     logf(f"[训练] 模式: {MODE_LABELS.get(mode, mode)} | 脚本: {script} | 分辨率: {resolution}px")
     logf(f"[训练] LoRA 参数: dim={rank}, alpha={alpha}, lr={unet_lr}, te_lr={te_lr}, epochs={epochs}, repeats={params.get('repeats', 5)}")
     logf(f"[训练] batch={batch_size} | 混合精度={mixed} | 注意力: {'xformers' if use_xformers else 'sdpa'} | 梯度检查点: {'开' if gc_on else '关'}"
+         + (f" | torch.compile: {'开' if _sd_compile_ok else '关'}" if family == "sd" else "")
          + (f"（显存 {vram_gb:.1f}GB 智能适配）" if vram_gb else ""))
     if mode == "character":
         logf(f"[训练] trigger: {params.get('trigger') or '（未填写）'}"
@@ -9974,6 +10038,12 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             _force_rebuild_tokenizer_cache(data_sub("tokenizers"), _tid, _kind, logf)
         _log_tail.clear()
         rc = run_stream(cmd, cwd=sds, env=env, logf=logf, collect=_log_tail)
+    if rc != 0 and _sd_compile_ok and _log_mentions_compile_failure(_log_tail):
+        # torch.compile 运行期编译崩（Triton/inductor 异常）→ 自动去掉 --torch_compile 重试一次。
+        # latent/文本编码器缓存都已在，重试很快；不让一个可选的加速开关把整个训练搞失败。
+        logf("[训练] ⚠ torch.compile 运行期编译失败（Triton/inductor 异常），自动去掉 --torch_compile 用标准 SDPA 重试一次…")
+        _log_tail.clear()
+        rc = run_stream([a for a in cmd if a != "--torch_compile"], cwd=sds, env=env, logf=logf, collect=_log_tail)
     if rc != 0:
         if progress is not None:
             try:

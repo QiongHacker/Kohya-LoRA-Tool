@@ -2896,8 +2896,9 @@ class App:
                         pass
         except Exception:
             pass
-        # torch.compile 加速只接第二引擎 musubi 的 Krea2/FLUX.2（--compile）；第三引擎（ai-toolkit）yaml 无 compile 配置，
-        # 显示在视频H3/Krea2AT/Qwen/Z-Image 是误导，隐藏（2026-09-01 群友 16G 第三引擎误勾加速导致困惑）。
+        # torch.compile 加速已接：第一引擎 SD/SDXL（--torch_compile，编译 U-Net）、第二引擎 musubi 的 Krea2/FLUX.2（--compile）；
+        # 第三引擎（ai-toolkit）yaml 无 compile 配置，显示在视频H3/Krea2AT/Qwen/Z-Image 是误导，隐藏
+        # （2026-09-01 群友 16G 第三引擎误勾加速导致困惑）。
         try:
             _cr = getattr(self, "compile_row", None)
             if _cr is not None:
@@ -4418,11 +4419,11 @@ class App:
             self.compile_var.trace_add("write", lambda *a: self._schedule_autosave())
         except Exception:
             pass
-        self.chk_compile = ctk.CTkCheckBox(cc, text="torch.compile 加速（实验性，Krea2/FLUX.2）",
+        self.chk_compile = ctk.CTkCheckBox(cc, text="torch.compile 加速（实验性，SD/SDXL/Krea2/FLUX.2）",
                                            variable=self.compile_var, fg_color=ACC, hover_color=ACC_H,
                                            text_color=TXT, font=ui_font(FONT_HINT))
         self.chk_compile.pack(side="left")
-        ctk.CTkLabel(cc, text="（musubi 编译 28 个块提速；16G 卡建议配合关闭采样预览；Windows 下可能编译失败，慎开）",
+        ctk.CTkLabel(cc, text="（第一引擎编译 U-Net；第二引擎编译 28 个块。编译需额外显存，<10G 自动禁用；Windows 下可能编译失败，慎开）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         self.global_frame = ctk.CTkFrame(self.adv_body, fg_color="transparent")
         self.global_frame.pack(fill="x", pady=(10, 0))
