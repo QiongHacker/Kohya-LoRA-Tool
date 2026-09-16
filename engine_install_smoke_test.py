@@ -2999,6 +2999,72 @@ def test_modal_dialogs_logged(base: Path):
     print("MODAL_DIALOGS_LOGGED_OK")
 
 
+def test_multiselect_click_toggle(base: Path):
+    """「多选模式」必须真正做到「点一下即切换」，且保留滑动选择。
+
+    2026-09-16 用户反馈「多选按钮不是很顺手」——上一版只把 selectmode 换成 extended，
+    而 **extended 本来就要求按 Ctrl**，所以开关打开后仍然得按 Ctrl，等于没生效
+    （当时又按要求去掉了说明文字，这个"没生效"就一直没被发现）。
+
+    实测四种 selectmode 的真实行为（Tk 原生互斥，2026-09-16）：
+        browse / single : 单击即替换选择，多选不了
+        multiple        : 单击即切换 ✓ 但**拖拽只选中起始那一行**，没有滑动选择 ✗
+        extended        : 拖拽连续 ✓ 但**单击替换选择**（需 Ctrl）✗
+    → 结论：必须自己接管鼠标事件（`_attach_multiselect`）。
+    """
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    i = g.find("def _attach_multiselect(self")
+    assert i != -1, "缺少自实现的多选逻辑 _attach_multiselect"
+    seg = g[i:i + 3200]
+    # 1) 三处鼠标事件都要接管
+    for ev in ('"<ButtonPress-1>"', '"<B1-Motion>"', '"<ButtonRelease-1>"'):
+        assert ("lb.bind(%s" % ev) in seg, "未接管 %s" % ev
+    # 2) 三个关键实现点（少一个行为就不对）
+    assert 'st["base"] = set(lb.curselection())' in seg, "按下时未记录按下前的选中集"
+    assert 'st["base"] | set(range(lo, hi + 1))' in seg, "拖动未做区间叠加（滑动选择）"
+    assert 'st["base"] ^ {st["anchor"]}' in seg, "未拖动时未切换该行（等价 Ctrl+单击）"
+    assert 'return "break"' in seg, "未挡掉原生「替换选择」，单击仍会清掉已选项"
+    # 3) 两个列表都要挂上（图片列表 + 标签统计窗）
+    assert g.count("self._attach_multiselect(") >= 2, "没有同时挂到图片列表与标签统计窗"
+    assert "self._attach_multiselect(self.listbox, on_change=self._on_select)" in g, \
+        "图片列表未挂自实现多选"
+    print("MULTISELECT_CLICK_TOGGLE_OK")
+
+
+def test_vpred_base_parameterization(base: Path):
+    """v-prediction 底模必须自动加 --v_parameterization，否则采样预览是纯噪点。
+
+    2026-09-15 用户实证：底模 noobaiXLNAIXL_vPred10Version（v-pred 版），工具没传
+    --v_parameterization → sd-scripts 按 epsilon 训练+采样。训练 loss 看着仍然正常
+    （avr_loss=0.0965，最迷惑人），但预览图全是噪点。
+
+    关键点：v-pred 与 eps 的**模型结构完全相同**，detect_base_type 靠架构键分类
+    认不出来，只能按文件名判断 —— 所以这个测试同时守住「识别函数」和「接线」两处。
+    """
+    # 1) 识别函数：各种写法都要认，且不能误伤 eps / 普通模型
+    assert core._looks_like_vpred("noobaiXLNAIXL_vPred10Version.safetensors"), "未识别 vPred（驼峰）"
+    assert core._looks_like_vpred("my_model-v-pred.safetensors"), "未识别 v-pred（连字符）"
+    assert core._looks_like_vpred("G:/models/sd_xl_vpred.safetensors"), "未识别 vpred（全小写 + 路径）"
+    assert core._looks_like_vpred("foo_v_prediction.safetensors"), "未识别 v_prediction"
+    assert not core._looks_like_vpred("noobaiXLNAIXL_epsilonPred11Version.safetensors"), "eps 版被误判为 v-pred"
+    assert not core._looks_like_vpred("novaAnimeXL_ilV30HappyNewYear.safetensors"), "普通模型被误判"
+    assert not core._looks_like_vpred(""), "空路径应为 False"
+    assert not core._looks_like_vpred(None), "None 应为 False"
+    # 2) 接线：train() 的 family == "sd" 分支必须加 --v_parameterization
+    k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    i = k.find('    if family == "sd":\n        cmd += [f"--unet_lr={unet_lr}"')
+    assert i != -1, "找不到 train() 的 sd 分支"
+    seg = k[i:i + 800]
+    assert "_looks_like_vpred(base_model)" in seg, "sd 分支未判断 v-pred"
+    assert '"--v_parameterization"' in seg, "sd 分支未加 --v_parameterization"
+    # 3) 采样提示词：第一引擎也要写 --w/--h（不写会按 512 出图，1024 训练的图又小又糊）
+    j = k.find("def _write_sample_prompts(")
+    assert j != -1, "找不到 _write_sample_prompts"
+    body = k[j:j + 3000]
+    assert "elif resolution:" in body, "第一引擎采样提示词未写分辨率"
+    print("VPRED_PARAMETERIZATION_OK")
+
+
 def main():
     # 每条用例独立 try/except：任何一条失败（常见于「实现改了、断言没跟着改」）都不再中断整个套件。
     # 否则后面几十条用例会被一条过期断言全部吞掉 —— v0.15.11~v0.16.5 就踩过：
@@ -3086,6 +3152,8 @@ def main():
         test_fizgig_preview_swap(base)
         test_fizgig_sample_off_warned(base)
         test_modal_dialogs_logged(base)
+        test_vpred_base_parameterization(base)
+        test_multiselect_click_toggle(base)
         test_preprocess_skip_is_visible(base)
         test_krea2_style_subdir_consistency(base)
         test_project_open_robust(base)

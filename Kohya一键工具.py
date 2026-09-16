@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.16.11"
+APP_VERSION = "0.16.12"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -429,6 +429,108 @@ class TrainMonitor:
                 "started_at": self.started_at, "last_activity": self.last_activity,
                 "phase": self.phase, "phase_label": self.phase_label,
                 "nan_detected": self.nan_detected,
+            }
+
+    def finish(self):
+        with self._lock:
+            self.running = False
+
+
+class PreprocessMonitor:
+    """预处理进度监控：解析 preprocess.py（子进程）输出里的阶段进度。
+
+    为什么只能解析日志：预处理跑在**独立子进程**里（`preprocess()` 用 run_stream
+    拉起 `preprocess.py`），父进程拿不到任何回调 —— 子进程 stdout 是唯一的信息通道。
+    所以这里不做回调注入，只把日志里的进度抽出来，与 TrainMonitor 同一套路
+    （线程安全 + snapshot() 轮询）。
+
+    目前只有 WD14 打标阶段报逐张进度：
+        [WD14] 内置打标进度：120/450（已写 120 张）
+    而这恰好是预处理里最长、最容易让人怀疑「是不是卡住了」的一段
+    （2026-09-16 用户反馈）。
+
+    ⚠️ 两个实测口径（决定了界面该怎么显示，别照直觉改）：
+      1. `done` 是**每 5 张**报一次（preprocess.py 的 `done % 5 == 0 or done == total`），
+         所以两次更新之间隔个位数秒是正常的，不代表卡住；判定「卡住」的阈值要放宽。
+      2. 官方打标脚本（kohya 自带 sd-scripts）走 **tqdm**，它是 `\\r` 原地刷新、
+         不是整行输出，**拿不到 N/M**。这条路径下只能报「阶段已开始 + 已运行多久」，
+         绝不假装 0% 假进度 —— 有 0/0 的确定条比没有进度更让人以为死了。
+    """
+
+    # [WD14] 内置打标进度：120/450（已写 120 张） —— 兼容半角冒号与数字前后空格
+    _PROG_RE = re.compile(r"\[[^\]]+\][^\n]*?进度[：:]\s*(\d+)\s*/\s*(\d+)")
+    # 行首标签：[WD14] / [预处理] / [训练] …
+    _TAG_RE = re.compile(r"^\s*\[([^\]]+)\]")
+    # 只认这几个标签：打标阶段之外的行（训练/安装/下载）不许驱动预处理进度
+    _TAGS = ("WD14",)
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        with self._lock:
+            self._reset_locked()
+
+    def _reset_locked(self):
+        """锁内复位（与 TrainMonitor 一致：避免嵌套获取同一把非重入锁）。"""
+        self.stage = ""            # 阶段名，如「内置打标」
+        self.done = 0
+        self.total = 0
+        self.running = False       # 阶段是否已开始（界面据此决定显不显示）
+        self.finished = False
+        self.started_at = None
+        self.last_activity = None
+
+    @staticmethod
+    def _stage_of(line):
+        """从进度行取阶段名：`[WD14] 内置打标进度：1/2` -> `内置打标`；取不到则兜底。"""
+        i = line.find("]")
+        j = line.rfind("进度")
+        if i != -1 and j > i:
+            lab = line[i + 1:j].strip()
+            if 0 < len(lab) <= 12:
+                return lab
+        return "WD14 打标"
+
+    def feed(self, text):
+        """喂一段日志，命中打标进度就更新状态。返回本次是否命中（便于测试）。
+
+        run_stream 是逐行回调的，这里仍按 splitlines 切开，兼容整块传入。
+        """
+        hit = False
+        for line in str(text or "").splitlines():
+            m = self._TAG_RE.match(line)
+            if not m or m.group(1).strip().upper() not in self._TAGS:
+                continue
+            now = time.time()
+            with self._lock:
+                # 任何一条 [WD14] 行都说明打标阶段已开始 —— 即使还没有逐张数字，
+                # 也能让界面说出「现在卡在哪一步」，而不是一片空白。
+                if not self.running:
+                    self.running = True
+                    self.started_at = now
+                if not self.stage:
+                    self.stage = "WD14 打标"
+                self.last_activity = now
+                pm = self._PROG_RE.search(line)
+                if pm:
+                    self.stage = self._stage_of(line)
+                    self.done = int(pm.group(1))
+                    self.total = max(int(pm.group(2)), self.done)
+                elif "完成" in line and self.total and not self.finished:
+                    # 收尾行：补到 100%（末批不足 5 张时不会打最后那条进度行）
+                    self.done = self.total
+                    self.finished = True
+            hit = True
+        return hit
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "stage": self.stage, "done": self.done, "total": self.total,
+                "running": self.running, "finished": self.finished,
+                "started_at": self.started_at, "last_activity": self.last_activity,
             }
 
     def finish(self):
@@ -9776,6 +9878,13 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
     if engine == "musubi":
         res = int(resolution or 1024)
         prompt += f" --w {res} --h {res} --s 20"
+    elif resolution:
+        # 第一引擎（kohya）：不写 --w/--h 时采样器按默认尺寸（512）出图 ——
+        # SDXL / Anima 按 1024 训练却出 512 预览，图小且糊。
+        # sd-scripts 的采样提示词支持 --w/--h，这里按训练分辨率给出
+        # （该分辨率本身已按显存适配过，不会额外增加 OOM 风险）。
+        res = int(resolution)
+        prompt += f" --w {res} --h {res}"
     if cfg_scale:
         # Fizgig 专属：显式写 CFG scale（--l）。不写的话引擎会注入空格负向词 → 走 CFG 分支
         # 但 cfg_scale=None → denoise_cfg 崩 TypeError，且异常会跳过块交换还原，训练越跑越慢（issue #6）
@@ -10107,6 +10216,11 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     ]
     if family == "sd":
         cmd += [f"--unet_lr={unet_lr}", f"--text_encoder_lr={te_lr}"]
+        # v-pred 底模必须显式声明参数化：不声明会按 epsilon 训练+采样 → 预览图与实际出图都是噪点
+        if _looks_like_vpred(base_model):
+            cmd.append("--v_parameterization")
+            logf("[训练] 检测到 v-prediction 底模（文件名含 vPred）：已自动加 --v_parameterization"
+                 "（不加会按 epsilon 采样，预览图会是噪点）")
     if not train_te or family == "anima":
         # FLUX/Anima 默认只训练 DiT 部分（Anima 的 Qwen3 文本编码器始终冻结）
         cmd.append("--network_train_unet_only")
@@ -10265,7 +10379,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         _start_anima_latent_nan_watcher(dataset_dir, vpy, logf)
     # 训练中采样出图预览（kohya 引擎原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
-        _sp = _write_sample_prompts(output_name, params, mode, train_dir=train_dir)
+        _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution,
+                                    train_dir=train_dir)
         if _sp:
             _si = int(params.get("sample_interval") or 0)
             _sample_n = _si if _si >= 10 else int(save_every)
@@ -10800,6 +10915,23 @@ def detect_base_type(model_path):
 
 
 # ---------- FLUX / Anima 组件 ----------
+
+def _looks_like_vpred(model_path):
+    """底模是否为 v-prediction 参数化（SD1.5 / SDXL）。
+
+    ⚠️ 为什么必须单独判断：v-pred 与 eps 的**模型结构完全相同**（差的只是训练目标），
+    所以 `detect_base_type` 靠 safetensors 键分类架构是**认不出来**的 —— 只能靠文件名。
+
+    ⚠️ 漏判的后果：sd-scripts 会按 **epsilon** 训练并采样。而训练 loss 看着仍然"正常"
+    （2026-09-15 用户实测 avr_loss=0.0965，这是最迷惑人的地方），但采样出来是**纯噪点**
+    —— 该用户用 noobaiXLNAIXL_vPred10Version 反馈「SDXL 采样预览全是乱码」。
+    """
+    try:
+        _n = os.path.basename(str(model_path or "")).lower()
+    except Exception:
+        return False
+    return any(k in _n for k in ("vpred", "v-pred", "v_pred", "vprediction"))
+
 
 def _looks_like_krea2(model_path):
     """Krea2 底模识别：safetensors 键含 txtfusion（DiT 文本融合）或文件名含 krea2。

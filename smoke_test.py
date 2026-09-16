@@ -575,6 +575,119 @@ def test_label_editor_safety():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_home_output_button():
+    """主页要有直达「输出目录」的入口，且打开目录的路径必须健壮。
+
+    2026-09-16 用户反馈：想看训练出来的 LoRA，必须先打开某个项目，
+    或者自己去 %APPDATA%\\KohyaLoraTool\\output 里翻，很费劲。
+
+    两个关键点：
+      ① 主页入口给的是**输出根目录**（不是某个项目）—— 一次看到全部项目，
+         这才真正免除「先点开之前的项目」；
+      ② 打开目录不能裸调 os.startfile —— 从没训练过时目录根本不存在，会静默失手。
+    """
+    from pathlib import Path
+    import Kohya一键工具 as core
+    gsrc = Path(os.path.join(os.path.dirname(core.__file__), "kohya_gui.py")).read_text(encoding="utf-8-sig")
+
+    # 1) 主页头部有这个按钮，绑到输出根目录入口，并登记进 _home_widgets（否则切页会残留）
+    i = gsrc.find("def _build_home(self)")
+    j = gsrc.find("def _show_home(self)")
+    assert i != -1 and j > i, "找不到 _build_home / _show_home"
+    head = gsrc[i:j]
+    assert "self.btn_output_dir = ctk.CTkButton(" in head, "主页头部缺少「输出目录」按钮"
+    assert "command=self.cmd_open_output_root" in head, "主页按钮未绑定到输出根目录入口"
+    assert "self._home_widgets.append(self.btn_output_dir)" in head, "按钮未登记进主页组件"
+
+    # 2) 打开目录必须「先建目录 + 失败有提示」
+    k = gsrc.find("def _open_dir_or_warn(self")
+    assert k != -1, "缺少健壮的打开目录封装 _open_dir_or_warn"
+    body = gsrc[k:k + 900]
+    assert "os.makedirs(d, exist_ok=True)" in body, "打开前未确保目录存在（从没训练过会失手）"
+    assert "messagebox.showerror(" in body, "打开失败未提示用户"
+
+    # 3) 两个入口语义必须不同：主页 = 输出根目录；工作区 = 当前项目
+    a = gsrc.find("def cmd_open_output_root(self")
+    assert a != -1, "缺少 cmd_open_output_root"
+    assert 'core.data_sub("output")' in gsrc[a:a + 800], "主页入口未指向输出根目录"
+    b = gsrc.find("def cmd_open_output(self")
+    assert b != -1, "缺少 cmd_open_output"
+    assert 'core.data_sub("output", self.current_project)' in gsrc[b:b + 800], \
+        "工作区入口未指向当前项目"
+
+    # 4) 旧的裸 startfile 必须已消除（没 try/except，失败就静默）
+    assert 'os.startfile(core.data_sub("output"))' not in gsrc, "仍残留裸 startfile"
+    print("HOME_OUTPUT_BUTTON_OK")
+
+
+def test_preprocess_progress():
+    """预处理要有真实进度可看（WD14 打标是预处理里最长的一段）。
+
+    2026-09-16 用户反馈：预处理期间界面没有进度反馈，总怀疑「是不是卡住了」。
+    预处理跑在**子进程**（`preprocess.py`）里，父进程拿不到任何回调 ——
+    唯一的信息通道是它的 stdout，所以解析 `[WD14] 内置打标进度：done/total`。
+
+    三条必须守住的边界（写错了比不做更糟）：
+      ① 别的阶段的日志（训练步数 / 下载字节 / 缓存 tqdm）**绝不能被当成预处理进度**
+         —— 否则进度条会乱跳；
+      ② 官方打标脚本走 tqdm（`\\r` 原地刷新、行里没有 N/M）时**不能假装 0% 进度**，
+         只能报「阶段已开始 + 已运行多久」；
+      ③ 两处调用点都要接 —— 单独「数据预处理」和「一键开始训练」里的自动预处理，
+         不接的话「一键」反而更让人干等。
+    """
+    from pathlib import Path
+    import Kohya一键工具 as core
+
+    # ---- ① 解析真实进度行（preprocess.py 逐字） ----
+    m = core.PreprocessMonitor()
+    assert m.feed("[WD14] 内置打标进度：120/450（已写 120 张）") is True
+    s = m.snapshot()
+    assert (s["done"], s["total"]) == (120, 450), s
+    assert s["stage"] == "内置打标", s["stage"]
+    assert s["running"] is True
+    m2 = core.PreprocessMonitor()          # 半角冒号也要认
+    assert m2.feed("[WD14] 内置打标进度: 7/9") is True
+    assert m2.snapshot()["total"] == 9
+    m2b = core.PreprocessMonitor()          # 整块传入（兼容 chunk）
+    assert m2b.feed("[预处理] x\n[WD14] 内置打标进度：5/80（已写 5 张）") is True
+    assert m2b.snapshot()["total"] == 80
+
+    # ---- ② 无关日志绝不能驱动（否则进度条乱跳） ----
+    m3 = core.PreprocessMonitor()
+    for junk in ("[训练] steps: 5%| 51/1024 [01:00<19:00, 2.10s/it]",
+                 "[下载] 12.3 MB / 45.6 MB",
+                 "caching latents: 20/20",
+                 "[OK] 预处理完成"):
+        assert m3.feed(junk) is False, "无关日志被当成预处理进度：%s" % junk
+    s3 = m3.snapshot()
+    assert s3["running"] is False and (s3["done"], s3["total"]) == (0, 0), s3
+    assert m3.feed("") is False and m3.feed(None) is False
+
+    # ---- ③ 官方脚本路径：在动、但无数字（不许假装 0%） ----
+    m4 = core.PreprocessMonitor()
+    assert m4.feed("[WD14] 使用官方打标脚本: /a/b/wd14.py") is True
+    s4 = m4.snapshot()
+    assert s4["running"] is True and s4["total"] == 0, s4
+
+    # ---- ④ 完成行把进度补满（末批不足 5 张时不会打最后一条进度行） ----
+    m5 = core.PreprocessMonitor()
+    m5.feed("[WD14] 内置打标进度：9/12（已写 9 张）")
+    m5.feed("[WD14] 内置打标完成：为 12 张图片生成标签")
+    assert m5.snapshot()["done"] == 12, m5.snapshot()
+
+    # ---- ⑤ GUI 接线 ----
+    g = Path(os.path.join(os.path.dirname(core.__file__), "kohya_gui.py")).read_text(encoding="utf-8-sig")
+    assert "def _begin_preprocess_progress" in g and "def _end_preprocess_progress" in g, "缺少预处理进度开关"
+    assert "def _render_preprocess_progress" in g, "界面没有渲染预处理进度"
+    assert g.count("_pp_log = self._begin_preprocess_progress()") >= 2, \
+        "预处理进度只接了一处（单独预处理 / 一键训练里的自动预处理都要有）"
+    assert g.count("self._end_preprocess_progress()") >= 2, "预处理结束后没有撤掉进度监控"
+    tw = g[g.find("def _train_worker"):]
+    assert "self._pp_mon = None" in tw[:700], "训练开始未清掉预处理监控（会闪旧进度）"
+    assert 'text="📊 训练监控"' in tw[:1000], "训练开始未把面板标题拨回训练语义"
+    print("PREPROCESS_PROGRESS_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -588,6 +701,8 @@ def main():
     check("训练完成按项目名导出成品", test_lora_naming)
     check("删项目清理图集数据 + 遗留数据清理", test_project_data_cleanup)
     check("标签批量操作：预演 + 快照撤销", test_label_editor_safety)
+    check("主页输出目录入口", test_home_output_button)
+    check("预处理进度（WD14 打标）", test_preprocess_progress)
     print("-" * 40)
     if FAILED:
         print("✘ 失败 %d 项: %s" % (len(FAILED), "、".join(FAILED)))

@@ -729,7 +729,10 @@ class App:
         """训练实时监控面板（步数/loss/显存/预计时间/loss曲线）。"""
         self.mon = ctk.CTkFrame(parent, fg_color="#16181e", corner_radius=0)
         self.mon_row1 = ctk.CTkFrame(self.mon, fg_color="transparent"); self.mon_row1.pack(fill="x", padx=26, pady=(10, 0))
-        ctk.CTkLabel(self.mon_row1, text="📊 训练监控", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(side="left")
+        # 标题存下来：预处理阶段会临时改成「预处理进度」（见 _preprocess_worker）
+        self.mon_title = ctk.CTkLabel(self.mon_row1, text="📊 训练监控",
+                                      font=ui_font(FONT_TITLE), text_color=TITLE_C)
+        self.mon_title.pack(side="left")
         self.mon_step_var = tk.StringVar(value="步数 0 / 0（0%）")
         ctk.CTkLabel(self.mon_row1, textvariable=self.mon_step_var, font=ui_font(FONT_BODY),
                      text_color=SUB).pack(side="left", padx=(18, 0))
@@ -771,7 +774,81 @@ class App:
         except Exception:
             pass
 
+    def _begin_preprocess_progress(self):
+        """开始监控预处理进度，返回包装过的 logf；配 _end_preprocess_progress() 收尾。
+
+        为什么需要：预处理跑在**子进程**里（preprocess.py），父进程拿不到任何回调 ——
+        只能把它的输出同时喂给 PreprocessMonitor，由界面轮询显示进度条
+        （2026-09-16 用户反馈：WD14 打标要跑很久，界面一片空白，总怀疑是不是卡住了）。
+
+        两处调用点共用（单独「数据预处理」与「一键开始训练」里的自动预处理）——
+        不抽出来的话只有一处有进度，另一处照样让人干等。
+        """
+        _pp = core.PreprocessMonitor()
+        self._pp_mon = _pp
+        self._show_monitor(True)
+        try:
+            self.mon_title.configure(text="📊 预处理进度")
+        except Exception:
+            pass
+
+        def _logf(s):
+            self._log(s)
+            try:
+                _pp.feed(s)
+            except Exception:
+                pass
+
+        return _logf
+
+    def _end_preprocess_progress(self):
+        """预处理结束：撤掉进度监控（面板之后回到训练语义）。"""
+        self._pp_mon = None
+
+    def _render_preprocess_progress(self, snap):
+        """把预处理进度画到监控面板上（复用训练那块进度条）。
+
+        「在动」本身就是缓解「是不是卡住了」的关键，所以三种情况分别对待：
+          · 有 N/M  → 确定进度 + 百分比；
+          · 只有阶段名（官方打标脚本走 tqdm，行里没有 N/M）→ 显示**已运行时长**，
+            而不是假装 0% —— 假的确定条比没有进度更让人以为它死了；
+          · 已知 N/M 却长时间没更新 → 才提示可能卡住。
+            阈值放到 3 分钟：进度是**每 5 张**报一次（preprocess.py 的
+            `done % 5 == 0 or done == total`），正常间隔只是个位数秒，
+            3 分钟没动静才是真异常。
+        """
+        stage = snap.get("stage") or "WD14 打标"
+        done = int(snap.get("done") or 0)
+        total = int(snap.get("total") or 0)
+        _t0 = snap.get("started_at") or snap.get("last_activity") or time.time()
+        _el = int(max(0.0, time.time() - _t0))
+        _idle = time.time() - (snap.get("last_activity") or _t0)
+        if total > 0:
+            pct = max(0.0, min(1.0, done / float(total)))
+            self.mon_progress.set(pct)
+            self.mon_step_var.set("%s %d / %d（%.0f%%）" % (stage, done, total, pct * 100))
+        else:
+            self.mon_progress.set(0.0)
+            self.mon_step_var.set("%s 进行中（已 %d 分 %02d 秒）" % (stage, _el // 60, _el % 60))
+        self.mon_loss_var.set("阶段: %s" % stage)
+        self.mon_lr_var.set("lr: --")
+        self.mon_speed_var.set("已运行: %d 秒" % _el)
+        self.mon_vram_var.set("显存: --")
+        if total > 0 and done > 0 and _idle > 180:
+            self.mon_eta_var.set("⚠ 已 %.0f 分钟无新进展，可能卡住（请看上方日志）" % (_idle / 60.0))
+        else:
+            self.mon_eta_var.set("预计剩余: --")
+
     def _refresh_monitor(self):
+        # 预处理阶段：复用同一块面板显示打标进度（此时还没有 _train_mon）。
+        # 2026-09-16 用户反馈：WD14 打标要跑很久，界面一片空白，总怀疑是不是卡住了。
+        _pp = getattr(self, "_pp_mon", None)
+        if _pp is not None and getattr(self, "_mon_visible", False):
+            try:
+                self._render_preprocess_progress(_pp.snapshot())
+            except Exception:
+                pass
+            return
         mon = getattr(self, "_train_mon", None)
         if mon is None or not getattr(self, "_mon_visible", False):
             return
@@ -1277,6 +1354,17 @@ class App:
                                             corner_radius=6, font=ui_font(FONT_BODY), command=self.cmd_data_dir)
         self.btn_data_dir.pack(side="right", padx=(0, 6))
         self._home_widgets.append(self.btn_data_dir)
+        # 📂 输出目录：主页直达训练产物（与「💾 数据目录」同类，紧挨着放）。
+        # 2026-09-16 用户反馈：想看训练出来的 LoRA，要么先打开某个项目、
+        # 要么自己去 %APPDATA%\KohyaLoraTool\output 里翻，很费劲。
+        # 这里打开的是**输出根目录**（不是某个项目），所以不用先猜是哪个项目。
+        self.btn_output_dir = ctk.CTkButton(head, text="📂 输出目录", width=104, height=32,
+                                            fg_color="transparent", hover_color="#252a36",
+                                            border_width=1, border_color=BORDER, text_color=SUB,
+                                            corner_radius=6, font=ui_font(FONT_BODY),
+                                            command=self.cmd_open_output_root)
+        self.btn_output_dir.pack(side="right", padx=(0, 6))
+        self._home_widgets.append(self.btn_output_dir)
         self.btn_check_update = ctk.CTkButton(head, text="🔄 检查更新", width=104, height=32,
                                               fg_color="transparent", hover_color="#252a36",
                                               border_width=1, border_color=BORDER, text_color=SUB,
@@ -3413,11 +3501,35 @@ class App:
             self.reg_var.set(d)
             self._log(f"[预处理] 已选正则数据集：{d}")
 
+    def _open_dir_or_warn(self, d, title="打开文件夹"):
+        """建好目录再打开；失败给出可读提示（**不要裸 os.startfile**）。
+
+        裸 startfile 在两个场景会失手：① 目录还不存在（从没训练过就没有 output/）；
+        ② 路径被安全软件拦。两种情况都该告诉用户路径，而不是静默无反应。
+        """
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+            return True
+        except Exception as e:
+            messagebox.showerror(title, f"打开失败：{e}\n\n路径：{d}")
+            return False
+
     def cmd_open_output(self):
+        """打开当前项目的输出目录（工作区工具条用；没开项目时退到输出根目录）。"""
         if self.current_project:
-            os.startfile(core.data_sub("output", self.current_project))
+            self._open_dir_or_warn(core.data_sub("output", self.current_project), "打开输出文件夹")
         else:
-            os.startfile(core.data_sub("output"))
+            self.cmd_open_output_root()
+
+    def cmd_open_output_root(self):
+        """打开输出根目录 —— 所有项目的训练产物都在这里，一级子目录 = 一个项目。
+
+        主页专用（2026-09-16 用户反馈）：以前想看训练出来的 LoRA，必须先打开某个项目，
+        或者自己去 %APPDATA%\\KohyaLoraTool\\output 里翻。现在主页一个按钮直达，
+        而且给的是**根目录** —— 一次看到全部项目，不用先猜是哪个。
+        """
+        self._open_dir_or_warn(core.data_sub("output"), "打开输出目录")
 
     def _apply_imported_config(self, cfg):
         """把导入的配置应用到当前（新）项目界面：完全覆盖模式/底模/参数（复用项目恢复逻辑）。"""
@@ -5310,8 +5422,9 @@ class App:
                               "视频无需图片预处理；字幕请用「AI 视频自动打标」或放同名 .txt，然后直接点【一键训练】。")
                 return
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
+            _pp_log = self._begin_preprocess_progress()
             core.preprocess(
-                self._log, input_dir=params["raw_dir"],
+                _pp_log, input_dir=params["raw_dir"],
                 size=int(params.get("resolution") or (core.FLUX2FZ_RESOLUTION if params.get("mode") == "flux2_fz" else (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512)))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
@@ -5332,6 +5445,7 @@ class App:
             self._log(f"[ERROR] 预处理失败：{e}")
             traceback.print_exc()
         finally:
+            self._end_preprocess_progress()
             self.q.put("__DONE__")
 
     def cmd_train(self):
@@ -5371,8 +5485,13 @@ class App:
 
     def _train_worker(self, params, resume=None):
         core.reset_stop()
+        self._pp_mon = None          # 预处理早已结束，别让旧进度抢渲染
         self._train_mon = core.TrainMonitor()
         self._show_monitor(True)
+        try:
+            self.mon_title.configure(text="📊 训练监控")
+        except Exception:
+            pass
         try:
             vram = core.detect_vram_gb()
             params["project"] = self.current_project or ""
@@ -5495,8 +5614,11 @@ class App:
             except Exception:
                 pass
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
+            # 一键训练里的自动预处理同样接进度：这段也是 WD14 全程跑完才轮到训练，
+            # 不接的话「一键」反而比单独预处理更让人干等。
+            _pp_log = self._begin_preprocess_progress()
             core.preprocess(
-                self._log, input_dir=params["raw_dir"],
+                _pp_log, input_dir=params["raw_dir"],
                 size=int(params.get("resolution") or (core.FLUX2FZ_RESOLUTION if params.get("mode") == "flux2_fz" else (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512)))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
@@ -5527,6 +5649,10 @@ class App:
             self._log(f"[ERROR] 一键训练失败：{e}")
             traceback.print_exc()
             self.q.put("__DONE__")
+        finally:
+            # 这里的预处理（含 WD14 打标）已结束，撤掉进度监控，
+            # 面板交回训练语义（随后的训练会自己重建 TrainMonitor）。
+            self._end_preprocess_progress()
 
     # ============ 训练前预检弹窗 / 缺模引导 ============
     def cmd_open_base_dir(self):
@@ -6949,6 +7075,8 @@ class LabelEditorWindow:
         self.listbox.configure(yscrollcommand=sb.set)
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
         self.listbox.bind("<Double-Button-1>", lambda e: self._open_image())
+        # 多选模式：点一下即切换 + 滑动选择（自实现，见 _attach_multiselect）
+        self._attach_multiselect(self.listbox, on_change=self._on_select)
 
         # 右：预览 + 标签编辑
         right = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
@@ -7181,6 +7309,82 @@ class LabelEditorWindow:
         except Exception:
             pass
         self._set_status("多选模式已开启" if self._multi else "多选模式已关闭")
+
+    def _attach_multiselect(self, lb, on_change=None):
+        """给 Listbox 挂上「多选模式」的选择逻辑：**点一下即切换 + 保留滑动选择**。
+
+        ⚠️ 为什么不能用 selectmode 原生搞定（2026-09-16 实测四种模式）：
+            browse / single：单击即替换选择，本来就多选不了
+            multiple       ：单击即切换 ✓ 但**拖拽只选中起始那一行**，没有滑动选择 ✗
+            extended       ：拖拽连续 ✓ 但**单击替换选择**（必须按 Ctrl）✗
+        两个诉求在 Tk 原生里互斥。上一版就是只把 selectmode 换成 extended ——
+        结果「多选模式」打开后**仍然得按 Ctrl**，等于没生效；而当时又按要求把说明文字去掉了，
+        所以这个"没生效"一直没被发现（用户 2026-09-16 反馈"多选按钮不是很顺手"）。
+
+        所以这里自己接管鼠标：
+            按下   ：记录锚点 + 按下前的选中集（**不立刻改选择**，等松开判断是单击还是拖动）
+            拖动   ：选中集 = 原选中集 ∪ [锚点..当前行]   ← 滑动选择
+            未拖动 ：切换锚点那一行                       ← 等价于 Ctrl+单击
+        未勾选多选模式时全部 return None，仍走 Tk 原生（单选）。
+        """
+        st = {"anchor": None, "base": set(), "moved": False}
+
+        def _idx(e):
+            try:
+                return lb.nearest(e.y)
+            except Exception:
+                return -1
+
+        def _apply(sel):
+            lb.selection_clear(0, "end")
+            for i in sorted(sel):
+                lb.selection_set(i)
+
+        def _press(e):
+            if not self._multi:
+                return None
+            i = _idx(e)
+            if i < 0:
+                return None
+            st["anchor"] = i
+            st["base"] = set(lb.curselection())
+            st["moved"] = False
+            try:
+                lb.activate(i)
+            except Exception:
+                pass
+            return "break"       # 关键：挡掉原生「替换选择」，否则单击会清掉已选项
+
+        def _motion(e):
+            if not self._multi or st["anchor"] is None:
+                return None
+            i = _idx(e)
+            if i < 0:
+                return "break"
+            if not st["moved"] and i == st["anchor"]:
+                return "break"   # 还没真正划动，先不动选择
+            st["moved"] = True
+            lo, hi = sorted((st["anchor"], i))
+            _apply(st["base"] | set(range(lo, hi + 1)))
+            return "break"
+
+        def _release(e):
+            if not self._multi or st["anchor"] is None:
+                return None
+            if not st["moved"]:
+                _apply(st["base"] ^ {st["anchor"]})    # 切换该行（等价 Ctrl+单击）
+            st["anchor"] = None
+            st["moved"] = False
+            if on_change:
+                try:
+                    on_change()
+                except Exception:
+                    pass
+            return "break"
+
+        lb.bind("<ButtonPress-1>", _press, add="+")
+        lb.bind("<B1-Motion>", _motion, add="+")
+        lb.bind("<ButtonRelease-1>", _release, add="+")
 
     def _update_zh(self, text=None):
         """刷新「中文对照」行（**只读**，绝不写回 .txt）。
@@ -7461,6 +7665,8 @@ class LabelEditorWindow:
         sb = ctk.CTkScrollbar(lf, command=lb.yview)
         sb.pack(side="right", fill="y", padx=(0, 8), pady=10)
         lb.configure(yscrollcommand=sb.set)
+        # 多选模式：与图片列表同一套自实现（点一下即切换 + 滑动选择）
+        self._attach_multiselect(lb)
         w._lb = lb
         w._tags = []
         # 多选开关（与图片列表共用同一个偏好）。用户反馈「有时候多选标签，忘记按 Ctrl 了，
