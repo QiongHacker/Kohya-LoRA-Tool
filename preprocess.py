@@ -380,8 +380,19 @@ def apply_strong_binding(train_dir, trigger, logf=print, trigger_only=False):
         return 0, []
     warnings = []
     for tag, c in info["near"]:
-        warnings.append(f"特征「{tag}」只在 {c}/{total} 张出现（{c/total:.0%}），"
-                        "人物一致性不足，建议统一训练集特征或补齐图片后再训")
+        # ⚠️ 措辞（2026-09-16 用户反馈）：原来说「人物一致性不足，建议统一训练集特征」
+        # 是**把锅甩给用户的数据集** ✗ —— 而真实原因常常是**视角遮挡让自动打标漏标**
+        # （侧身 / 背面 / 远景图上看不到该特征，WD14 这类打标器直接不输出它）。
+        # 用户的数据集一致性没问题，也没法靠"统一训练集"修好一个打标器看不到的东西；
+        # 那条建议会把人引去改数据集、甚至删掉侧身图。正确的下一步是**手动锁进固定前缀**。
+        # 典型实测：某角色 21 张里有背面/侧身图，双马尾 twintails 只有 20/21（95%），
+        # 而它确实是角色的固定特征。
+        warnings.append(f"特征「{tag}」只在 {c}/{total} 张出现（{c/total:.0%}）—— "
+                        "强绑定只锁「张张都有」的词，所以它不会被自动锁定。"
+                        "常见原因不是你的数据集不一致，而是视角遮挡让自动打标漏标"
+                        "（侧身 / 背面 / 远景图上看不到该特征）。"
+                        "若它确实是这个角色的固定特征：打开「标签统计」→ 选中它 → "
+                        "点「★ 锁进固定前缀」手动锁定。")
     trig_tags = _split_caption_tags(trigger)
     trig_norm = [_norm_tag(t) for t in trig_tags]
 
@@ -433,6 +444,22 @@ def apply_strong_binding(train_dir, trigger, logf=print, trigger_only=False):
         if trigger_only and info["consistent"]:
             logf(f"[强绑定] 概念模式：固定前缀只放 trigger（keep_tokens={max(1, len(trig_tags))}）；"
                  f"另有 {len(info['consistent'])} 个 100% 一致标签未锁进前缀（已给一致性警告）")
+        elif not trigger_only:
+            # 自动模式 + 没有任何标签「张张都有」→ 前缀里只剩 trigger 本身，
+            # **强绑定等于没生效**。旧实现在这里一个字都不打，用户只能猜。
+            # 2026-09-16 用户实测：单写 trigger 唤不出角色，于是怀疑"强绑定不生效" ——
+            # 他的判断是对的，但日志里没有任何东西能确认，只能去问别的 AI。
+            _tot = info["total"]
+            logf("[强绑定] ⚠ 没有可锁定的特征 —— %d 张图里没有任何标签是「张张都有」的，"
+                 "所以固定前缀里只有 trigger 本身，强绑定等于没生效："
+                 "单写 trigger 不会带出角色的固定特征。" % _tot)
+            if info["near"]:
+                _txt = "、".join("%s %d/%d" % (t, c, _tot) for t, c in info["near"][:6])
+                logf("[强绑定]   覆盖率最高的一批（都不到 100%，因此未被锁定）：" + _txt)
+            logf("[强绑定]   想让 trigger 单独就能唤出角色，二选一：")
+            logf("[强绑定]     ① 统一训练集特征（例如这个角色都同一发色 / 都戴帽），重跑预处理；")
+            logf("[强绑定]     ② 打开「标签统计」，选中上面这些特征 → 点「★ 锁进固定前缀」"
+                 "手动锁定它们（下次预处理生效）。")
         return max(1, len(trig_tags)), warnings
     prefix_norm = [_norm_tag(t) for t in prefix]
     keep = len(prefix)
@@ -635,7 +662,17 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
     # 打标环境准备：当前解释器缺 torch/onnxruntime 时自动选带 torch 的 venv 并补装
     py, sd_root = _prepare_wd14_env(logf)
     if not py:
-        logf("[WD14] 没有可用的打标解释器（缺 torch/onnxruntime），跳过自动打标")
+        # ⚠️ 别再说「缺 torch/onnxruntime」（2026-09-16 修正）：onxxruntime 最常见的故障
+        # 是「装了但一 import 就崩」，说"缺"会把用户引向"装一个就行"——而装错变体
+        # （gpu/directml）反而让冲突更严重。这里如实报出真实状态。
+        _ok0, _kind0, _why0 = _probe_wd14_deps(sys.executable)
+        if _kind0 == "crash":
+            logf("[WD14] 没有可用的打标解释器：onnxruntime **装了但一导入就崩**（DLL 级故障）")
+            logf("[WD14]   修法见下方「内置打标」段的自动修复与手工步骤（不是「缺包」）")
+        elif _kind0 == "missing":
+            logf("[WD14] 没有可用的打标解释器：确实缺 torch/onnxruntime（未安装）")
+        else:
+            logf("[WD14] 没有可用的打标解释器：%s" % (_why0 or "原因未知"))
         return False
     # kohya 官方脚本会 import library.dataset -> cv2 / imagesize 等；缺失会整批失败
     # （2026-09 用户日志：ModuleNotFoundError: No module named 'cv2'，只剩 1girl, solo 兜底标签）
@@ -1082,10 +1119,39 @@ def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35):
             logf("[WD14]   建议：重跑一次本流程；若反复崩溃，重跑【② 安装训练内核】重建训练环境。")
         else:
             logf(f"[WD14] 定位：onnxruntime 不可用 —— {_why_ort}")
-            logf("[WD14]   修复步骤（按顺序试）：")
-            logf('[WD14]     1) 重装 onnxruntime：')
-            logf(f'[WD14]        "{sys.executable}" -m pip install --force-reinstall onnxruntime')
-            logf("[WD14]     2) 仍崩溃则重跑【② 安装训练内核】重建训练环境（会装匹配的版本）")
+            # ---- 自动修复一次并重试（2026-09-16 新增）----
+            # 以前这里只**打印**让用户手打的 pip 命令。实测（qiansui 用户）：
+            # 用户看不懂那句命令，去问了另一个 AI，在 cpu / gpu 两个变体之间来回折腾
+            # 几小时 —— 而最后修好的动作正好就是这里原本给的那条。
+            # 工具既然知道怎么修，就该自己修。
+            logf("[WD14] 正在自动修复 onnxruntime 并重试一次打标…")
+            _fixed = _ensure_onnx(sys.executable, logf)
+            if _fixed:
+                logf("[WD14] onnxruntime 已修复，自动重试内置打标…")
+                try:
+                    _rc2 = subprocess.run([sys.executable, "-c", code, output_dir,
+                                           str(threshold), _here],
+                                          env=env, timeout=1800).returncode
+                except Exception as _e2:
+                    _rc2 = -1
+                    logf(f"[WD14] ⚠ 重试启动失败：{_e2}")
+                if _rc2 == 0:
+                    logf("[WD14] ✓ 修复后重试成功，标签已正常生成")
+                    return True
+                logf(f"[WD14] ⚠ 修复后重试仍失败（退出码 {_rc2}）")
+            logf("[WD14]   手工修复步骤（按顺序试，多数情况第 1 条即可）：")
+            logf("[WD14]     1) 清干净重装 —— **只装 CPU 版**，不要装 onnxruntime-gpu / directml：")
+            logf("[WD14]        三个变体装进同一个 onnxruntime 目录，混装/残留正是"
+                 "import 就崩的主因：")
+            logf(f'[WD14]          "{sys.executable}" -m pip uninstall -y onnxruntime onnxruntime-gpu')
+            logf(f'[WD14]          "{sys.executable}" -m pip install --no-cache-dir onnxruntime')
+            logf("[WD14]     2) 第 1 条无效 → 安装/修复 **Microsoft Visual C++ 运行库**")
+            logf("[WD14]        （0xC0000005 的经典根因；搜 “vc_redist.x64” 装官方最新版），装完重启")
+            logf("[WD14]     3) 仍无效 → 重跑【② 安装训练内核】重建训练环境（会装匹配的版本）")
+            logf("[WD14]   验证命令（**注意看最后一行的退出码**；只有 A 没有 B 就是崩了）：")
+            logf(f'[WD14]        "{sys.executable}" -c "print(\'A\'); '
+                 'import onnxruntime; print(\'B\', onnxruntime.__version__)"')
+            logf("[WD14]        echo 退出码=%ERRORLEVEL%")
         logf("[WD14]   影响：本次未生成精细标签，缺标签图片用兜底 caption —— "
              "流程不中断，但训练效果会变差，建议修好后再训。")
         return False
@@ -1176,19 +1242,69 @@ def _quarantine_input_corrupt(input_dir, files, logf=print):
         logf(f"[INFO] 已隔离 {len(moved)} 张损坏图片到 {corrupt_dir}（可从原图重新下载/修复后再放回）")
     return moved
 
-def _has_wd14_deps(py):
-    """检查解释器能否 import torch + onnxruntime（WD14 打标必需）。"""
-    code = ("import sys, importlib.util;" +
-            "sys.exit(0 if (importlib.util.find_spec('torch') and importlib.util.find_spec('onnxruntime')) else 1)")
+def _probe_wd14_deps(py):
+    """**真实**探测 py 能否 import torch + onnxruntime，并区分四种情况。
+
+    返回 (ok, kind, detail)，kind ∈ {"ok", "missing", "crash", "error"}。
+
+    ⚠️ 为什么不能再用 `importlib.util.find_spec`（2026-09-16 修正）：
+    find_spec 只回答「包在不在」，而 onnxruntime 最要命的故障形态恰恰是
+    **「找得到、import 就死」**（DLL 级故障）。旧实现把这种状态判为「已就绪」，
+    于是 `_ensure_onnx` 的自动补装**永远不会触发** —— 自愈能力形同虚设。
+
+    实测（2026-09-16 qiansui 用户）：onnxruntime 装了但 import 即崩（0xC0000005、
+    零输出），工具据此判「健康」→ 不修 → 只能靠日志里那句要用户手打的 pip 命令
+    → 用户看不懂，去问了另一个 AI，在 cpu/gpu 两个变体之间来回折腾几小时，
+    **最后修好的动作正好就是工具原本给的那条**。
+
+    必须放子进程：native 崩溃不是 Python 异常，进程内 import 会把自己一起带走。
+    """
+    if not py:
+        return False, "error", "拿不到解释器路径"
+    code = ("import torch, onnxruntime;"
+            "print('WD14_DEPS_OK', torch.__version__, onnxruntime.__version__)")
     try:
-        r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=120)
-        return r.returncode == 0
-    except Exception:
-        return False
+        r = subprocess.run([py, "-c", code], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=300)
+    except Exception as e:
+        return False, "error", "探测异常：%s" % e
+    return _classify_wd14_probe(r.returncode, (r.stdout or "") + (r.stderr or ""))
+
+
+def _classify_wd14_probe(rc, out):
+    """把探测结果分成「能用 / 装了但崩 / 没装 / 其它错误」四类。纯函数，便于单测。
+
+    四类**修法完全不同**，混为一谈就会给出错的修复指引（2026-09-16 qiansui 用户的
+    实际遭遇：明明只是"装了但导入就崩"，日志却说"缺 torch/onnxruntime"，
+    把他引向了"再装一个"——而装错变体反而让冲突更严重）。
+    """
+    out = (out or "").strip()
+    if rc == 0 and "WD14_DEPS_OK" in out:
+        return True, "ok", (out.splitlines()[-1] if out else "")
+    if not out:
+        # 零输出 + 非零退出 = 被 native 崩溃直接带走（DLL 装载失败 / 变体混装残留 /
+        # VC 运行库缺失）。**没有 traceback**，最容易被误判成「缺包」。
+        return False, "crash", "import 阶段直接崩溃（退出码 %s、零输出）→ DLL 级故障" % rc
+    _last = out.splitlines()[-1].strip()
+    if "No module named" in out:
+        return False, "missing", "未安装（%s）" % _last
+    return False, "error", "导入失败（退出码 %s）：%s" % (rc, _last)
+
+
+def _has_wd14_deps(py):
+    """解释器是否真的能 import torch + onnxruntime（WD14 打标必需）。
+
+    走真实 import 探测（见 `_probe_wd14_deps`），不用 find_spec 的乐观判断。
+    """
+    return _probe_wd14_deps(py)[0]
 
 
 def _has_torch(py):
-    """检查解释器能否 import torch。"""
+    """检查解释器是否有 torch（**只查存在性**，用于挑解释器，追求秒级）。
+
+    这里保留 find_spec 是有意的权衡：它只用来"挑一个候选解释器"，
+    真正决定能不能干活的是 `_probe_wd14_deps`（真实 import）。
+    """
     try:
         r = subprocess.run([py, "-c", "import sys, importlib.util;" +
                             "sys.exit(0 if importlib.util.find_spec('torch') else 1)"],
@@ -1198,27 +1314,92 @@ def _has_torch(py):
         return False
 
 
-def _ensure_onnx(py, logf=print):
-    """解释器缺 onnxruntime/onnx 时自动补装（中科大源，2026-09-11 起；原阿里云实测仅 0.12 MB/s）。返回是否就绪。"""
-    if _has_wd14_deps(py):
-        return True
+# onnxruntime 的三个变体：它们装进**同一个 `onnxruntime` 模块目录**，
+# 混装或残留旧变体的 capi/*.dll 正是「import 即崩」最常见的根因。
+_ONNX_VARIANTS = ("onnxruntime", "onnxruntime-gpu", "onnxruntime-directml")
+
+
+def _pip_install_onnx(py, logf=print, clean=False):
+    """安装 onnxruntime；clean=True 时先清干净再装。返回是否真的可用。
+
+    clean=True 的必要性（2026-09-16 修正）：`pip install --force-reinstall onnxruntime`
+    只覆盖**自己这个包**的文件，装过 onnxruntime-gpu 时残留在 `onnxruntime/capi/`
+    里的旧 DLL **不会被清掉** → import 继续崩。
+    所以「清干净」= 卸载全部变体 → 删掉残留的 onnxruntime 目录 → 只装 CPU 版。
+
+    为什么只装 CPU 版：WD14 打标用它做推理，CPU 版就够；而 gpu 版会引入
+    CUDA/cuDNN 依赖，反而多一个崩点。**明确不建议用户装 gpu 变体。**
+    """
+    _env = dict(os.environ)
+    for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        _env.pop(_k, None)
+    _env["NO_PROXY"] = "*"
     try:
-        _env = dict(os.environ)
-        for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-            _env.pop(_k, None)
-        _env["NO_PROXY"] = "*"
-        r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
-                            "--timeout", "120", "--index-url",
-                            "https://mirrors.ustc.edu.cn/pypi/simple/",
-                            "--extra-index-url", "https://repo.huaweicloud.com/repository/pypi/simple/",
-                            "onnxruntime", "onnx"], env=_env,
-                           capture_output=True, text=True, timeout=600)
-        if r.returncode == 0 and _has_wd14_deps(py):
-            logf(f"[WD14] 已自动补装 onnxruntime/onnx（{py}）")
-            return True
-    except Exception:
-        pass
+        if clean:
+            for _v in _ONNX_VARIANTS:
+                try:
+                    subprocess.run([py, "-m", "pip", "uninstall", "-y", _v],
+                                   env=_env, capture_output=True, text=True, timeout=600)
+                except Exception:
+                    pass
+            # 卸载后目录里可能仍有残留（手工装过 / 中断过），直接抹掉
+            try:
+                r = subprocess.run(
+                    [py, "-c", "import sys,os,site;"
+                               "print(os.pathsep.join(p for p in site.getsitepackages() if p))"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=120)
+                for _d in (r.stdout or "").strip().split(os.pathsep):
+                    _p = os.path.join(_d.strip(), "onnxruntime")
+                    if _d.strip() and os.path.isdir(_p):
+                        shutil.rmtree(_p, ignore_errors=True)
+                        logf("[WD14]   已清除残留目录：%s" % _p)
+            except Exception:
+                pass
+        try:
+            r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
+                                "--timeout", "120", "--index-url",
+                                "https://mirrors.ustc.edu.cn/pypi/simple/",
+                                "--extra-index-url", "https://repo.huaweicloud.com/repository/pypi/simple/",
+                                "onnxruntime", "onnx"], env=_env,
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=900)
+            if r.returncode != 0:
+                _tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-3:])
+                logf("[WD14]   pip 安装失败（退出码 %s）：%s" % (r.returncode, _tail))
+                return False
+        except Exception as e:
+            logf("[WD14]   pip 安装异常：%s" % e)
+            return False
+    except Exception as e:
+        logf("[WD14]   安装流程异常：%s" % e)
+        return False
+    # 装完必须**真的 import 一次**才算成功 —— 只信 pip 的退出码是不够的
+    _ok, _kind, _why = _probe_wd14_deps(py)
+    if _ok:
+        logf("[WD14] ✓ onnxruntime 已就绪（%s）" % (_why or ""))
+        return True
+    logf("[WD14] ⚠ 安装后仍不可用：%s" % _why)
     return False
+
+
+def _ensure_onnx(py, logf=print):
+    """确保解释器真能 import torch + onnxruntime（中科大源；原阿里云实测仅 0.12 MB/s）。
+
+    「装了但导入就崩」时走**清干净重装**（见 `_pip_install_onnx`）——
+    这正是 2026-09-16 那位用户手打 pip 折腾几小时才解决的问题，现在工具自己做。
+    返回是否可用。
+    """
+    _ok, _kind, _why = _probe_wd14_deps(py)
+    if _ok:
+        return True
+    if _kind == "crash":
+        logf("[WD14] ⚠ onnxruntime 装了但一 import 就崩（DLL 级故障，没有 traceback）")
+        logf("[WD14]   常见原因：onnxruntime 与 onnxruntime-gpu 混装，或残留了不匹配的 DLL。")
+        logf("[WD14]   正在自动清理并重装（卸载全部变体 → 删除残留目录 → 只装 CPU 版）…")
+        return _pip_install_onnx(py, logf, clean=True)
+    logf("[WD14] %s，正在自动补装 onnxruntime/onnx…" % _why)
+    return _pip_install_onnx(py, logf, clean=False)
 
 
 def _ensure_hf_hub(py, logf=print):

@@ -2947,7 +2947,11 @@ def test_official_source_option(base: Path):
     assert "modelscope.cn/models/Qwen/Qwen3-0.6B" in src, "缺 Qwen3 魔搭直链"
     # v0.15.11 后下载策略反转为「魔搭直链优先、hf-mirror 仅兜底」，文案随之改动；
     # 断言跟着改为匹配当前实现（原断言 "自动切换魔搭" 已过期，会中断整个测试套件）。
-    assert "自动改用 hf-mirror" in src, "缺魔搭→hf-mirror 切换（魔搭优先、hf-mirror 兜底）"
+    #
+    # 2026-09-16 再改一次措辞：这是**换源重试**、结果还没定，用「失败」会让用户以为
+    # 整体失败了（用户原话：「也不知道到底成功还是失败，下载倒是有进行」）。
+    assert "自动换 hf-mirror 重试" in src, "缺魔搭→hf-mirror 切换（魔搭优先、hf-mirror 兜底）"
+    assert "[Anima] ✓ 文本编码器已就绪" in src, "下载完成后没有明确结论（用户无法判断成败）"
     print("OFFICIAL_SOURCE_OPTION_OK")
 
 
@@ -3065,6 +3069,189 @@ def test_vpred_base_parameterization(base: Path):
     print("VPRED_PARAMETERIZATION_OK")
 
 
+def test_run_stream_pipe_held_by_grandchild(base: Path):
+    """子进程退出、但孙进程仍持有 stdout 管道时，run_stream 必须立即返回。
+
+    2026-09-16 qiansui 用户实测：下载训练内核**每次都在最后卡住** —— 活其实早就干完
+    （手动结束任务后重点一次，工具检测完直接说「已安装」），但任务一直不结束。
+
+    根因：Windows 上子进程的 stdout 管道句柄会被**孙进程**继承
+    （git clone 的 git-remote-https、pip 的构建子进程、杀软扫描进程等）；
+    只要还有孙进程握着它，管道就永不 EOF。旧实现 `for line in proc.stdout` 会
+    **永久阻塞** → 任务永不结束 → 用户只能手动结束（一次不受控中断，
+    半装的 venv / 半下的 wheel 都可能留下隐患）。
+
+    这里直接复现该场景：子进程先拉起一个继承 stdout 的孙进程（睡很久），
+    然后自己立刻退出。旧实现会一直等孙进程；新实现以「进程已退出」为判据，应立即返回。
+    """
+    import time as _t
+    child = base / "pipe_grandchild.py"
+    child.write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "print('CHILD_DONE', flush=True)\n"
+        "sys.exit(0)\n",
+        encoding="utf-8")
+    got = []
+    _t0 = _t.time()
+    rc = core.run_stream([sys.executable, "-u", str(child)],
+                         logf=got.append, env=dict(os.environ))
+    _dt = _t.time() - _t0
+    blob = "\n".join(got)
+    assert rc == 0, (rc, blob[-400:])
+    # 崩溃前/退出前的输出必须照样收到（不能为了不卡住而丢日志）
+    assert "CHILD_DONE" in blob, "没收到子进程输出：%s" % blob[-400:]
+    assert _dt < 10, ("子进程已退出却被孙进程拖住 %.1fs —— 仍在等管道 EOF" % _dt)
+    print("RUN_STREAM_NO_PIPE_HANG_OK")
+
+
+def test_wd14_dep_probe_real_import(base: Path):
+    """WD14 依赖判据必须是「能否真的 import」，不能是 find_spec。
+
+    2026-09-16 修正。旧 `_has_wd14_deps` 用 `importlib.util.find_spec` 只回答
+    「包在不在」，而 onnxruntime 最要命的故障形态恰恰是**「找得到、import 就死」**
+    → 被判为「已就绪」→ `_ensure_onnx` 的自动补装**永远不触发**，自愈形同虚设。
+
+    实测（2026-09-16 qiansui 用户）：onnxruntime 装了但 import 即崩（0xC0000005、
+    零输出），工具判「健康」→ 不修 → 只剩日志里一句要用户手打的 pip 命令 →
+    用户看不懂，去问另一个 AI，在 cpu/gpu 变体之间折腾几小时，
+    **而最后修好的动作正好就是工具原本给的那条**。
+
+    注：这里用**纯函数分类**做断言（照 `_classify_ort_probe` 的现成范式）。
+    本想用「假模块 + PYTHONPATH」造真实崩溃场景，但实测本机 **PYTHONPATH 传不进
+    子进程**（子进程 sys.path 里根本没有它）—— 代码库也早就写明「不依赖 PYTHONPATH
+    传递，环境变量在某些宿主里不保证生效」。分类函数的输入正是 native 崩溃的真实形状。
+    """
+    import preprocess as P
+
+    # ① 零输出 + 非零退出（native 崩溃的真实形状，3221225477 = 0xC0000005）
+    #    → 必须判 crash，**绝不能判 missing**（这是本次修复的核心）
+    ok, kind, why = P._classify_wd14_probe(3221225477, "")
+    assert ok is False and kind == "crash", (ok, kind, why)
+    assert "崩溃" in why, why
+
+    # ② 真没装 → missing（与"崩"必须分开：一个要装、一个要清干净重装）
+    ok2, kind2, why2 = P._classify_wd14_probe(
+        1, "Traceback (most recent call last):\nModuleNotFoundError: No module named 'onnxruntime'")
+    assert ok2 is False and kind2 == "missing", (ok2, kind2, why2)
+    assert "未安装" in why2, why2
+
+    # ③ DLL 装载失败（有输出但非"没装"）→ error，不能误判成 missing
+    _ok3, kind3, why3 = P._classify_wd14_probe(
+        1, "ImportError: DLL load failed while importing onnxruntime_pybind11_state")
+    assert kind3 == "error", (kind3, why3)
+
+    # ④ 正常 → ok
+    ok4, kind4, _w4 = P._classify_wd14_probe(0, "WD14_DEPS_OK 2.7.0+cu128 1.20.0")
+    assert ok4 is True and kind4 == "ok", (ok4, kind4)
+
+    # ⑤ 端到端存活：对真实解释器探测必须返回四类之一且不抛异常
+    _ok5, kind5, _w5 = P._probe_wd14_deps(sys.executable)
+    assert kind5 in ("ok", "missing", "crash", "error"), (kind5, _w5)
+
+    # ⑥ 源码断言：不能再用 find_spec 当 WD14 的可用性判据
+    #    （只看该函数体本身；`find_spec(` 带括号 = 真的在调用，docstring 里提名字不算）
+    _src = (ROOT / "preprocess.py").read_text(encoding="utf-8")
+    _k = _src.index("def _has_wd14_deps(")
+    _body = _src[_k:_src.index("\ndef ", _k + 10)]
+    assert "find_spec(" not in _body, "_has_wd14_deps 又改回 find_spec 了（会把坏环境判成健康）"
+    assert "_probe_wd14_deps(py)[0]" in _body, _body[:220]
+
+    # ⑦ 崩溃路径必须触发「清干净重装」，不能只是再装一次
+    _enc = _src.index("def _ensure_onnx(")
+    _ebody = _src[_enc:_enc + 1500]
+    assert 'clean=True' in _ebody, "_ensure_onnx 在崩溃路径未走清干净重装"
+    assert '"crash"' in _ebody, "_ensure_onnx 未区分崩溃与未安装"
+    print("WD14_DEP_PROBE_REAL_IMPORT_OK")
+
+
+def test_wd14_onnx_clean_reinstall(base: Path):
+    """「装了但导入就崩」必须走「清干净重装」，而不是 `--force-reinstall`。
+
+    2026-09-16 修正：onnxruntime / onnxruntime-gpu / onnxruntime-directml 三个包
+    装进**同一个 `onnxruntime` 模块目录**；`--force-reinstall onnxruntime` 只覆盖
+    自己这个包的文件，别的变体遗留在 capi/ 里的旧 DLL 不会被清掉 → import 继续崩。
+    实测（qiansui 用户）：他在 cpu / gpu 变体之间来回装了三次才碰对。
+    """
+    import preprocess as P
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(" ".join(str(x) for x in cmd))
+        out = str(base) if "getsitepackages" in " ".join(str(x) for x in cmd) else ""
+        return subprocess.CompletedProcess([], 0, out, "")
+
+    # clean=True：卸掉全部变体 + 只装 CPU 版
+    with patch.object(P.subprocess, "run", side_effect=fake_run), \
+         patch.object(P, "_probe_wd14_deps", return_value=(True, "ok", "ORT 1.2")):
+        assert P._pip_install_onnx(sys.executable, lambda _s: None, clean=True) is True
+    for _v in ("onnxruntime-gpu", "onnxruntime-directml"):
+        assert any(("uninstall" in c and _v in c) for c in calls), \
+            "未卸载变体 %s（只卸一个清不干净）：%s" % (_v, calls)
+    _inst = [c for c in calls if " install " in (" " + c + " ")]
+    assert _inst, calls
+    assert not any(("onnxruntime-gpu" in c or "directml" in c) for c in _inst), \
+        "仍在安装 gpu/directml 变体（会引入额外崩点）：%s" % _inst
+
+    # clean=False（单纯缺包）：不该去卸，免得白折腾
+    calls.clear()
+    with patch.object(P.subprocess, "run", side_effect=fake_run), \
+         patch.object(P, "_probe_wd14_deps", return_value=(True, "ok", "")):
+        P._pip_install_onnx(sys.executable, lambda _s: None, clean=False)
+    assert not any("uninstall" in c for c in calls), calls
+    print("WD14_ONNX_CLEAN_REINSTALL_OK")
+
+
+def test_manual_lock_tags_to_prefix(base: Path):
+    """标签统计里「把高覆盖标签锁进固定前缀」：写入 ||| 后强绑定必须真的锁定它。
+
+    2026-09-16 用户场景：某角色特征覆盖率 20/21（95%，差的那 1 张多半是色差/漏标），
+    够不着强绑定的 **100%** 门槛 → 自动锁定拿不到它 → 单写 trigger 唤不出角色
+    （他实测：手动补上 green hair 就"非常像"了）。
+    解法：在「标签统计」里手动把它锁进固定前缀（写 `|||`）。
+
+    这里验证**与 preprocess.apply_strong_binding 的完整往返**：写 → 消费 → keep_tokens。
+    只验证"写进去了"是不够的 —— 真正的契约是预处理能把 `|||` 变成固定前缀。
+    """
+    import preprocess as pp
+    td = base / "manual_lock"
+    td.mkdir(parents=True, exist_ok=True)
+    caps = {
+        "a": "qiansui321, long hair, green hair, 1girl, solo, smile",
+        "b": "qiansui321, long hair, green hair, 1girl, solo, hat",
+        "c": "qiansui321, long hair, 1girl, solo",      # 这张没有 green hair → 就是 20/21 的那 1 张
+    }
+    for _stem, _c in caps.items():
+        (td / (_stem + ".txt")).write_text(_c, encoding="utf-8")
+        # list_dataset_images 以图片为驱动：没有配对图片的 txt 根本不会被列出
+        (td / (_stem + ".png")).write_bytes(b"x")
+
+    snap = {}
+    files, locked = core.lock_tags_to_prefix(str(td), ["green hair", "witch hat"],
+                                             trigger="qiansui321", snapshot=snap)
+    assert files == 3, (files, locked)
+    assert locked == ["green hair", "witch hat"], locked
+    for _stem in caps:
+        _s = (td / (_stem + ".txt")).read_text(encoding="utf-8")
+        assert "|||" in _s, _s
+        assert _s.startswith("qiansui321, green hair, witch hat ||| "), _s
+    # 撤销快照必须记下原文（可整批还原）
+    assert set(snap) == {str(td / (_s + ".txt")) for _s in caps}, snap
+
+    # 幂等：再锁一次不该产生任何写入
+    assert core.lock_tags_to_prefix(str(td), ["green hair"], trigger="qiansui321")[0] == 0
+
+    # ★ 真正的契约：preprocess 的强绑定必须消费 `|||`
+    #   keep_tokens = 前缀词数（qiansui321 + green hair + witch hat = 3），且 `|||` 消失
+    kt, _warns = pp.apply_strong_binding(str(td), "qiansui321", lambda *_a: None)
+    assert kt == 3, ("强绑定没有把手动固定区算进 keep_tokens", kt)
+    for _stem in caps:
+        _s = (td / (_stem + ".txt")).read_text(encoding="utf-8")
+        assert "|||" not in _s, ("||| 未被消费", _s)
+        assert _s.startswith("qiansui321, green hair, witch hat"), _s
+    print("MANUAL_LOCK_TAGS_TO_PREFIX_OK")
+
+
 def main():
     # 每条用例独立 try/except：任何一条失败（常见于「实现改了、断言没跟着改」）都不再中断整个套件。
     # 否则后面几十条用例会被一条过期断言全部吞掉 —— v0.15.11~v0.16.5 就踩过：
@@ -3110,6 +3297,10 @@ def main():
         test_preprocess_crop_ratio(base)
         test_preprocess_mode_mapping(base)
         test_alloc_conf_expandable_stripped(base)
+        test_run_stream_pipe_held_by_grandchild(base)
+        test_wd14_dep_probe_real_import(base)
+        test_wd14_onnx_clean_reinstall(base)
+        test_manual_lock_tags_to_prefix(base)
         test_nvidia_smi_driver_safe(base)
         test_gui_resource_guard(base)
         test_tools_module(base)

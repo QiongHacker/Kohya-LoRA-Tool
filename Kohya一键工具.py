@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.16.12"
+APP_VERSION = "0.16.13"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -666,9 +666,41 @@ def _localappdata_python_summary():
         return ""
 
 
+def _python_is_conda(py):
+    """判断解释器是否来自 Anaconda / Miniconda。
+
+    为什么要单独判来源（2026-09-16 qiansui 用户实测）：用 conda 的 python 建的训练环境，
+    **基座就是 conda** —— 用户一旦卸载/屏蔽 Anaconda（很常见：清理磁盘、按别的教程操作），
+    训练环境立刻报「损坏、找不到 python 路径」（他的经历正是这条链）。
+
+    另外 conda 自带一堆 native DLL（libiomp5md / mkl / zlib），会混进训练子进程的搜索路径，
+    导致 torch / onnxruntime 出现 0xC0000005 访问违例（**零输出、无 traceback**，
+    最容易被误判成「缺包」）。旧实现在这里什么都不查，找到哪个就用哪个。
+    """
+    if not py:
+        return False
+    try:
+        p = os.path.normcase(os.path.abspath(py))
+    except Exception:
+        return False
+    for _k in ("anaconda", "miniconda", "miniforge", "mambaforge", "\\conda\\"):
+        if _k in p:
+            return True
+    # 目录里带 conda-meta 也是铁证（自建过 / 改过名的 conda 环境）
+    try:
+        _d = os.path.dirname(p)
+        for _up in (_d, os.path.dirname(_d), os.path.dirname(os.path.dirname(_d))):
+            if _up and os.path.isdir(os.path.join(_up, "conda-meta")):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def install_python(logf=print):
     py, ver = find_python()
-    if py and ver:
+    _conda = _python_is_conda(py)
+    if py and ver and not _conda:
         try:
             parts = tuple(int(x) for x in ver.split("."))
         except Exception:
@@ -676,6 +708,15 @@ def install_python(logf=print):
         if parts and PY_MIN <= parts < PY_MAX:
             logf(f"[环境] 已找到 Python {ver}: {py}")
             return py, ver
+    if py and ver and _conda:
+        # 有官方 Python 就不要 conda 的 —— 直接采用会埋两个雷（见 _python_is_conda 注释）
+        logf("[环境] ⚠ 只找到 Anaconda 自带的 Python %s：%s" % (ver, py))
+        logf("[环境]   不推荐用它建训练环境，实测两个后果：")
+        logf("[环境]     ① 训练环境会**依赖 Anaconda 存在** —— 以后卸载/屏蔽 Anaconda，"
+             "训练环境立刻报「损坏、找不到 python 路径」；")
+        logf("[环境]     ② Anaconda 自带的 native DLL（libiomp5md / mkl / zlib）会污染训练子进程，"
+             "导致 torch / onnxruntime 出现 0xC0000005 访问违例（import 即崩、零输出、无 traceback）。")
+        logf("[环境]   正在优先安装官方 Python（内置安装包，与 Anaconda 完全隔离）…")
     # 优先使用内置安装包（离线，无需联网/代理）：3.12 优先，其次 3.11 / 3.10
     exe = _bundled_python_installer()
     if exe:
@@ -725,6 +766,13 @@ def install_python(logf=print):
     py, ver = find_python()
     if not py:
         raise RuntimeError("Python 安装后仍未找到，请手动安装 https://www.python.org/downloads/")
+    if _python_is_conda(py):
+        # 走到这里说明三条官方途径都没装成。**不阻断**（否则用户彻底用不了），
+        # 但必须把风险说清楚 —— 这是"如实告知"而不是"断言一定不能训"。
+        logf("[环境] ⚠ 官方 Python 未能装上，只能退回 Anaconda 自带的 Python %s" % ver)
+        logf("[环境]   请留意：**不要卸载/屏蔽 Anaconda**，否则训练环境会立刻失效（报「找不到 python 路径」）。")
+        logf("[环境]   想彻底避免：手动装官方 Python 3.12（https://www.python.org/downloads/），"
+             "再从 PATH 里移除 Anaconda 后重跑【② 安装训练内核】重建环境。")
     return py, ver
 
 
@@ -1376,7 +1424,7 @@ def install_kohya(logf=print):
                                    "--index-url", _idx2, "pillow", "numpy"], cwd=kdir, env=_env2, logf=logf) == 0:
                         _ok2 = True
                         break
-                    logf("[Kohya] 当前镜像下载失败，切换备用镜像重试…")
+                    logf("[Kohya] 当前镜像没下成，切换备用镜像重试…")
             if not _ok2 or not _dep_ok("import PIL, numpy"):
                 raise RuntimeError("自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试")
             logf("[Kohya] Pillow/numpy 补装完成，继续验证完整训练依赖…")
@@ -6480,7 +6528,7 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
                               cwd=kdir, env=env, logf=logf) == 0:
                     _ok = True
                     break
-                logf("[预处理] 当前镜像下载失败，切换备用镜像重试…")
+                logf("[预处理] 当前镜像没下成，切换备用镜像重试…")
         if _deps_importable():
             logf("[预处理] Pillow/numpy 补装完成")
             return True
@@ -7888,7 +7936,7 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
                            "--index-url", _idx] + pkgs, cwd=kdir, env=env, logf=logf) == 0:
                 ok = True
                 break
-            logf("[环境] 当前镜像下载失败，切换备用镜像重试…")
+            logf("[环境] 当前镜像没下成，切换备用镜像重试…")
         if ok:
             break
         logf("[环境] 补装失败（多为网络波动/下载中断），自动重试第 %d 轮…" % (_round + 2))
@@ -8529,6 +8577,88 @@ def save_caption(txt_path, text):
 def _split_tags(caption):
     """把逗号分隔的标签拆成去空白列表（兼容中英文逗号）。"""
     return [p.strip() for p in re.split(r"[,，]", caption or "") if p.strip()]
+
+
+# 「固定前缀」的手动固定区分隔符 —— 与 preprocess.py 的 apply_strong_binding() 共用同一套语法。
+_FIXED_SEP = "|||"
+
+
+def lock_tags_to_prefix(train_dir, tags, trigger="", logf=print, snapshot=None):
+    """把这些标签锁进「固定前缀」（写 `|||` 活动区语法），供人物强绑定在下次预处理时锁定它们。
+
+    返回 (处理的文件数, 实际锁定的标签列表)。
+
+    **为什么写 `|||` 而不是改顺序、或改一个全局覆盖率阈值**（2026-09-16）：
+      `|||` 是 `preprocess.py` 里 `apply_strong_binding()` 的**手动固定区**语法 ——
+      `|||` 前为固定区、后为可动区；预处理时它会被变成真正的固定前缀，
+      `keep_tokens` 被设为前缀长度，然后 `|||` 被自动删掉。
+      走这条路 = 复用**已有且已有回归测试**的机制，界面不必自己决定
+      "什么该锁、keep_tokens 算几"。
+      而且它**写在标签里**：看得见、可撤销，不像全局阈值那样在用户不知情时改变行为。
+
+    典型用途：某个角色特征覆盖率 95%（21 张里差 1 张），够不着强绑定的 100% 门槛，
+    自动锁定拿不到它 → 用户可在「标签统计」里手动把它锁进固定前缀。
+    ⚠️ 锁进去的标签在推理时会**固定出现**（例如锁了帽子就再也脱不掉），这是它的语义。
+    """
+    _seen = set()
+    tag_list = []
+    for t in (tags or []):
+        t = (t or "").strip()
+        if t and t.lower() not in _seen:
+            _seen.add(t.lower())
+            tag_list.append(t)
+    if not tag_list or not train_dir or not os.path.isdir(train_dir):
+        return 0, []
+    trig = [t.strip() for t in re.split(r"[,，]", trigger or "") if t.strip()]
+    lock_low = {t.lower() for t in tag_list}
+    trig_low = {t.lower() for t in trig}
+    files = 0
+    for item in list_dataset_images(train_dir):
+        txt = item["txt"]
+        if not os.path.isfile(txt):
+            continue
+        raw = _read_caption_raw(txt)
+        if raw is None:
+            continue
+        if _FIXED_SEP in raw:
+            fixed_part, _, flex_part = raw.partition(_FIXED_SEP)
+            fixed = _split_tags(fixed_part)
+            flex = _split_tags(flex_part)
+        else:
+            fixed, flex = [], _split_tags(raw)
+        # 固定区领头：优先用调用方给的 trigger；**取不到就用这张图原本的第一个标签** ——
+        # 预处理早已把 trigger 插在标签第一行，所以它通常就是 trigger。
+        # 这样写出来不会让用户看到"触发词被挪到可动区去了"这种怪异结果。
+        # （即便这里判错也无害：preprocess 的 apply_strong_binding 手动模式
+        #   会自己把 trigger 补到固定区最前。）
+        _lead = list(trig)
+        if not _lead:
+            _orig = _split_tags(raw)
+            if _orig:
+                _lead = [_orig[0]]
+        _had = {t.lower() for t in fixed}
+        fixed = [t for t in _lead if t.lower() not in _had] + fixed
+        # 要锁的标签：从可动区挪进固定区（重复的直接去重）
+        _had = {t.lower() for t in fixed}
+        for t in tag_list:
+            if t.lower() not in _had:
+                fixed.append(t)
+                _had.add(t.lower())
+        # 可动区里去掉：本次要锁的 + 固定区领头的那几个
+        _skip = lock_low | trig_low | {t.lower() for t in _lead}
+        flex = [t for t in flex if t.lower() not in _skip]
+        new = ", ".join(fixed) + " " + _FIXED_SEP + " " + ", ".join(flex)
+        if new.strip() == (raw or "").strip():
+            continue                      # 幂等：没有实际变化就不写盘
+        if snapshot is not None and txt not in snapshot:
+            snapshot[txt] = raw
+        try:
+            with open(txt, "w", encoding="utf-8", newline="") as f:
+                f.write(new + ("\n" if raw.endswith("\n") else ""))
+            files += 1
+        except Exception as e:
+            logf("[标签] 锁定写入失败 %s: %s" % (txt, e))
+    return files, list(tag_list)
 
 
 def _read_caption_raw(txt_path):
@@ -9555,14 +9685,57 @@ def _probe_lion(vpy, logf=print, timeout=180):
     return False, (lines[-1] if lines else "未知错误")[-200:]
 
 
+def _diagnose_native_crash(log_text, logf=print):
+    """训练子进程「native 崩溃」诊断；命中返回 True。
+
+    为什么必须有（2026-09-16 qiansui 用户实测）：
+        `anima_train_network.py` 发生原生崩溃（0xC0000005）—— **Python 层一字未输出**；
+        accelerate 捕获后自己以退出码 1 收尾 → 工具只看到 rc=1 →
+        用户拿到的报错是「训练结束，退出码 1，请查看上方日志」，
+        **而上方日志里唯一的线索**是 traceback 里的
+        `returned non-zero exit status 3221225477`。
+        这正是代码库花了几个版本在消灭的「零信息量报错」。
+
+    ⚠️ 判据**不能只看退出码**：这里拿到的是 accelerate 的 rc(=1)，真实错误码被吞进
+    traceback 文本 —— 所以必须从日志文本里找。这也是它接在
+    `_diagnose_optimizer_failure` 里的原因：那个函数是所有训练失败点的公共入口，
+    一处接上，SD/SDXL/Anima/Krea2/FLUX.2/视频 六条路径全部受益。
+    """
+    blob = log_text or ""
+    # Windows native 崩溃码：0xC0000005 访问违例（3221225477）、0xC00000FD 栈溢出（3221225725），
+    # 以及同一批码以有符号十进制出现的形式
+    if not any(m in blob for m in ("3221225477", "0xC0000005", "0xc0000005",
+                                   "3221225725", "-1073741819", "-1073741571")):
+        return False
+    logf("[训练] ⚠ 检测到训练子进程 **native 崩溃**（既不是参数错误，也不是显存不足）：")
+    logf("[训练]   特征：训练脚本在 Python 层零输出/无 traceback，退出码形如 3221225477"
+         "（= 0xC0000005 访问违例）。")
+    logf("[训练]   常见原因（按概率排序）：")
+    logf("[训练]     ① 训练环境的 Python 来源不合适 —— 尤其**用 Anaconda 的 Python 建的 venv**："
+         "conda 自带的 native DLL（libiomp5md / mkl / zlib）会污染训练子进程的 DLL 搜索路径；")
+    logf("[训练]     ② 某个原生依赖装坏或版本不匹配（torch / onnxruntime / opencv 等）；")
+    logf("[训练]     ③ 缺 **Microsoft Visual C++ 运行库**（0xC0000005 的经典根因）。")
+    logf("[训练]   排查步骤（按顺序试）：")
+    logf("[训练]     1) 装官方独立 Python 3.12（**不要用 Anaconda**），并从 PATH 移除 Anaconda，"
+         "再重跑【② 安装训练内核】重建训练环境；")
+    logf("[训练]     2) 装/修复 vc_redist.x64（搜 “vc_redist.x64” 装官方最新版），装完重启电脑；")
+    logf("[训练]     3) 仍失败：把导出的日志发给作者（里面那条 traceback 是关键）。")
+    logf("[训练]   ⚠ 注意：**重复训练不会变好** —— 这不是参数问题，请先修环境。")
+    return True
+
+
 def _diagnose_optimizer_failure(opt_k, log_text, logf=print):
-    """训练失败后诊断：优先识别数据集配置校验错误，其次判断 bitsandbytes 8-bit 崩溃。
+    """训练失败后诊断：优先识别 native 崩溃与数据集配置校验错误，其次判断 bitsandbytes 8-bit 崩溃。
 
     opt_k 为空时自动从日志命令行解析 --optimizer_type=...。
     返回 True=已给出明确诊断（调用方可在报错信息里追加建议）。
     """
     if not log_text:
         return False
+    # native 崩溃优先判：它的特征（零输出 + 古怪退出码）最容易被误读成"普通报错"，
+    # 而修法和其他失败**完全不同**（重训无效，要修环境）。
+    if _diagnose_native_crash(log_text, logf):
+        return True
     # 数据集配置校验失败（voluptuous schema 拒绝 dataset_config.toml）：与优化器无关，
     # 必须优先报告真实原因，避免误导用户去改优化器
     if "Invalid user config" in log_text or "extra keys not allowed" in log_text or "MultipleInvalid" in log_text:
@@ -10507,6 +10680,10 @@ def system_status(force=False):
     data = {
         "git": git or None,
         "python": f"{ver}" if ver else None,
+        # 来源也要如实带出来：徽章以前写死「Python 3.12」，手里明明是 3.11/Anaconda 也照显 3.12，
+        # 用户排查崩溃时会误以为自己环境是符合要求的（2026-09-16 qiansui 用户即如此）。
+        "python_path": py or None,
+        "python_conda": _python_is_conda(py),
         "kohya_ok": kohya_ok,
         "kohya_dir": kdir if kohya_ok else None,
         "gpu": gpu,
@@ -11103,6 +11280,120 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None, vpy=None):
         raise RuntimeError(f"模型组件下载失败（退出码 {rc}）：{repo}")
 
 
+# ---- Anima 组件「手动指定」入口（Qwen3 文本编码器 / Qwen-Image VAE）----
+# 2026-09-16 用户反馈：他本机已经有 Anima 的模型，但工具只在 3 个固定 APPDATA 目录里找、
+# 且子目录名要精确匹配（Qwen3-0.6B / Anima_vae），找不到就直接开始下载
+# （Qwen3 1.2GB + VAE 0.3GB，国内约 1.3MB/s → 白等 20 分钟）。
+# 日志实证：确实走了下载（[Anima] 从魔搭下载 Qwen3-0.6B/…）。
+# 所以加「选择已有文件」：把用户指定的路径存进设置，查找时**优先用它**。
+_ANIMA_COMPONENT_KEYS = {"qwen3": "anima_qwen3_path", "vae": "anima_vae_path"}
+
+
+def anima_get_component(kind):
+    """读取用户手动指定的 Anima 组件路径（kind: qwen3 / vae）。
+
+    未设置、或路径已失效（文件被挪走/删除）→ 返回 None，调用方回落到自动检测。
+    **失效时回落而不是报错**：用户挪过文件后仍能正常训练，不会卡死。
+    """
+    _k = _ANIMA_COMPONENT_KEYS.get(kind)
+    if not _k:
+        return None
+    try:
+        p = ((_load_app_settings() or {}).get(_k) or "").strip()
+    except Exception:
+        return None
+    if not p or not os.path.exists(p):
+        return None
+    return p
+
+
+def _anima_component_ok(kind, path):
+    """校验用户选的 Anima 组件是否可用，返回 (ok, 说明)。
+
+    校验口径与运行时查找保持一致（见 _anima_find_qwen3 / VAE 扫描），
+    不然会出现"选的时候说没问题、训练时又找不到"。
+    """
+    if not path or not os.path.exists(path):
+        return False, "路径不存在"
+    if kind == "vae":
+        if not os.path.isfile(path):
+            return False, "VAE 需要选**文件**（.safetensors / .pth），不是文件夹"
+        if not path.lower().endswith((".safetensors", ".pth")):
+            return False, "VAE 文件应为 .safetensors 或 .pth"
+        if path.lower().endswith(".safetensors") and not _safetensors_complete(path):
+            return False, "这个 safetensors 头尾不一致（下载中断/写坏了），请换一个文件"
+        return True, "就绪"
+    # qwen3：允许整个模型文件夹，或单个权重文件（sd-scripts 会用内置 config 加载）
+    if os.path.isfile(path):
+        if not path.lower().endswith((".safetensors", ".bin")):
+            return False, "文本编码器权重应为 .safetensors 或 .bin"
+        _name = os.path.basename(path).lower()
+        # 浏览器下载常出现 "model.safetensors (1).safetensors" 这种非标准名，
+        # transformers 不认 → 训练时才会报找不到权重，这里提前拦下。
+        if re.match(r"^model-\d+-of-\d+\.(safetensors|bin)$", _name) or \
+                _name in ("model.safetensors", "pytorch_model.bin"):
+            return True, "就绪（单文件模式）"
+        return False, ("文件名不是 transformers 认的标准名（model.safetensors / "
+                       "pytorch_model.bin / model-00001-of-00002.safetensors）。\n"
+                       "请把文件改名为 model.safetensors 再选，或选择整个模型文件夹。")
+    # 文件夹
+    if _qwen3_std_weight_in(path):
+        return True, "就绪（完整文件夹）"
+    _has_cfg = os.path.isfile(os.path.join(path, "config.json"))
+    if _has_cfg:
+        return False, ("文件夹里有 config.json 但找不到标准权重文件"
+                       "（model.safetensors / pytorch_model.bin / 分片）。")
+    for _root, _dirs, _files in os.walk(path):
+        for _f in _files:
+            if _f.lower().endswith((".safetensors", ".bin")):
+                return True, "就绪（按单文件模式加载）"
+    return False, "这个文件夹里没有可用的权重文件（.safetensors / .bin）"
+
+
+def anima_set_component(kind, path, logf=print):
+    """保存用户手动指定的 Anima 组件路径。返回 (ok, 说明)。"""
+    _k = _ANIMA_COMPONENT_KEYS.get(kind)
+    if not _k:
+        return False, "未知组件：%s" % kind
+    _path = (path or "").strip().strip('"')
+    ok, why = _anima_component_ok(kind, _path)
+    if not ok:
+        logf("[Anima] 组件校验未通过：%s" % why)
+        return False, why
+    try:
+        _s = _load_app_settings() or {}
+        _s[_k] = _path
+        _save_app_settings(_s)
+    except Exception as e:
+        return False, "保存设置失败：%s" % e
+    _label = "文本编码器" if kind == "qwen3" else "VAE"
+    logf("[Anima] 已指定%s：%s（训练时将直接使用，不再下载）" % (_label, _path))
+    return True, "已指定%s：%s" % (_label, _path)
+
+
+def anima_component_status():
+    """给界面用：两个组件当前"将使用什么"。返回 {qwen3: {...}, vae: {...}}。"""
+    out = {}
+    q = anima_get_component("qwen3") or _anima_find_qwen3_any()[0]
+    out["qwen3"] = {"path": q, "manual": bool(anima_get_component("qwen3"))}
+    v = anima_get_component("vae")
+    if not v:
+        for _b in _anima_bases():
+            _vd = os.path.join(_b, "Anima_vae")
+            if os.path.isdir(_vd):
+                for _root, _dirs, _files in os.walk(_vd):
+                    for _f in _files:
+                        if _f.lower().endswith((".safetensors", ".pth")):
+                            v = os.path.join(_root, _f)
+                            break
+                    if v:
+                        break
+            if v:
+                break
+    out["vae"] = {"path": v, "manual": bool(anima_get_component("vae"))}
+    return out
+
+
 def _anima_bases():
     """Anima 组件可能存在的根目录（兼容新旧安装目录）。
 
@@ -11118,7 +11409,14 @@ def _anima_bases():
 
 
 def _anima_find_qwen3_any():
-    """遍历所有可能目录找 Qwen3，返回 (路径, 所在 base)。"""
+    """找 Qwen3 文本编码器，返回 (路径, 所在 base)。
+
+    优先级：**用户手动指定的路径** > 标准目录扫描（见 _ANIMA_COMPONENT_KEYS）。
+    手动指定优先是为了避免"用户已有模型却还被重新下载 1.2GB"（2026-09-16 用户反馈）。
+    """
+    _manual = anima_get_component("qwen3")
+    if _manual:
+        return _manual, os.path.dirname(_manual)
     for base in _anima_bases():
         p = _anima_find_qwen3(base)
         if p:
@@ -11236,7 +11534,13 @@ def _ensure_anima_components(logf=print):
                 # hf-mirror 仅作兜底（海外/必须走 HF 的场景）
                 _download_qwen3_from_modelscope(qwen3_dir, logf)
             except Exception as _ms_e:
-                logf(f"[Anima] 魔搭下载失败（{_ms_e}），自动改用 hf-mirror 快照下载…")
+                # 措辞（2026-09-16 用户反馈「也不知道到底成功还是失败，下载倒是有进行」）：
+                # 这是**换源重试**、结果还没定 —— 写「失败」会让用户以为整体失败了，
+                # 而紧接着的 hf-mirror 其实下载成功了。
+                # 另外原因单独占一行：原来直接塞进中文括号，和异常自带的括号叠成
+                # 「魔搭下载失败（…（文件缺失或命名异常））」，读起来像绕口令。
+                logf("[Anima] 魔搭镜像这次没取全，自动换 hf-mirror 重试…")
+                logf("[Anima]   · 魔搭侧原因：%s" % _ms_e)
                 _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
             qwen3_path, qwen3_base = _anima_find_qwen3_any()
         except Exception as e:
@@ -11252,20 +11556,24 @@ def _ensure_anima_components(logf=print):
         if qwen3_path is None:
             raise RuntimeError(f"Qwen3-0.6B 仍未就绪，请检查：{os.path.join(base, 'Qwen3-0.6B')}")
     vae_dir = os.path.join(base, "Anima_vae")
-    vae_file = None
+    # 用户手动指定的 VAE 优先（避免"已有文件却被重新下载 0.3GB"）
+    vae_file = anima_get_component("vae")
+    if vae_file:
+        logf(f"[Anima] 使用你指定的 VAE：{vae_file}")
     # 兼容新旧目录：先扫标准位置，再扫旧版 Kohya_ss 目录
-    for _b in bases:
-        _vd = os.path.join(_b, "Anima_vae")
-        if os.path.isdir(_vd):
-            for root, _dirs, files in os.walk(_vd):
-                for f in files:
-                    if f.lower().endswith((".safetensors", ".pth")):
-                        vae_file = os.path.join(root, f)
+    if not vae_file:
+        for _b in bases:
+            _vd = os.path.join(_b, "Anima_vae")
+            if os.path.isdir(_vd):
+                for root, _dirs, files in os.walk(_vd):
+                    for f in files:
+                        if f.lower().endswith((".safetensors", ".pth")):
+                            vae_file = os.path.join(root, f)
+                            break
+                    if vae_file:
                         break
-                if vae_file:
-                    break
-        if vae_file:
-            break
+            if vae_file:
+                break
     if not vae_file:
         # 用国内直链直接下载（与 Krea2/FLUX2 模型下载一致），不依赖 huggingface_hub 的
         # snapshot_download（snapshot_download 对 allow_patterns 匹配/repo 结构敏感，易失败）
@@ -11292,7 +11600,10 @@ def _ensure_anima_components(logf=print):
         raise RuntimeError(f"未找到 Qwen-Image VAE 文件，请手动下载后放到：{vae_dir}")
     # 完整性校验：VAE 损坏/截断（safetensors 头部与数据不一致）会在加载时爆
     # "shape [...] is invalid for input of size ..."，训练前拦截并引导重下（2026-08-28 T-strap 用户）
-    if not _safetensors_complete(vae_file):
+    # ⚠️ 只对 .safetensors 做完整性校验（2026-09-16 修）：
+    # 上面的扫描和「选择已有文件」入口都接受 .pth，但 _safetensors_complete 是**按 safetensors
+    # 头部格式**解析的 —— 对 .pth 必然返回 False，会把一个合法文件误报成"损坏/不完整" ✗
+    if vae_file.lower().endswith(".safetensors") and not _safetensors_complete(vae_file):
         raise RuntimeError(
             f"检测到 Anima VAE 文件损坏/不完整：{vae_file}\n"
             "（safetensors 头部与数据不一致，常见于下载中断/磁盘写坏）\n\n"
@@ -11303,6 +11614,8 @@ def _ensure_anima_components(logf=print):
         raise RuntimeError(
             f"检测到 Anima 文本编码器 Qwen3 权重文件损坏/不完整：{qwen3_path}\n"
             "请删除后重新下载（一键训练会自动重下）。")
-    logf(f"[Anima] Qwen3: {qwen3_path}")
-    logf(f"[Anima] VAE: {vae_file}")
+    # 给出**明确结论**：以前只打两行裸路径，用户看完仍不知道到底成没成
+    # （2026-09-16 用户反馈：「也不知道到底成功还是失败」）。
+    logf(f"[Anima] ✓ 文本编码器已就绪：{qwen3_path}")
+    logf(f"[Anima] ✓ VAE 已就绪：{vae_file}")
     return qwen3_path, vae_file

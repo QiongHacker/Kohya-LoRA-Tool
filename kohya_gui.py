@@ -2459,8 +2459,16 @@ class App:
             self._badge_widgets.append(f)
         _badge("● Git 就绪" if sts.get("git") else "● Git 未装", OK_BG if sts.get("git") else "#3a3333",
                OK_TX if sts.get("git") else "#c9a8a8")
-        _badge("● Python 3.12" if sts.get("python") else "● Python 未装", OK_BG if sts.get("python") else "#3a3333",
-               OK_TX if sts.get("python") else "#c9a8a8")
+        # 如实显示**实际**版本与来源（原来写死「Python 3.12」：手里是 3.11 甚至 Anaconda，
+        # 也照样显示「Python 3.12」→ 用户排查崩溃时会误判自己环境没问题。
+        # 2026-09-16 qiansui 用户就是 3.11.7 + Anaconda，一路被这个徽章误导。）
+        _pyv = sts.get("python")
+        if _pyv and sts.get("python_conda"):
+            _badge("● Python %s（Anaconda ⚠）" % _pyv, "#3a3333", "#e0b0b0")
+        elif _pyv:
+            _badge("● Python %s" % _pyv, OK_BG, OK_TX)
+        else:
+            _badge("● Python 未装", "#3a3333", "#c9a8a8")
         _badge("● Kohya-SS 就绪" if sts.get("kohya_ok") else "● Kohya 未装", OK_BG if sts.get("kohya_ok") else "#3a3333",
                OK_TX if sts.get("kohya_ok") else "#c9a8a8")
         _badge("● 第四引擎(Fizgig) 就绪" if sts.get("fizgig_ok") else "● 第四引擎未装",
@@ -5474,6 +5482,8 @@ class App:
                 return
         if not self._anima_merged_ok(params):
             return
+        if not self._anima_components_preflight(params):
+            return
         if not self._warn_no_nvidia():
             return
         if not self._warn_low_vram(params):
@@ -5596,6 +5606,8 @@ class App:
                 messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
                 return
         if not self._anima_merged_ok(params):
+            return
+        if not self._anima_components_preflight(params):
             return
         _need_trigger = (self.mode == "character") or (self.mode == "concept") or \
             (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz") and self._at_sub_label() in ("character", "concept"))
@@ -6497,6 +6509,12 @@ class App:
     # ============ 底模下载（应用内 / 浏览器） ============
     def _show_arch_download_help(self, bt):
         """新架构（FLUX/Anima）没有应用内一键下载，给出准备指引。"""
+        if bt == "anima":
+            # Anima 还要两个配套组件（文本编码器 / VAE）—— 现在是**可指定已有文件**的真对话框。
+            # 2026-09-16 用户反馈：本机明明有模型，却因为只认 3 个固定目录、目录名还要精确匹配，
+            # 被重新下载了 1.5GB（日志里能看到 [Anima] 从魔搭下载 Qwen3-0.6B/…）。
+            self._show_anima_components()
+            return
         if bt == "flux":
             msg = (
                 "FLUX.1 支持应用内一键下载：\n\n"
@@ -6518,6 +6536,180 @@ class App:
                 "下载后放进 models/base，点「选择底模文件」选择即可。")
         messagebox.showinfo(core.APP_NAME, msg)
         self.cmd_open_base_dir()
+
+    def _anima_components_preflight(self, params):
+        """训练前检查 Anima 的两个配套组件（文本编码器 / VAE）。返回 True=继续。
+
+        2026-09-16 用户反馈：他本机已经在 ComfyUI 目录里放了这些模型，工具却在训练时
+        **默默下载了 1.2GB**（日志实证 `[Anima] 从魔搭下载 Qwen3-0.6B/…`），
+        白等约 20 分钟，还多占一份空间（原话：「一个盘里放了两样的模型」）。
+
+        所以把这个选择**挪到训练前**：找不到时先问一句「要指定已有文件吗」，
+        而不是直接开始下载。这同时解决了入口难找 —— 组件对话框原先只挂在
+        「没有模型？点这里下载」里，**已有底模的用户根本不会点那里**。
+
+        **任一缺失就提示**（不是两个都缺才提示）：VAE 那 0.3GB 一样是几分钟的等待 +
+        一份多余的空间，而用户的诉求正是「别多占一份」。两个都齐时直接静默通过 ——
+        绝不打扰已经就绪的用户。
+        """
+        try:
+            if params.get("base_type") != "anima":
+                return True
+            st = core.anima_component_status()
+        except Exception:
+            return True
+        _q = (st.get("qwen3") or {}).get("path")
+        _v = (st.get("vae") or {}).get("path")
+        if _q and _v:
+            return True
+        _miss = []
+        if not _q:
+            _miss.append("· Qwen3-0.6B 文本编码器（约 1.2GB）")
+        if not _v:
+            _miss.append("· Qwen-Image VAE（约 0.3GB）")
+        if not self._modal(
+                "yesno", core.APP_NAME,
+                "Anima 还差这些配套组件，本机没找到：\n\n" + "\n".join(_miss) + "\n\n"
+                "如果你本机已经有（例如 ComfyUI 的 models 目录里），\n"
+                "选「是」可以直接指定 —— 训练就用你那份，不用下载，也不会多占一份空间。\n\n"
+                "选「否」= 现在自动下载（合计约 1.5GB，国内约 20 分钟）。\n\n"
+                "要现在指定已有的文件吗？",
+                log="Anima 组件未找到，询问是否指定已有文件"):
+            return True                       # 选「否」→ 直接走自动下载
+        # ⚠️ 必须等对话框真正关掉再复查：不等的话用户还没选，训练就已经开跑了。
+        self._show_anima_components(wait=True)
+        try:
+            st2 = core.anima_component_status()
+            _ok2 = bool((st2.get("qwen3") or {}).get("path")) and bool((st2.get("vae") or {}).get("path"))
+        except Exception:
+            _ok2 = True
+        # 不管结果如何都继续（不再反复拦）：指定了就用指定的，没指定就自动下载。
+        self._log("[Anima] 组件已指定，训练将直接使用你的文件、不再下载" if _ok2
+                  else "[Anima] 仍有组件未指定，训练时将自动下载")
+        return True
+
+    def _show_anima_components(self, wait=False):
+        """Anima 组件：查看当前用哪个，并可**指定已有的文本编码器 / VAE**。
+
+        2026-09-16 用户反馈：他本机已经有 Anima 的模型，但工具只在 3 个固定 APPDATA 目录里
+        按**精确目录名**找（`Qwen3-0.6B` / `Anima_vae`），找不到就直接下载
+        （Qwen3 1.2GB + VAE 0.3GB，国内约 1.3MB/s ≈ 20 分钟）。日志实证确实走了下载。
+        指定后训练直接使用指定文件、不再下载（查找优先级见 core.anima_get_component）。
+
+        用真对话框而不是 messagebox：messagebox 放不下按钮，而"把路径告诉我"只能靠按钮。
+        """
+        w = ctk.CTkToplevel(self.root)
+        w.title("Anima 组件（文本编码器 / VAE）")
+        w.geometry("700x520")
+        w.transient(self.root)
+        w.configure(fg_color=BG)
+        try:
+            w.grab_set()
+        except Exception:
+            pass
+
+        ctk.CTkLabel(w, text="Anima 需要两个配套组件", font=ui_font(FONT_TITLE),
+                     text_color=TITLE_C).pack(anchor="w", padx=18, pady=(16, 6))
+        ctk.CTkLabel(w, text="不指定也可以：训练时会自动下载（Qwen3 约 1.2GB + VAE 约 0.3GB，国内较慢）。\n"
+                             "如果你本机已经有这些文件（例如 ComfyUI 的 models 目录里），"
+                             "在下面直接指定，训练就用你的文件，不再下载。",
+                     font=ui_font(FONT_HINT), text_color=HINT, justify="left",
+                     wraplength=645).pack(anchor="w", padx=18, pady=(0, 10))
+
+        _rows = {}
+
+        def _pick(kind, folder):
+            try:
+                if folder:
+                    p = filedialog.askdirectory(title="选择 Qwen3-0.6B 模型文件夹")
+                elif kind == "vae":
+                    p = filedialog.askopenfilename(
+                        title="选择 Qwen-Image VAE 文件",
+                        filetypes=[("VAE 文件", "*.safetensors *.pth"), ("全部文件", "*.*")])
+                else:
+                    p = filedialog.askopenfilename(
+                        title="选择 Qwen3-0.6B 权重文件",
+                        filetypes=[("模型权重", "*.safetensors *.bin"), ("全部文件", "*.*")])
+            except Exception:
+                return
+            if not p:
+                return
+            ok, msg = core.anima_set_component(kind, p, logf=self._log)
+            if not ok:
+                messagebox.showwarning("这个文件不能用", msg)
+                return
+            self._set_status(msg)
+            _refresh()
+
+        def _refresh():
+            try:
+                st = core.anima_component_status()
+            except Exception as e:
+                self._log("[Anima] 读取组件状态失败：%s" % e)
+                return
+            for _k, _lbl in _rows.items():
+                _d = st.get(_k) or {}
+                _p = _d.get("path")
+                if _p:
+                    _src = "你指定" if _d.get("manual") else "自动检测"
+                    _lbl.configure(text="✓ 当前使用（%s）：\n%s" % (_src, _p), text_color="#8fd6a0")
+                else:
+                    _lbl.configure(text="⚠ 未找到 —— 训练时会自动下载", text_color="#e0b0b0")
+
+        for _kind, _title, _desc in (
+            ("qwen3", "① 文本编码器 Qwen3-0.6B（约 1.2GB）",
+             "可以是整个模型文件夹（含 config.json），也可以是单个权重文件"),
+            ("vae", "② Qwen-Image VAE（约 0.3GB）",
+             "选 .safetensors / .pth 文件；ComfyUI 的 vae 目录里常见 qwen_image_vae.safetensors"),
+        ):
+            card = ctk.CTkFrame(w, fg_color=CARD, corner_radius=8)
+            card.pack(fill="x", padx=18, pady=(0, 10))
+            ctk.CTkLabel(card, text=_title, font=ui_font(FONT_BODY),
+                         text_color=TITLE_C).pack(anchor="w", padx=12, pady=(10, 2))
+            _st = ctk.CTkLabel(card, text="", font=ui_font(FONT_HINT), text_color=SUB,
+                               justify="left", wraplength=615, anchor="w")
+            _st.pack(anchor="w", padx=12, pady=(0, 4))
+            ctk.CTkLabel(card, text=_desc, font=ui_font(FONT_HINT), text_color=HINT,
+                         justify="left", wraplength=615).pack(anchor="w", padx=12, pady=(0, 6))
+            _brow = ctk.CTkFrame(card, fg_color="transparent")
+            _brow.pack(anchor="w", padx=12, pady=(0, 10))
+            if _kind == "qwen3":
+                ctk.CTkButton(_brow, text="📁 选文件夹", width=104, height=28,
+                              fg_color=CARD2, hover_color="#343a46", border_width=1,
+                              border_color=ACC, text_color=ACC, corner_radius=6,
+                              font=ui_font(FONT_HINT),
+                              command=lambda k=_kind: _pick(k, True)).pack(side="left")
+            ctk.CTkButton(_brow, text="📄 选文件", width=104, height=28,
+                          fg_color=CARD2, hover_color="#343a46", border_width=1,
+                          border_color=ACC, text_color=ACC, corner_radius=6,
+                          font=ui_font(FONT_HINT),
+                          command=lambda k=_kind: _pick(k, False)).pack(
+                side="left", padx=(8, 0) if _kind == "qwen3" else (0, 0))
+            _rows[_kind] = _st
+
+        ctk.CTkLabel(w, text="底模（Anima DiT .safetensors ≈5GB）放 models/base 后点「选择底模文件」即可。\n"
+                             "DiT 下载：HuggingFace circlestone-labs/Anima，或国内镜像 hf-mirror.com。",
+                     font=ui_font(FONT_HINT), text_color=HINT, justify="left",
+                     wraplength=645).pack(anchor="w", padx=18, pady=(0, 8))
+
+        _bar = ctk.CTkFrame(w, fg_color="transparent")
+        _bar.pack(fill="x", padx=18, pady=(0, 14))
+        ctk.CTkButton(_bar, text="📂 打开底模目录", width=132, height=30,
+                      fg_color="transparent", hover_color="#252a36", border_width=1,
+                      border_color=BORDER, text_color=SUB, corner_radius=6,
+                      font=ui_font(FONT_BODY),
+                      command=self.cmd_open_base_dir).pack(side="left")
+        ctk.CTkButton(_bar, text="知道了", width=100, height=30, fg_color=ACC,
+                      hover_color=ACC_H, text_color="#ffffff", corner_radius=6,
+                      font=ui_font(FONT_BODY), command=w.destroy).pack(side="right")
+        w._refresh_anima = _refresh
+        _refresh()
+        if wait:
+            # 训练前的拦截路径要等用户选完再往下走（否则还没选，训练就开跑了）。
+            try:
+                w.wait_window()
+            except Exception:
+                pass
 
     def _download_choice_dialog(self, bt=None):
         bt = bt or self.base_type
@@ -7657,6 +7849,21 @@ class LabelEditorWindow:
         ctk.CTkButton(top, text="🗑 删除选中标签", width=132, height=28, fg_color="#4a3535", hover_color="#5a4141",
                       border_width=1, border_color="#5a4141", text_color="#e0b0b0", corner_radius=6,
                       font=ui_font(FONT_HINT), command=lambda: self._stats_delete_selected(w)).pack(side="right")
+        # ★ 锁进固定前缀（2026-09-16 新增）：强绑定只锁「100% 出现」的词，
+        # 而角色特征常常差一张（色差/漏标）就够不着门槛，导致单写触发词唤不出角色。
+        # 这个入口让用户手动把这类高覆盖特征锁进固定前缀（写 |||，复用已有机制）。
+        w._btn_lock = ctk.CTkButton(top, text="★ 锁进固定前缀", width=132, height=28,
+                                    fg_color=CARD2, hover_color="#343a46",
+                                    border_width=1, border_color=ACC, text_color=ACC, corner_radius=6,
+                                    font=ui_font(FONT_HINT),
+                                    command=lambda: self._stats_lock_to_prefix(w))
+        w._btn_lock.pack(side="right", padx=(0, 8))
+        ctk.CTkLabel(w, text="★ = 高覆盖率但没到 100%（强绑定只锁 100% 的词）。"
+                             "侧身 / 背面图容易让自动打标漏标，属于正常现象，不一定是数据集不一致；"
+                             "若该特征确实是这个角色的固定特征，选中后点「★ 锁进固定前缀」手动锁定"
+                             "（下次预处理生效）。",
+                     font=ui_font(FONT_HINT), text_color=HINT, wraplength=600,
+                     justify="left").pack(anchor="w", padx=18, pady=(0, 4))
         lf = ctk.CTkFrame(w, fg_color=CARD, corner_radius=8); lf.pack(fill="both", expand=True, padx=16, pady=(0, 14))
         lb = tk.Listbox(lf, bg=CARD2, fg=TXT, selectbackground=SELBAR, selectforeground="#ffffff",
                         font=ui_font(FONT_BODY), highlightthickness=0, borderwidth=0,
@@ -7696,12 +7903,23 @@ class LabelEditorWindow:
                         checkbox_width=16, checkbox_height=16, border_width=1,
                         fg_color=ACC, hover_color=ACC_H, border_color=BORDER,
                         command=_apply_multi).pack(side="left", padx=(14, 0))
+        # 覆盖率 = 该标签出现在多少比例的图片里。
+        # 强绑定只锁 **100%** 的词，所以 80~99% 这批最值得提醒：
+        # 2026-09-16 用户实测 —— 他的角色特征 green hair 是 20/21（95%）、
+        # witch hat 是 17/21（81%），全都够不着门槛，于是单写触发词唤不出角色。
+        _total = 0
+        try:
+            _total = core.count_images(self.train_dir)
+        except Exception:
+            _total = 0
         _zd = self.get_tagdict()
         for tag, cnt in stats:
             zh = _zd.to_zh(tag) if _zd else None
             line = "%4d  %s" % (cnt, tag)
             if zh and zh != tag:
                 line += "   / " + zh
+            if _total and cnt < _total and cnt / float(_total) >= 0.8:
+                line += "   ★ %d/%d（%.0f%%）· 未锁定" % (cnt, _total, cnt * 100.0 / _total)
             lb.insert("end", line)
             w._tags.append(tag)
         w.protocol("WM_DELETE_WINDOW", w.destroy)
@@ -7735,6 +7953,69 @@ class LabelEditorWindow:
         except Exception:
             pass
         self._set_status(f"已删除 {len(tags)} 个标签")
+        self._show_stats()
+
+    def _stats_lock_to_prefix(self, win):
+        """把选中的标签锁进「固定前缀」（写 `|||`），供人物强绑定在下次预处理时锁定。
+
+        2026-09-16 用户需求：标签统计里要一个入口，让「高覆盖率但没到 100%」的角色特征
+        也能被锁定 —— 他的 green hair 是 20/21（95%），自动锁定永远拿不到它，
+        结果单写触发词唤不出角色（他自己手动补上就"非常像"）。
+
+        ⚠️ 必须让用户看见代价，这是这个功能唯一危险的地方：
+          ① 锁进前缀 = 该特征在出图时**固定出现**（锁了帽子就再也脱不掉）；
+          ② 需要**重跑预处理**才生效（强绑定在预处理阶段消费 `|||`）。
+        """
+        try:
+            tags = [win._tags[i] for i in win._lb.curselection()]
+        except Exception:
+            tags = []
+        if not tags:
+            messagebox.showinfo("标签统计", "请先选中要锁定的标签。")
+            return
+        # 触发词来源要稳：优先本编辑器自己的 params，再退到主窗口表单。
+        # （只从主窗口取是不够的：编辑器可能是为另一个项目打开的，或主表单当前为空。）
+        # 注：即便这里取不到也没关系 —— preprocess 的强绑定会自己把 trigger
+        # 拉到固定区最前（apply_strong_binding 的手动模式有这段），所以不会把标签写坏。
+        trig = ""
+        try:
+            trig = ((getattr(self, "params", None) or {}).get("trigger") or "").strip()
+        except Exception:
+            trig = ""
+        if not trig:
+            try:
+                trig = (self.app._collect_params().get("trigger") or "").strip()
+            except Exception:
+                trig = ""
+        shown = "、".join(tags[:10]) + ("…" if len(tags) > 10 else "")
+        if not messagebox.askyesno(
+                "锁进固定前缀",
+                "把选中的 %d 个标签锁进「固定前缀」吗？\n\n%s\n\n"
+                "效果：重跑预处理时，它们会和触发词一起被固定在每张图的标签最前面、"
+                "并计入 keep_tokens —— 这样**只写触发词**也能带出这些特征。\n\n"
+                "⚠️ 请确认两点：\n"
+                "  ① 锁进去的特征在出图时会**固定出现**（例如锁了帽子，角色就再也脱不掉帽子）；\n"
+                "  ② 需要**重跑一次预处理**才会生效。\n\n"
+                "（写错了可用工具条上的「↩ 撤销上次修改」还原）" % (len(tags), shown)):
+            return
+        snapshot = {}
+        self._begin_batch("正在锁定到固定前缀…")
+        try:
+            files, locked = core.lock_tags_to_prefix(self.train_dir, tags, trigger=trig,
+                                                     logf=self._log_app, snapshot=snapshot)
+            self._push_undo("锁进固定前缀：" + "、".join(tags[:6]), snapshot)
+            msg = ("已把 %d 个标签锁进固定前缀（改动 %d 张标签）：%s；"
+                   "重跑预处理后生效。" % (len(locked), files, "、".join(locked[:6])))
+            self._set_status(msg)
+            self._log_app("[标签] " + msg)
+        except Exception as e:
+            messagebox.showerror("锁定失败", str(e))
+        finally:
+            self._end_batch()
+        try:
+            win.destroy()
+        except Exception:
+            pass
         self._show_stats()
 
     def _stats_delete(self, tag, win):

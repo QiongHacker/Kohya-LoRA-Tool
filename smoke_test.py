@@ -688,6 +688,213 @@ def test_preprocess_progress():
     print("PREPROCESS_PROGRESS_OK")
 
 
+def test_python_env_source_guard():
+    """建训练环境必须校验 Python 来源；状态徽章必须如实显示实际版本。
+
+    2026-09-16 qiansui 用户实测链条：
+      · 机器上只有 Anaconda 自带的 Python 3.11.7；
+      · 工具用它建了训练环境（版本在允许范围内 → 直接采用，从不看来源）；
+      · 打标 / 训练里的原生库接连 0xC0000005（conda 的 native DLL 污染）；
+      · 他按别的建议「屏蔽 Anaconda」→ 训练环境立刻报「损坏、找不到 python 路径」
+        （因为 venv 的基座就是 conda）；
+      · 最后装官方 Python + 重下训练内核才好 —— 正是工具日志里早就写着的那条路。
+    """
+    from pathlib import Path
+    import Kohya一键工具 as core
+
+    # ① 来源识别
+    for p in (r"C:\Software\anaconda3\python.EXE", r"D:\miniconda3\python.exe",
+              r"C:\Users\a\Miniforge3\python.exe", r"C:\ProgramData\Anaconda3\python.exe"):
+        assert core._python_is_conda(p) is True, "没认出 conda 来源：%s" % p
+    for p in (r"C:\Python312\python.exe",
+              r"C:\Users\a\AppData\Local\Programs\Python\Python312\python.exe"):
+        assert core._python_is_conda(p) is False, "误判为 conda：%s" % p
+    assert core._python_is_conda(None) is False
+    assert core._python_is_conda("") is False
+
+    # ② 建环境时不能「默默采用」conda 的解释器
+    _src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    _k = _src.index("def install_python(")
+    _body = _src[_k:_src.index("\ndef ", _k + 10)]
+    assert "_python_is_conda(py)" in _body, "install_python 未校验 Python 来源"
+    assert "and not _conda" in _body, "install_python 仍会直接采用 conda 的解释器"
+    assert "Anaconda" in _body, "缺少对 Anaconda 的说明文案"
+
+    # ③ 徽章必须显示**实际**版本，不能写死 3.12
+    st = core.system_status(force=True)
+    assert "python_conda" in st, "system_status 未暴露 python 来源"
+    assert "python_path" in st, "system_status 未暴露 python 路径"
+    _g = Path(os.path.join(os.path.dirname(core.__file__), "kohya_gui.py")).read_text(encoding="utf-8-sig")
+    assert '"● Python 3.12"' not in _g, \
+        "徽章又写死成 Python 3.12 了（用户会误以为自己环境符合要求）"
+    assert "python_conda" in _g and "Anaconda ⚠" in _g, "徽章未如实显示 conda 来源"
+    print("PYTHON_ENV_SOURCE_GUARD_OK")
+
+
+def test_native_crash_diagnosis():
+    """训练侧必须能识别 native 崩溃（0xC0000005），并给出可执行的排查步骤。
+
+    2026-09-16 qiansui 用户的训练失败：`anima_train_network.py` 原生崩溃、**零输出**，
+    accelerate 把它转成退出码 1 → 工具只报「训练结束，退出码 1，请查看上方日志」。
+    而 `3221225477` 在全代码库 **0 命中** —— 工具根本不认识这个错误码。
+    """
+    from pathlib import Path
+    import Kohya一键工具 as core
+
+    # ① 真实的失败文本（accelerate traceback 片段）必须命中
+    tail = ["The following values were not passed to `accelerate launch` and had defaults used instead:",
+            "\t`--mixed_precision` was set to a value of 'no'",
+            "Traceback (most recent call last):",
+            "subprocess.CalledProcessError: Command '[...anima_train_network.py...]'"
+            " returned non-zero exit status 3221225477."]
+    out = []
+    assert core._diagnose_native_crash("\n".join(tail), logf=out.append) is True, "未识别 native 崩溃"
+    blob = "\n".join(out)
+    for kw in ("0xC0000005", "Anaconda", "vc_redist", "重复训练不会变好"):
+        assert kw in blob, "诊断缺少关键信息 %s：%s" % (kw, blob)
+    assert core._diagnose_native_crash("exit code 0xC0000005", logf=lambda s: None) is True
+
+    # ② 无关日志不得误报（OOM/普通报错不是 native 崩溃，修法完全不同）
+    for junk in ("[训练] steps: 5%| 51/1024 [01:00<19:00, 2.10s/it]",
+                 "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB",
+                 "ImportError: No module named 'cv2'", ""):
+        assert core._diagnose_native_crash(junk, logf=lambda s: None) is False, \
+            "无关日志被误判为 native 崩溃：%r" % junk
+
+    # ③ 必须接在所有训练失败点的公共入口上（否则六条路径里只有一条有诊断）
+    _src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    _k = _src.index("def _diagnose_optimizer_failure(")
+    assert "_diagnose_native_crash(log_text, logf)" in _src[_k:_k + 900], \
+        "native 崩溃诊断没接在 _diagnose_optimizer_failure 上"
+
+    # ④ 换源重试不能用「失败」二字（用户会以为整体失败了），且结束要有结论
+    assert "当前镜像下载失败" not in _src, "换源提示仍写「失败」（会误导用户以为整体失败）"
+    assert "[Anima] ✓ 文本编码器已就绪" in _src, "Anima 下载完没有明确结论"
+    print("NATIVE_CRASH_DIAGNOSIS_OK")
+
+
+def test_high_coverage_tag_lock():
+    """标签统计：高覆盖率特征要能提醒 + 手动锁进固定前缀。
+
+    2026-09-16 用户实测：他的角色特征 `green hair` 是 20/21（95%）、`witch hat` 是
+    17/21（81%），全都够不着强绑定的 **100%** 门槛 → 自动锁定永远拿不到它们 →
+    单写触发词唤不出角色（他自己手动补上 `green hair` 就"非常像"）。
+
+    所以标签统计里要有两样：**覆盖率提醒** + 一个把选中标签**锁进固定前缀**的入口。
+    """
+    from pathlib import Path
+    import Kohya一键工具 as core
+
+    _base = os.path.dirname(core.__file__)
+    g = Path(os.path.join(_base, "kohya_gui.py")).read_text(encoding="utf-8-sig")
+    # ① 覆盖率：必须真的去数图片总数
+    assert "core.count_images(self.train_dir)" in g, "统计窗未取图片总数（算不出覆盖率）"
+    assert "未锁定" in g, "统计窗未标出「高覆盖但未锁定」的标签"
+    assert "def _stats_lock_to_prefix" in g, "缺手动锁定入口"
+    assert "_btn_lock" in g, "锁定按钮未挂到窗口上（不便验证与扩展）"
+    # ② 必须说清代价：锁了以后固定出现 + 要重跑预处理才生效
+    _k = g.index("def _stats_lock_to_prefix")
+    _body = g[_k:_k + 2600]
+    assert "固定出现" in _body, "确认框没说「锁进去的特征会固定出现」（锁了帽子就脱不掉）"
+    assert "重跑" in _body, "确认框没说要重跑预处理才生效"
+    assert "_push_undo" in _body, "手动锁定没有留撤销快照（写坏了没法还原）"
+
+    # ③ 核心函数：走 ||| 手动固定区（复用已有且已有测试覆盖的机制）
+    _c = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert "def lock_tags_to_prefix(" in _c, "缺核心锁定函数"
+    assert "_FIXED_SEP" in _c, "未使用 ||| 手动固定区分隔符"
+
+    # ④ 强绑定没锁到特征时不能静默（否则用户只能猜"是不是不生效"）
+    _p = Path(os.path.join(_base, "preprocess.py")).read_text(encoding="utf-8")
+    assert "没有可锁定的特征" in _p, "强绑定没锁到特征时又静默了（用户无从查证）"
+    assert "★ 锁进固定前缀" in _p, "强绑定的提示没有指向界面入口"
+    # ⑤ 覆盖率不足的告警不能说成"数据集不一致" —— 真实原因常是**视角遮挡让自动打标漏标**
+    #    （2026-09-16 用户实测：21 张里有背面/侧身图，双马尾 twintails 只有 20/21，
+    #     而它确实是角色的固定特征。旧文案"人物一致性不足，建议统一训练集特征"
+    #     会把人引去改数据集甚至删掉侧身图，而且根本修不了"打标器看不到"这件事。）
+    #    注：这里用**正向断言** —— 代码注释里会引用旧文案做历史说明，负向断言会误报。
+    assert "视角遮挡" in _p and "打标漏标" in _p, "缺「视角遮挡导致自动打标漏标」的说明"
+    assert "打开「标签统计」" in _p, "告警没有给出可执行的下一步"
+    # 统计窗文案用的是「侧身 / 背面图容易让自动打标漏标」——断言跟着实际用词走
+    assert "漏标" in g and "侧身" in g, "统计窗说明未解释「侧身/背面图会被漏标」"
+    print("HIGH_COVERAGE_TAG_LOCK_OK")
+
+
+def test_anima_component_picker():
+    """Anima 的文本编码器 / VAE 要能「指定已有文件」，且查找优先用它。
+
+    2026-09-16 用户反馈：他本机已经有 Anima 的模型，但工具只在 3 个固定 APPDATA 目录里
+    按**精确目录名**找（Qwen3-0.6B / Anima_vae），找不到就直接下载
+    （Qwen3 1.2GB + VAE 0.3GB，国内约 1.3MB/s ≈ 20 分钟）。
+    日志实证确实走了下载（`[Anima] 从魔搭下载 Qwen3-0.6B/…`）——
+    文件他早就有了，白等一场。
+    """
+    import tempfile
+    from pathlib import Path
+    import Kohya一键工具 as core
+
+    td = tempfile.mkdtemp(prefix="kk_anima_t_")
+    q3 = os.path.join(td, "Qwen3-0.6B")
+    os.makedirs(q3, exist_ok=True)
+    open(os.path.join(q3, "config.json"), "w", encoding="utf-8").write("{}")
+    open(os.path.join(q3, "model.safetensors"), "wb").write(b"\x00" * 16)
+    bad = os.path.join(td, "model.safetensors (1).safetensors")
+    open(bad, "wb").write(b"\x00" * 16)
+    nodir = os.path.join(td, "empty")
+    os.makedirs(nodir, exist_ok=True)
+    vae = os.path.join(td, "qwen_image_vae.pth")
+    open(vae, "wb").write(b"\x00" * 16)
+
+    # ① 校验必须前置（选的时候就拦住，而不是等训练时炸）
+    assert core._anima_component_ok("qwen3", q3)[0] is True
+    ok, why = core._anima_component_ok("qwen3", bad)
+    assert ok is False and "标准名" in why, why
+    assert core._anima_component_ok("qwen3", nodir)[0] is False
+    assert core._anima_component_ok("vae", td)[0] is False        # VAE 必须是文件
+    assert core._anima_component_ok("vae", vae)[0] is True       # .pth 合法
+    assert core._anima_component_ok("vae", os.path.join(td, "没有这个文件"))[0] is False
+
+    # ② 查找优先级：手动指定 > 目录扫描（这是整件事的关键，写反了等于没做）
+    _src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    _k = _src.index("def _anima_find_qwen3_any(")
+    assert '_manual = anima_get_component("qwen3")' in _src[_k:_k + 700], \
+        "Qwen3 查找未优先用手动指定的路径"
+    _v = _src.index("vae_dir = os.path.join(base, \"Anima_vae\")")
+    assert 'vae_file = anima_get_component("vae")' in _src[_v:_v + 500], \
+        "VAE 查找未优先用手动指定的路径"
+
+    # ③ 顺带修的：VAE 完整性校验必须限定 .safetensors（否则合法 .pth 被误报"损坏"）
+    assert 'if vae_file.lower().endswith(".safetensors") and not _safetensors_complete(vae_file):' in _src, \
+        "VAE 完整性校验未限定 .safetensors（.pth 会被误报成损坏）"
+
+    # ④ 界面：Anima 分支要开真对话框（messagebox 放不下按钮），且带选择入口
+    g = Path(os.path.join(os.path.dirname(core.__file__), "kohya_gui.py")).read_text(encoding="utf-8-sig")
+    assert 'if bt == "anima":' in g and "self._show_anima_components()" in g, \
+        "Anima 指引未改走组件对话框"
+    # 注意：不能写 "def _show_anima_components(self)"（带右括号）——
+    # 该方法现在签名是 (self, wait=False)，带括号的串根本不存在。
+    assert "def _show_anima_components(self" in g, "缺少 Anima 组件对话框"
+    _d = g[g.index("def _show_anima_components(self"):]
+    _d = _d[:_d.index("\n    def ", 10)]
+    assert "core.anima_set_component" in _d, "对话框未写回指定的路径"
+    assert "选文件夹" in _d and "选文件" in _d, "对话框缺少选择入口"
+    assert "_refresh_anima" in _d, "对话框没有状态刷新（指定后看不到变化）"
+
+    # ⑤ 入口必须够得着：原先只挂在「没有模型？点这里下载」里，
+    #    已有底模的用户**根本不会点那里** ✗ —— 所以要在训练前拦一道。
+    assert "def _anima_components_preflight(self" in g, "缺少训练前预检"
+    _p = g[g.index("def _anima_components_preflight(self"):]
+    _p = _p[:_p.index("\n    def ", 10)]
+    assert "if _q and _v:" in _p and "_modal(" in _p, \
+        "预检未做到「两个都齐时静默通过、否则先问一句」"
+    # 训练必须先等用户选完再开跑（少这一句 = 用户还没选，训练已经开始下载了）
+    assert "_show_anima_components(wait=True)" in _p, "预检未阻塞等待用户选择"
+    assert "w.wait_window()" in g, "对话框不支持阻塞等待"
+    assert g.count("self._anima_components_preflight(params)") >= 2, \
+        "预检只接了一处（一键开始训练 / 开始训练 都要有）"
+    print("ANIMA_COMPONENT_PICKER_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -703,6 +910,10 @@ def main():
     check("标签批量操作：预演 + 快照撤销", test_label_editor_safety)
     check("主页输出目录入口", test_home_output_button)
     check("预处理进度（WD14 打标）", test_preprocess_progress)
+    check("Anima 组件指定已有文件", test_anima_component_picker)
+    check("Python 环境来源校验 + 徽章如实显示", test_python_env_source_guard)
+    check("训练 native 崩溃诊断", test_native_crash_diagnosis)
+    check("高覆盖特征锁进固定前缀", test_high_coverage_tag_lock)
     print("-" * 40)
     if FAILED:
         print("✘ 失败 %d 项: %s" % (len(FAILED), "、".join(FAILED)))

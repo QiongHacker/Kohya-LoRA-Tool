@@ -5,6 +5,7 @@
 import os
 import sys
 import re
+import queue
 import subprocess
 import shutil
 import json
@@ -198,11 +199,30 @@ def build_direct_env(extra_dirs=()):
     return clear_proxy_env(build_env(extra_dirs))
 
 
+# ---- run_stream 的收尾策略（2026-09-16）----
+# ⚠️ **结束判据是「进程退出」，不是「管道 EOF」。**
+# Windows 上子进程的 stdout 管道句柄会被**孙进程**继承（git clone 的 git-remote-https、
+# pip 的构建子进程、杀软扫描进程等）；只要还有任何一个孙进程握着它，管道就永不 EOF。
+# 旧实现用 `for line in proc.stdout` 阻塞读 → 孙进程不放手就**永久卡住**，
+# 表现为「活已经干完了，但任务一直不结束」，用户只能手动结束任务。
+#
+# 实测（2026-09-16 qiansui 用户）：下载训练内核**每次都在最后卡住**；
+# 手动结束后重点一次，工具检测完直接说「已安装」→ 证明阻塞发生在收尾而非安装本身。
+# （手动结束是**不受控中断**，半装的 venv/半下的 wheel 都可能留下隐患 —— 必须修掉。）
+_STREAM_POLL = 0.15        # 主循环轮询间隔（秒）
+_STREAM_TAIL_GRACE = 2.0   # 进程退出后，额外排空管道缓冲的宽限时间（秒）
+_STREAM_KILL_WAIT = 10.0   # 停止路径收尾时，等进程真正结束的最长时间（秒）
+
+
 def run_stream(cmd, cwd=None, env=None, logf=print, collect=None):
     """运行命令并把 stdout/stderr 实时交给 logf。返回退出码。
 
     支持手动停止：stop_active_process() 会终止当前进程树，
     并在读取循环中抛出 StopRequested（调用方按“用户主动停止”处理）。
+
+    ⚠️ 结束判据是 **proc.poll()（进程已退出）**，不是「管道读到 EOF」——
+    孙进程可能长期持有管道句柄，等 EOF 会让任务永久卡住（见上方常量注释）。
+    读取放在 daemon 线程里，即使它被孙进程卡住也不影响主流程收尾。
     """
     global _ACTIVE_PROC
     if env is None:
@@ -226,26 +246,85 @@ def run_stream(cmd, cwd=None, env=None, logf=print, collect=None):
         _ACTIVE_PROC = proc
     if _STOP_EVENT.is_set():
         _terminate_tree(proc)
+
+    # 读取线程只负责「把行搬进队列」——被孙进程卡住也无所谓，主线程不再等它。
+    _lines = queue.Queue()
+    _EOF = object()
+
+    def _reader():
+        try:
+            for _raw in proc.stdout:
+                _lines.put(_raw)
+        except Exception:
+            pass
+        finally:
+            _lines.put(_EOF)
+
+    def _emit(raw):
+        _l = raw.rstrip("\n").rstrip("\r")
+        if logf:
+            logf(_l)
+        if collect is not None:
+            try:
+                collect.append(_l)
+            except Exception:
+                pass
+
+    def _drain():
+        """把队列里已到的行全部吐出；返回是否见到 EOF。"""
+        while True:
+            try:
+                _item = _lines.get_nowait()
+            except queue.Empty:
+                return False
+            if _item is _EOF:
+                return True
+            _emit(_item)
+
+    threading.Thread(target=_reader, daemon=True).start()
+    _rc = None
     try:
-        for line in proc.stdout:
-            _l = line.rstrip("\n").rstrip("\r")
-            if logf:
-                logf(_l)
-            if collect is not None:
-                try:
-                    collect.append(_l)
-                except Exception:
-                    pass
+        while True:
+            _drain()
+            _rc = proc.poll()
+            if _rc is not None:
+                # 进程已退出 = 真正的结束。再给读取线程一小段时间把管道里缓冲的尾巴
+                # 收干净，但**绝不为它无限等待**（孙进程可能一直握着管道不放）。
+                _t0 = time.time()
+                while time.time() - _t0 < _STREAM_TAIL_GRACE:
+                    if _drain():
+                        break
+                    time.sleep(_STREAM_POLL)
+                _drain()
+                break
             if _STOP_EVENT.is_set():
                 _terminate_tree(proc)
                 if logf:
                     logf("[停止] 已收到停止请求，正在终止进程…")
                 break
+            time.sleep(_STREAM_POLL)
     finally:
         with _ACTIVE_LOCK:
             if _ACTIVE_PROC is proc:
                 _ACTIVE_PROC = None
-    proc.wait()
+    if _rc is None:
+        # 停止路径（或进程尚未退出）：带超时收尾，别在收尾环节再造出一次挂死
+        try:
+            proc.wait(timeout=_STREAM_KILL_WAIT)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+    # ⚠️ 这里**绝不能** `proc.stdout.close()`。
+    # 读取线程此刻正阻塞在这个管道上、持着 io 内部锁，close() 会一直等它放锁 ——
+    # 实测（2026-09-16，孙进程持有管道时）close() 自身阻塞了 **29.92 秒**，
+    # 等于把刚修好的挂死从循环又搬到了收尾处。
+    # 读取线程是 daemon：等管道真正 EOF 时它会自己读完并退出，无需我们插手。
     if _STOP_EVENT.is_set():
         raise StopRequested("任务已手动停止")
     return proc.returncode
