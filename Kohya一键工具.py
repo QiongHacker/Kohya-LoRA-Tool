@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.16.13"
+APP_VERSION = "0.16.14"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1057,6 +1057,99 @@ def _order_bases_by_speed(bases, filename, label="", logf=print, probe_bytes=2 *
 # PyTorch 大轮子魔搭缓存（国内直连；2026-09-11 实测魔搭 2.25 MB/s，且已支持 Range 断点续传）
 MODELSCOPE_PTW_MIRROR = "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/pytorch_wheels/"
 
+def _cpu_name():
+    """读 CPU 型号（注册表，无需起子进程；Windows 专用但本工具只跑 Windows）。
+
+    为什么要它：torch 2.x 硬性要求 AVX2 ✓，而 **DLL 初始化失败（WinError 1114）**
+    在老 Xeon / 低配云主机上最常见的原因就是 CPU 不支持 AVX2 ✗
+    （2026-09-16 用户实证：远程桌面 + c10.dll 报 1114）。
+    报错时把 CPU 型号一并写进日志，用户直接复制给我们就能判断，不用再来回问 ✓。
+    """
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as _k:
+            return str(winreg.QueryValueEx(_k, "ProcessorNameString")[0]).strip()
+    except Exception:
+        return ""
+
+
+def _cpu_desc():
+    """CPU 型号 + **是否支持 AVX2**（注册表 + kernel32，都不起子进程）。
+
+    为什么要带上 AVX2：torch 2.x 硬性要求 AVX2 ✓，而 `WinError 1114`（c10.dll 初始化失败）
+    在低配云主机上常见原因之一就是 CPU 不支持它 ✗。
+    **2026-09-16 的教训：只记型号不够** —— 当时日志里只有「Xeon Platinum 8468」，
+    还得人去查它有没有 AVX2（我们甚至查错了方向 ✗，白绕一轮）。
+    这里直接给结论，日志一眼可判 ✓。
+
+    `PF_AVX2_INSTRUCTIONS_AVAILABLE = 40`（Windows 8+ 的 IsProcessorFeaturePresent 支持）：
+    纯 stdlib、一次调用，且**不依赖 numpy/torch 可用** ✓ ——
+    正是 torch 挂掉时才最需要它。
+    """
+    _name = _cpu_name() or "未知型号"
+    try:
+        import ctypes
+        _ok = bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(40))
+        _txt = "支持" if _ok else "**不支持**（torch 2.x 无法运行）"
+    except Exception:
+        _txt = "未能探测"
+    return "%s（AVX2：%s）" % (_name, _txt)
+
+
+def _torch_import_hints(err):
+    """按 torch 导入失败的报错文本给出**对症**的排查指引（纯函数，便于测试）。
+
+    ⚠️ **1114 与 126 必须分开**（2026-09-16 用户实证 NJFF，踩过混为一谈的坑）：
+      · `WinError 126` / `DLL load failed` / `找不到指定的模块` = **文件缺失**
+        → 装 VC++ 运行库即可；
+      · `WinError 1114` / `初始化例程失败` = **DLL 找到了、但初始化失败** ✗
+        → 多为 VC++ 运行库**存在却太旧**（缺 VS2019+ 才有的 `vcruntime140_1.dll`），
+          其次才是杀软拦截初始化。
+    混为一谈的代价：用户照"缺 VC++"的提示装了运行库、**问题照旧**，白跑一趟 ✗
+    —— 而且他会以为自己"已经装过 VC++ 了"，实际是版本不够 ✗。
+    """
+    _e = str(err or "")
+    _low = _e.lower()
+    if "winerror 1114" in _low or "初始化例程失败" in _e or "dll initialization" in _low:
+        return [
+            "→ **DLL 找到了但初始化失败**（WinError 1114，不是缺文件）。逐条排查（不分先后）：",
+            "① **CPU 不支持 AVX2**（torch 2.x 的硬性要求）：老 Xeon / 低配云主机很常见 ✗。"
+            "命令行执行 `wmic cpu get name` 把型号发出来即可判断；不支持就只能换机器。",
+            "② **VC++ 运行库不全**：cmd 里执行 "
+            "`dir C:\\Windows\\System32\\vcruntime140*.dll C:\\Windows\\System32\\msvcp140*.dll` —— "
+            "缺 `vcruntime140_1.dll` 或 `msvcp140*.dll` 就是它 → 装**最新**的 "
+            "「Microsoft Visual C++ 2015-2022 Redistributable (x64)」（要覆盖升级）+ 重启。",
+            "③ **杀软拦截了 DLL 初始化**：查隔离区、把该环境目录加白名单，或临时关闭安全软件试一次。",
+            '④ **PATH 里有冲突的同名 DLL**（开发机/云主机常见）：把 PATH 收窄成系统目录，'
+            '再单独跑一次 import。',
+            '   ⚠️ 必须**一行一条、按顺序**执行（几条命令挤在一行不会生效 ✗）。',
+            '   第一步（按你的 shell 选一条，各自单独回车）：',
+            '   · PowerShell： $env:PATH="C:\\Windows\\System32;C:\\Windows"',
+            '   · cmd：        set "PATH=C:\\Windows\\System32;C:\\Windows"',
+            '   第二步（单独一行，两种 shell 写法相同）：',
+            '   · "…\\fizgig_venv\\Scripts\\python.exe" -c "import torch"',
+            '   （2026-09-16 两次踩坑记录：① 只看 cmd 语法、用户跑在 PowerShell 里 → '
+            'set 报 CommandNotFound ✗；② 几条命令写成一行却漏了连接符 → '
+            'cmd 把后面整串当成 PATH 的值，**等于什么都没执行** ✗，用户还以为"试过了、没输出" ✗）',
+            '   若收窄后能导入，就是 PATH 里某个目录带了冲突 DLL ✓',
+            "⑤ **轮子是手动放进缓存的**（未经下载校验）可能本身损坏 ✗："
+            "删掉 `cache\\pytorch_wheels` 里的 whl 后重装，让它从镜像**重新下载并校验** ✓",
+        ]
+    if ("winerror 126" in _low or "dll load failed" in _low or "找不到指定的模块" in _e
+            or "0xc0000135" in _low or "the specified module could not be found" in _low):
+        return ["→ 典型原因：**缺 VC++ 运行库**。装「Microsoft Visual C++ 2015-2022 "
+                "Redistributable (x64)」（微软官网免费），重启软件后重试。"]
+    if ("access is denied" in _low or "拒绝访问" in _e or "permission" in _low
+            or "being used by another process" in _low):
+        return ["→ 疑似被**杀软/安全软件拦截**（文件被隔离或占用）：到安全软件里看隔离区，"
+                "把该环境目录加入白名单后重装。"]
+    if "0xc000001d" in _low or "illegal instruction" in _low or "not supported by this cpu" in _low:
+        return ["→ **CPU 指令集不足**：torch 2.x 要求 AVX2，多见于 2013 年前的老 CPU —— "
+                "该机器无法使用本引擎。"]
+    return []
+
+
 def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                       xf_ver=None, ta_ver=None, cu="cu128", label="Kohya", force=False):
     """预下载并安装 PyTorch 大轮子（torch/torchvision[/xformers][/torchaudio]）。
@@ -1231,13 +1324,81 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                 except Exception:
                     pass
         raise RuntimeError(
-            "本地安装 PyTorch 轮子失败：依赖解析在清华/阿里云/上海交大三个国内镜像均失败，"
-            "请查看上方日志；网络恢复后重试（缓存轮子已存在，会跳过下载）")
-    r = subprocess.run([vpy, "-c", "import torch, torchvision;print(torch.__version__);print(torch.cuda.is_available())"],
-                       capture_output=True, text=True, timeout=180)
-    logf("[%s] 验证：" % label + ((r.stdout or "").strip().replace("\n", " | ")))
-    if r.returncode != 0:
-        raise RuntimeError("torch 安装后导入失败")
+            "本地安装 PyTorch 轮子失败：依赖解析在各国内镜像（%s）均失败，"
+            "请查看上方日志；网络恢复后重试（缓存轮子已存在，会跳过下载）"
+            % "/".join(n for n, _u in PIP_MIRRORS))
+
+    def _verify_torch():
+        """跑一次 import torch 验证，返回 (ok, CompletedProcess)。"""
+        _r = subprocess.run([vpy, "-c",
+                             "import torch, torchvision;print(torch.__version__);print(torch.cuda.is_available())"],
+                            capture_output=True, text=True, timeout=180)
+        return (_r.returncode == 0 and bool((_r.stdout or "").strip())), _r
+
+    ok_v, r = _verify_torch()
+    logf("[%s] 验证：" % label + ((r.stdout or "").strip().replace("\n", " | ") or "（无输出）"))
+    if not ok_v:
+        # ★ 2026-09-16 用户实证（NJFF）踩到的最大盲点：
+        #   旧代码只打 stdout —— 导入失败时日志里**只有一行「验证：」**，真正的报错
+        #   （stderr 的 ImportError/traceback）被**整个丢掉** ✗
+        #   于是用户把安装重跑了三遍、我们也只能反复猜"为什么导入失败" ✗
+        #   教训：诊断信息必须在**发生的那一刻**写进日志，不能只留在被吞掉的子进程里。
+        _err = (r.stderr or "").strip()
+        if _err:
+            logf("[%s] ⚠ 导入失败的原始报错（据此判断原因）：" % label)
+            for _ln in _err.splitlines()[-12:]:
+                logf("[%s]   %s" % (label, _ln))
+            # 分类逻辑抽到纯函数 _torch_import_hints（同一范式见 _classify_ort_probe），
+            # 便于单测覆盖每一种报错形态，而不必真的造出坏环境。
+            # 主动把 CPU 型号 + AVX2 支持情况写进日志：torch 2.x 硬性要求 AVX2，
+            # 而 1114 的原因之一就是 CPU 不支持它 ✗ ——
+            # **只写型号是不够的**（2026-09-16 我们拿到型号后还得自己去查，还查错了 ✗）：
+            # 这里直接给出 AVX2 的结论，日志一眼可判，用户复制即可 ✓
+            logf("[%s]   · 当前 CPU：%s" % (label, _cpu_desc()))
+            for _h in _torch_import_hints(_err):
+                logf("[%s]   %s" % (label, _h))
+        else:
+            logf("[%s] ⚠ 导入失败但子进程**没有任何输出** —— 常见于被杀软隔离 DLL、"
+                 "或进程被直接终止（不是代码报错）。" % label)
+        # ★ 2026-09-16 用户实证（NJFF 第四引擎）：pip 打印过
+        #   「torch is already installed with the same version as the provided wheel.
+        #     Use --force-reinstall to force an installation of the wheel.」
+        #   —— 意思是**这次压根没装**（版本相同就跳过 ✗）。若已装的 torch 是残缺的
+        #   （上次安装中断/被杀软清理/DLL 不全），它永远修不好：验证失败 → 外层重试 →
+        #   pip 又跳过 → 必然再失败。日志证据：连续 3 次重试的 pip 输出**逐字相同**，
+        #   最后却报「下载/安装失败」，把用户引去重下 wheel、手动放缓存 —— **全都无用**
+        #   （wheel 明明被找到了，pip 就是不装 ✗）。pip 已经把解法写在脸上，照做即可。
+        logf("[%s] ⚠ 导入失败；pip 很可能因「版本相同」跳过了本次安装。"
+             "改用 --force-reinstall 强制重装一次（本地轮子已在手，不需要重新下载）…" % label)
+        _force_cmd = [vpy, "-m", "pip", "install", "--no-cache-dir", "--retries", "10",
+                      "--timeout", "120", "--force-reinstall"] + paths
+        _f_done = False
+        for _idx_name, _idx_url in PIP_MIRRORS:
+            env["PIP_INDEX_URL"] = _idx_url
+            logf("[%s] 强制重装（依赖走%s镜像）…" % (label, _idx_name))
+            if run_stream(_force_cmd, cwd=kdir, env=env, logf=logf) == 0:
+                _f_done = True
+                break
+            logf("[%s] %s镜像强制重装失败，自动切换下一镜像…" % (label, _idx_name))
+        if _f_done:
+            ok_v, r = _verify_torch()
+            logf("[%s] 强制重装后验证：" % label
+                 + ((r.stdout or "").strip().replace("\n", " | ") or "（无输出）"))
+            if ok_v:
+                logf("[%s] ✓ 强制重装后 torch 可正常导入" % label)
+                return True
+        # 仍失败：给出**能据此行动**的结论。
+        # 旧文案说「下载/安装失败」会把用户引去反复重下 wheel ✗（问题在环境不在下载）。
+        _tail = [ln.strip() for ln in ((r.stdout or "") + (r.stderr or "")).splitlines() if ln.strip()][-3:]
+        _venv_dir = os.path.dirname(os.path.dirname(vpy))
+        raise RuntimeError(
+            "torch **装上了但导入失败**（不是下载问题）：%s\n"
+            "已自动尝试 --force-reinstall 仍未通过。常见原因与下一步：\n"
+            "· 环境残缺（上次安装中途被打断 / 被杀软清理过文件）→ **删掉这个目录后重装即可自动重建**：\n"
+            "   %s\n"
+            "· 缺 VC++ 运行库 → 安装「Microsoft Visual C++ 2015-2022 Redistributable (x64)」后重试\n"
+            "· ⚠ 不要反复重下 wheel：缓存轮子已就位，问题在环境不在下载。"
+            % (" | ".join(_tail) if _tail else "（无更多输出）", _venv_dir))
     return True
 
 
@@ -4409,6 +4570,23 @@ def install_fizgig_engine(logf=print):
             if r.returncode == 0 and "ok=True" in (r.stdout or ""):
                 logf("[第四引擎] 检测到已安装（torch + GPU 可用），跳过重复安装。")
                 return vpy
+            # ★ 2026-09-16 用户疑问：「明明徽章显示『第四引擎 就绪』，为什么还要装一遍？」
+            #   因为**界面徽章与这里的跳过判据不是同一套**：
+            #     · 徽章 `_fizgig_marker_ok()` 只查 venv + 源码 + 标记（秒级、不跑 import）；
+            #     · 这里额外要求 `torch.cuda.is_available()` 为 True（防 CPU 版 torch 白装一整天）。
+            #   于是远程桌面等"看不到独显"的会话里：徽章=就绪 ✓ 这里=**永远不跳过** ✗
+            #   → 每次点「安装第四引擎」都从头走一遍。
+            #   这不该让用户猜 —— 明说为什么没跳过、以及这不是"重复下载"。
+            _why = ("torch 导入失败" if r.returncode != 0
+                    else "CUDA 不可用（cuda.is_available()=False）")
+            logf("[第四引擎] 未跳过安装：%s。" % _why)
+            logf("[第四引擎]   · 这与徽章上的「就绪」不矛盾：徽章只看环境与源码是否就位，"
+                 "这里还要确认显卡真的可用。")
+            logf("[第四引擎]   · 本次会重新走一遍安装与校验，但**不会重复下载**"
+                 "（轮子已在本地缓存，直接本地安装）。")
+            if r.returncode == 0:
+                logf("[第四引擎]   · 若你正用远程桌面：独显常在此类会话里不可见，"
+                     "请在**本机**确认显卡驱动后重试，否则训练会报 CUDA 不可用。")
         except Exception:
             pass
         if not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):

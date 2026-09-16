@@ -842,6 +842,86 @@ def test_preprocess_mode_mapping(base: Path):
     assert "def preprocess_mode(" in k, "Kohya一键工具.py 缺 preprocess_mode"
     print("PREPROCESS_MODE_MAPPING_OK")
 
+def test_torch_import_hints_split_1114_vs_126(base: Path):
+    """WinError **1114**（DLL 初始化失败）与 **126**（文件缺失）必须给**不同**的指引。
+
+    2026-09-16 用户实证（NJFF / 第四引擎）真实报错原文：
+        OSError: [WinError 1114] 动态链接库(DLL)初始化例程失败。
+        Error loading "...\\torch\\lib\\c10.dll" or one of its dependencies.
+    —— **1114 是「DLL 找到了但起不来」**（多为 VC++ 运行库太旧，缺 VS2019+ 的
+       `vcruntime140_1.dll`），**126 才是「缺文件」**。
+    混为一谈的代价：用户照"缺 VC++"的提示装了运行库、问题照旧，白跑一趟 ✗
+    （而且他会以为自己已经装过了 ✗）。
+    """
+    _real1114 = ('Traceback (most recent call last):\n'
+                 '  File "<string>", line 1, in <module>\n'
+                 'OSError: [WinError 1114] 动态链接库(DLL)初始化例程失败。 Error loading '
+                 '"C:\\Users\\vipuser\\Documents\\KohyaLoraTool_data\\kohya_ss\\fizgig_venv'
+                 '\\Lib\\site-packages\\torch\\lib\\c10.dll" or one of its dependencies.')
+    _t1 = "\n".join(core._torch_import_hints(_real1114))
+    assert _t1, "1114 没有给出任何指引"
+    assert "初始化失败" in _t1, _t1
+    # 1114 的排查顺序（2026-09-16 实证修正：VC++ 已在、CPU 才是头号嫌疑）
+    assert "AVX2" in _t1, "1114 未把 CPU AVX2 列为头号嫌疑（低配云主机最常见的 1114 原因）"
+    assert "vcruntime140_1.dll" in _t1 and "msvcp140" in _t1, "1114 未给出运行库自检命令"
+    assert "杀软" in _t1, "1114 未给出杀软这条"
+    assert "wmic cpu get name" in _t1, "1114 未给出可直接复制的 CPU 自检命令"
+    # 干净 PATH 复测必须写成**分两行执行**，并同时给 PowerShell 与 cmd 语法：
+    # 2026-09-16 连踩两次 —— ① 只给 cmd 的 `set PATH=`，用户跑在 PowerShell 里
+    # 直接 CommandNotFound ✗；② 给成一行 `set PATH=… python -c …` 却没加 `&&`，
+    # cmd 把后面整串当成 PATH 的值，**等于什么都没执行** ✗（用户以为"试过了没输出"）
+    assert "set " in _t1 and "$env:PATH" in _t1, "干净 PATH 指引未同时覆盖 cmd 与 PowerShell"
+    assert "一行一条" in _t1, "干净 PATH 指引没强调「一行一条执行」（挤在一行需要连接符，抄漏就静默不执行）"
+    # 精确断言：**没有任何一条命令**把「设置 PATH」和「import torch」写在同一行
+    # （写成一行就必须用连接符，用户抄漏一个字符就静默不执行 ✗ —— 正是 2026-09-16 的事故）
+    assert not [ln for ln in core._torch_import_hints(_real1114)
+                if "PATH=" in ln and "import torch" in ln], \
+        "指引里出现了「设置 PATH + import」的一行式命令"
+    assert "pytorch_wheels" in _t1, "1114 未提示手动放置的轮子可能损坏、需重新下载校验"
+
+    # 工具应主动把 **CPU 型号 + AVX2 支持情况**写进日志。
+    # 只写型号是不够的（2026-09-16 我们拿到型号后还要自己查，还查错了方向 ✗），
+    # 必须直接给出 AVX2 结论，日志才能一眼判断。
+    _k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert "def _cpu_desc(" in _k and "当前 CPU：" in _k, "导入失败时未记录 CPU 信息"
+    assert "AVX2：" in _k, "CPU 信息里没带 AVX2 结论"
+    assert "IsProcessorFeaturePresent(40)" in _k, "AVX2 探测未用 PF_AVX2_INSTRUCTIONS_AVAILABLE"
+    # 实测本机探测可用（不依赖 numpy/torch）
+    _d = str(core._cpu_desc())
+    assert "AVX2：" in _d and _d.strip(), _d
+    assert core._cpu_name(), "读不到 CPU 型号"
+
+    _t2 = "\n".join(core._torch_import_hints(
+        "ImportError: DLL load failed while importing _C: 找不到指定的模块"))
+    assert "缺 VC++ 运行库" in _t2, _t2
+    assert "vcruntime140_1.dll" not in _t2, "126 被当成 1114 处理了（两者指引必须不同）"
+
+    assert core._torch_import_hints("Access is denied 拒绝访问"), "杀软分支没命中"
+    assert core._torch_import_hints("0xc000001d illegal instruction"), "CPU 指令集分支没命中"
+    assert core._torch_import_hints("") == [], "空输入应返回空"
+    assert core._torch_import_hints(None) == [], "None 应返回空"
+    print("TORCH_IMPORT_HINTS_SPLIT_OK")
+
+def test_fizgig_skip_reason_logged(base: Path):
+    """第四引擎「徽章显示就绪、点安装却整段重装」时必须说明原因（而不是静默继续）。
+
+    2026-09-16 用户疑问：「为什么还要装一遍？」——因为**界面徽章与跳过判据不是同一套**：
+      · 徽章 `_fizgig_marker_ok()` 只查 venv + 源码 + 标记（秒级、不跑 import）；
+      · 安装流程的跳过条件还要求 `torch.cuda.is_available()` 为 True
+        （防 CPU 版 torch 白装一整天）。
+    远程桌面等"看不到独显"的会话里 → 徽章=就绪 ✓ 但**永远不跳过** ✗ 每次都从头装。
+    旧代码在这里**一句话都不说** ✗ → 用户只能猜「是不是坏了、是不是又要下 2.7GB」。
+    """
+    k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    i = k.index("已装验证（快速）：torch 可用 + GPU 可用 => 跳过")
+    body = k[i:i + 2400]
+    assert "return vpy" in body, "跳过分支被改坏了"
+    assert "未跳过安装" in body, "没跳过时未说明原因（用户只能猜 —— 正是本次反馈）"
+    assert "cuda.is_available()=False" in body, "未区分「torch 导入失败」与「CUDA 不可用」"
+    assert "不会重复下载" in body, "未说明不会重复下载（用户会以为又要等 2.7GB）"
+    assert "远程桌面" in body, "未提示远程桌面看不到独显这一常见原因"
+    print("FIZGIG_SKIP_REASON_LOGGED_OK")
+
 def test_preinstall_torch_mirror_fallback(base: Path):
     """_preinstall_torch 本地安装多镜像回退：第一个失败 -> 第二个成功；全部失败才报明确错误。"""
     kdir = base / "pt" / "kohya_ss"
@@ -918,6 +998,98 @@ def test_preinstall_torch_mirror_fallback(base: Path):
     assert installs2["indexes"][-1] == _mirs[-1], installs2
 
     print("PREINSTALL_TORCH_MIRROR_FALLBACK_OK")
+
+def test_preinstall_torch_force_reinstall_on_import_failure(base: Path):
+    """torch「装上了但导入失败」时必须自动 --force-reinstall，而不是原样重试。
+
+    2026-09-16 用户实证（NJFF / 第四引擎）日志原文：
+        torch is already installed with the same version as the provided wheel.
+        Use --force-reinstall to force an installation of the wheel.     ← pip 明说了解法
+        [第四引擎] 验证：
+        [第四引擎] PyTorch 预下载失败（第2/3 次）：torch 安装后导入失败
+    —— pip 因「版本相同」**跳过了安装**：已装的 torch 若是残缺的（安装中断/被杀软清理），
+    就永远修不好；外层 3 次重试跑的是**逐字相同**的命令，必然全部失败 ✗
+    最后还报「下载/安装失败」，把用户引去重下 wheel、手动放缓存 —— 全都无用（wheel 明明被找到）。
+    """
+    kdir = base / "pf" / "kohya_ss"
+    cache = base / "pf" / "cache" / "pytorch_wheels"
+    cache.mkdir(parents=True, exist_ok=True)
+    # 稀疏文件：逻辑大小满足 minsize，避免真写 3GB
+    for _name, _size in (
+            ("torch-2.10.0+cu128-cp312-cp312-win_amd64.whl", 1_000_000_000),
+            ("torchvision-0.25.0+cu128-cp312-cp312-win_amd64.whl", 5_000_000)):
+        with open(cache / _name, "wb") as _f:
+            _f.truncate(_size)
+    vpy = str(base / "pf" / "kohya_ss" / "fizgig_venv" / "Scripts" / "python.exe")
+
+    def data_sub(*parts):
+        return str(base.joinpath("pf", *parts))
+
+    def make_subrun(fail_first_n):
+        st = {"n": 0}
+
+        def _sub(cmd, *a, **k):
+            code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+            if "sys.version_info" in code:
+                return result(0, "cp312")
+            if "import torch, torchvision" in code:
+                st["n"] += 1
+                if st["n"] <= fail_first_n:
+                    return result(1, "", "ImportError: DLL load failed while importing _C")
+                return result(0, "2.10.0+cu128\nTrue\n")
+            return result(0)
+        return _sub, st
+
+    streams = []
+
+    def run_stream_ok(cmd, cwd=None, env=None, logf=print, **k):
+        streams.append([str(x) for x in cmd])
+        return 0
+
+    # ---- 场景 A：普通安装后导入失败 → 自动强制重装 → 成功 ----
+    sub_a, _ = make_subrun(1)          # 只失败第一次（= 普通安装之后那次）
+    logs_a = []
+    with patch.object(core, "data_sub", side_effect=data_sub), \
+         patch.object(core, "_wheel_valid", return_value=True), \
+         patch.object(core.subprocess, "run", side_effect=sub_a), \
+         patch.object(core, "run_stream", side_effect=run_stream_ok), \
+         patch.object(core, "build_direct_env", return_value={}):
+        ok = core._preinstall_torch(vpy, str(kdir), logs_a.append,
+                                    torch_ver="2.10.0", tv_ver="0.25.0",
+                                    cu="cu128", label="第四引擎")
+    assert ok is True, "强制重装后应当成功"
+    _force = [c for c in streams if "--force-reinstall" in c]
+    assert _force, "导入失败后没发起 --force-reinstall（等于原样重试，必然再次失败）"
+    assert sum(1 for x in _force[0] if x.endswith(".whl")) == 2, _force[0]
+    assert any("强制重装" in ln for ln in logs_a), logs_a
+
+    # ---- 场景 B：强制重装后仍失败 → 报错必须说清「导入失败」而非「下载失败」 ----
+    #（旧文案把环境问题说成下载问题，用户于是反复重下 wheel / 手动放缓存 —— 全都无用）
+    sub_b, _ = make_subrun(99)
+    logs_b = []
+    with patch.object(core, "data_sub", side_effect=data_sub), \
+         patch.object(core, "_wheel_valid", return_value=True), \
+         patch.object(core.subprocess, "run", side_effect=sub_b), \
+         patch.object(core, "run_stream", side_effect=run_stream_ok), \
+         patch.object(core, "build_direct_env", return_value={}):
+        try:
+            core._preinstall_torch(vpy, str(kdir), logs_b.append,
+                                   torch_ver="2.10.0", tv_ver="0.25.0",
+                                   cu="cu128", label="第四引擎")
+            raise AssertionError("强制重装后仍失败时应当报错")
+        except RuntimeError as e:
+            _m = str(e)
+            assert "导入失败" in _m, _m
+            assert "下载失败" not in _m, "又把环境问题说成下载问题：" + _m
+            assert "fizgig_venv" in _m, "没给出可删除重建的环境目录"
+            assert "不要反复重下" in _m, _m
+    # 关键盲点：旧代码只打 stdout，导入失败时日志里只有一行「验证：」，
+    # 真正的 stderr（ImportError/traceback）被丢掉 → 用户重跑三遍、我们也只能猜 ✗
+    assert any("原始报错" in ln for ln in logs_b), "未把导入失败的原始报错打进日志"
+    assert any("DLL load failed" in ln for ln in logs_b), "未把报错原文（traceback）打出来"
+    assert any("VC++" in ln for ln in logs_b), "未识别「DLL load failed」→ 缺 VC++ 运行库"
+
+    print("PREINSTALL_TORCH_FORCE_REINSTALL_OK")
 
 class _FakeResp:
     def __init__(self, data=b"{}"):
@@ -3291,7 +3463,10 @@ def main():
         test_official_source_option(base)
         test_optimizer_resolution(base)
         test_preprocess_deps(base)
+        test_torch_import_hints_split_1114_vs_126(base)
+        test_fizgig_skip_reason_logged(base)
         test_preinstall_torch_mirror_fallback(base)
+        test_preinstall_torch_force_reinstall_on_import_failure(base)
         test_tokenizer_cache(base)
         test_preprocess_auto_retry(base)
         test_preprocess_crop_ratio(base)

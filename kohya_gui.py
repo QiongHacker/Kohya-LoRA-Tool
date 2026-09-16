@@ -7208,10 +7208,12 @@ class LabelEditorWindow:
         self._tagdict = None      # 离线中英词典（进程级共享单例，词典窗/统计共用）
         self._dict_win = None     # 中英词典窗引用（避免重复开多个）
         self._ver = 0             # 标签内容版本号（词典窗频率缓存失效用）
-        # 撤销栈（只留最近一次批量修改）：{"label": 描述, "files": {txt 路径: 原始内容}}
-        # 批量删除/替换/统计窗删除前都先快照 —— 误操作可一键还原
+        # 撤销栈（可连续回退多步）：每项 {"label": 描述, "files": {txt 路径: 该次操作前的原文}}
+        # 批量删除/替换/统计窗删除/锁进固定前缀之前都先快照 —— 误操作可一键还原
         # （2026-09-15 用户反馈：老忘按 Ctrl，导致前面选择删除的标签没了）
-        self._undo = None
+        # ⚠️ 2026-09-16 用户反馈：原来这里是**单槽**（self._undo = None），
+        # 「锁定两个之后第一个就改不了了」—— 第二次操作把第一次的快照覆盖掉，只能退一步 ✗
+        self._undo = []
         # 缩略图自适应尺寸：旧版写死 220x140，窗口拉大也不变（用户反馈「太小、下面明明有空间」）
         self._prev_size = [420, 280]
         self._prev_job = None     # 尺寸变化后重绘的去抖句柄
@@ -7606,11 +7608,24 @@ class LabelEditorWindow:
             self.zh_var.set("")
 
     # ---------- 撤销 ----------
+    # 撤销栈上限：每项只存被改到的 .txt 原文（通常几十 KB），30 步足够，
+    # 且避免连续大批量操作（如逐个锁特征）堆积占内存。
+    _UNDO_MAX = 30
+
     def _push_undo(self, label, snapshot):
-        """记录一次可撤销的批量修改（只保留最近一次：够用，且实现简单、状态不易错）。"""
+        """记录一次可撤销的批量修改（**入栈**，可连续回退多步）。
+
+        2026-09-16 用户反馈：「锁定两个之后第一个就改不了了」—— 原实现只留最近一次，
+        第二次操作直接覆盖前一次的快照，于是只能退一步 ✗
+
+        栈语义是对的：每项存的是**该次操作前**这些 .txt 的原文，
+        所以从栈顶往回退，能一步步还原到最初状态（第 N 步退完 = 第 N 次操作前的样子）。
+        """
         if not snapshot:
             return
-        self._undo = {"label": label, "files": dict(snapshot)}
+        self._undo.append({"label": label, "files": dict(snapshot)})
+        if len(self._undo) > self._UNDO_MAX:
+            del self._undo[0]                 # 丢最旧的，保住最近的
         try:
             self.btn_undo.configure(state="normal")
         except Exception:
@@ -7620,9 +7635,12 @@ class LabelEditorWindow:
         if not self._undo:
             messagebox.showinfo("撤销", "没有可撤销的批量修改。")
             return
-        _u = self._undo
+        _u = self._undo[-1]                   # 退最近一次
         n = len(_u["files"])
-        if not messagebox.askyesno("撤销", f"把 {n} 个标签文件还原到上一次批量修改之前？\n\n（{_u['label']}）"):
+        _left = len(self._undo) - 1
+        if not messagebox.askyesno("撤销", f"把 {n} 个标签文件还原到「{_u['label']}」之前？\n\n"
+                                          + (f"（撤回这一步后，还能继续再退 {_left} 步）\n\n" if _left else "")
+                                          + "是否继续？"):
             return
         self._begin_batch("正在撤销上次批量修改…")
         try:
@@ -7630,9 +7648,12 @@ class LabelEditorWindow:
             msg = f"已撤销「{_u['label']}」：还原 {ok}/{n} 个文件。"
             self._set_status(msg)
             self._log_app("[标签] " + msg)
-            self._undo = None
+            self._undo.pop()
+            if self._undo:
+                self._log_app("[标签] 还能继续撤销 %d 步（可再点「↩ 撤销上次修改」）" % len(self._undo))
             try:
-                self.btn_undo.configure(state="disabled")
+                # 还有快照就保持可用（以前这里一律禁用 → 退一步就点不动了）
+                self.btn_undo.configure(state=("normal" if self._undo else "disabled"))
             except Exception:
                 pass
         except Exception as e:

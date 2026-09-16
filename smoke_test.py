@@ -895,6 +895,64 @@ def test_anima_component_picker():
     print("ANIMA_COMPONENT_PICKER_OK")
 
 
+def test_label_undo_stack():
+    """撤销必须能**连退多步**。
+
+    2026-09-16 用户反馈：「这个撤销只能按一次啊，锁定两个之后第一个就改不了了」——
+    原实现是**单槽快照**（self._undo = None）：第二次批量操作直接把第一次的快照覆盖掉，
+    于是只能退一步，用户连锁两个特征后第一个再也回不去 ✗
+
+    栈语义：每项存的是「**该次操作前**这些 .txt 的原文」，从栈顶往回退即可逐步还原。
+    这里既查实现（必须是栈 + 退完一步还留着按钮可用），也在核心层跑一遍逆序还原，
+    确认「连撤两步 == 回到原文」这个真正被用户感知的性质成立。
+    """
+    import tempfile
+    import shutil
+    from pathlib import Path
+    import Kohya一键工具 as core
+    from kohya_core import paths as _P
+
+    g = Path(os.path.join(os.path.dirname(core.__file__), "kohya_gui.py")).read_text(encoding="utf-8-sig")
+    assert "self._undo = []" in g, "撤销仍是单槽（第二次操作会覆盖第一次）"
+    assert "_UNDO_MAX" in g, "撤销栈没有上限（连续大批量操作会一直堆积）"
+    _p = g[g.index("def _push_undo(self"):]
+    _p = _p[:_p.index("\n    def ", 10)]
+    assert "self._undo.append(" in _p, "新快照没有入栈"
+    assert "del self._undo[0]" in _p, "超上限时没有丢最旧的"
+    _u = g[g.index("def _do_undo(self"):]
+    _u = _u[:_u.index("\n    def ", 10)]
+    assert "self._undo[-1]" in _u and "self._undo.pop()" in _u, "撤销没按栈顶弹出"
+    assert 'state=("normal" if self._undo else "disabled")' in _u, \
+        "撤销后一律禁用按钮（退一步就点不动了 —— 正是用户报的现象）"
+
+    # 行为：两次操作各留快照，按逆序还原必须回到原文
+    tmp = tempfile.mkdtemp()
+    _real = _P.data_dir
+    _P.data_dir = lambda: tmp
+    try:
+        ds = os.path.join(tmp, "dataset", "proj", "train_character")
+        os.makedirs(ds)
+        orig = {"a": "1girl, solo, blue_hair\n", "b": "1girl, solo, blue_hair\n"}
+        for s, t in orig.items():
+            open(os.path.join(ds, s + ".txt"), "w", encoding="utf-8", newline="").write(t)
+            open(os.path.join(ds, s + ".png"), "wb").write(b"x")   # 列表以图片为驱动
+        s1 = {}
+        core.batch_remove_tags(ds, "solo", snapshot=s1)            # 第 1 步
+        s2 = {}
+        core.batch_remove_tags(ds, "blue_hair", snapshot=s2)       # 第 2 步
+        _p1 = os.path.join(ds, "a.txt")
+        assert open(_p1, encoding="utf-8").read().strip() == "1girl"
+        core.restore_captions(s2)                                  # 撤销第 2 步
+        assert open(_p1, encoding="utf-8").read().strip() == "1girl, blue_hair"
+        core.restore_captions(s1)                                  # 撤销第 1 步
+        got = open(_p1, encoding="utf-8").read()
+        assert got == orig["a"], repr(got)
+    finally:
+        _P.data_dir = _real
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("LABEL_UNDO_STACK_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -911,6 +969,7 @@ def main():
     check("主页输出目录入口", test_home_output_button)
     check("预处理进度（WD14 打标）", test_preprocess_progress)
     check("Anima 组件指定已有文件", test_anima_component_picker)
+    check("标签撤销可连退多步", test_label_undo_stack)
     check("Python 环境来源校验 + 徽章如实显示", test_python_env_source_guard)
     check("训练 native 崩溃诊断", test_native_crash_diagnosis)
     check("高覆盖特征锁进固定前缀", test_high_coverage_tag_lock)
