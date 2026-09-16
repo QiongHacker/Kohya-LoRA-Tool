@@ -1097,6 +1097,58 @@ def _cpu_desc():
     return "%s（AVX2：%s）" % (_name, _txt)
 
 
+def _vc_runtime_file_version():
+    """读 `System32\\msvcp140.dll` 的 **FileVersion** —— DLL 能否初始化的真正决定因素。
+
+    ⚠️ **为什么必须看"版本号"，而不是"文件在不在"**（2026-09-16 血泪教训）：
+      用户报 `WinError 1114`（c10.dll 初始化失败）时，我们让他 `dir vcruntime140*.dll`，
+      看到文件在、日期 2022 ✓ **于是把"运行库"这条线排除了** ✗
+      —— 结果真因**恰恰就是它**：文件版本是 **14.34.31938**，
+      而 torch 2.10.0 用它自己的 MSVC 编译，需要 **14.44.x** ✗
+      （注册表里甚至只记着 14.22 ✗，比文件还旧 —— 所以也不能只看注册表 ✗）
+      **"存在且不旧"≠"够新"** ✗ 只查存在性会把这条线索彻底漏掉。
+      教训：诊断信息要**取到具体数值**再下结论（与 `_cpu_desc()` 带上 AVX2 结论同一个道理）。
+    """
+    _path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "msvcp140.dll")
+    if not os.path.isfile(_path):
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        if not hasattr(ctypes, "WinDLL"):        # 非 Windows（仅测试环境会遇到）
+            return ""
+        _v = ctypes.WinDLL("version")
+        # ⚠️ 必须显式声明 argtypes：64 位下指针若让 ctypes 猜，会把结构体读成垃圾 ✗
+        _v.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+        _v.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+        _v.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                           wintypes.DWORD, ctypes.c_void_p]
+        _v.GetFileVersionInfoW.restype = wintypes.BOOL
+        _v.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                      ctypes.POINTER(ctypes.c_void_p),
+                                      ctypes.POINTER(wintypes.UINT)]
+        _v.VerQueryValueW.restype = wintypes.BOOL
+        _size = _v.GetFileVersionInfoSizeW(_path, None)
+        if not _size:
+            return ""
+        _buf = ctypes.create_string_buffer(_size)
+        if not _v.GetFileVersionInfoW(_path, 0, _size, _buf):
+            return ""
+        _ptr = ctypes.c_void_p()
+        _len = wintypes.UINT()
+        if not _v.VerQueryValueW(ctypes.cast(_buf, ctypes.c_void_p), "\\",
+                                 ctypes.byref(_ptr), ctypes.byref(_len)):
+            return ""
+        # ⚠️ VS_FIXEDFILEINFO 的前两个 DWORD 是 signature / strucVersion ✗，
+        #    真正的**文件版本**在 [2]=dwFileVersionMS、[3]=dwFileVersionLS ✗
+        #    （第一版按 [0][1] 取，读出来是 65536.4277077181… 这种垃圾 —— 实测才发现 ✗）
+        _ffi = ctypes.cast(_ptr, ctypes.POINTER(wintypes.DWORD * 4)).contents
+        _ms, _ls = _ffi[2], _ffi[3]
+        return "%d.%d.%d.%d" % (_ms >> 16, _ms & 0xFFFF, _ls >> 16, _ls & 0xFFFF)
+    except Exception:
+        return ""
+
+
 def _torch_import_hints(err):
     """按 torch 导入失败的报错文本给出**对症**的排查指引（纯函数，便于测试）。
 
@@ -1113,13 +1165,17 @@ def _torch_import_hints(err):
     _low = _e.lower()
     if "winerror 1114" in _low or "初始化例程失败" in _e or "dll initialization" in _low:
         return [
-            "→ **DLL 找到了但初始化失败**（WinError 1114，不是缺文件）。逐条排查（不分先后）：",
-            "① **CPU 不支持 AVX2**（torch 2.x 的硬性要求）：老 Xeon / 低配云主机很常见 ✗。"
-            "命令行执行 `wmic cpu get name` 把型号发出来即可判断；不支持就只能换机器。",
-            "② **VC++ 运行库不全**：cmd 里执行 "
-            "`dir C:\\Windows\\System32\\vcruntime140*.dll C:\\Windows\\System32\\msvcp140*.dll` —— "
-            "缺 `vcruntime140_1.dll` 或 `msvcp140*.dll` 就是它 → 装**最新**的 "
-            "「Microsoft Visual C++ 2015-2022 Redistributable (x64)」（要覆盖升级）+ 重启。",
+            "→ **DLL 找到了但初始化失败**（WinError 1114，不是缺文件）。逐条排查：",
+            "① **★ VC++ 运行库版本太低 —— 头号原因**（2026-09-16 用户实测确认）："
+            "1114 的经典成因是「运行库**在**、但版本低于 torch 编译时用的那个」✗ —— "
+            "**光看文件在不在判断不出来** ✗（当时文件是新装的 2022 年版本 14.34，"
+            "而 torch 2.10 需要 14.44 ✗；注册表里甚至只记着 14.22 ✗，比文件还旧）。"
+            "修复：装**最新**的「Microsoft Visual C++ 2015-2022 Redistributable (x64)」，"
+            "直链 https://aka.ms/vs/17/release/vc_redist.x64.exe ，装完**重启**。"
+            "⚠️ 静默安装返回 **194 也可能是装成功了** ✗ 别据此判失败 —— "
+            "复查 `System32\\msvcp140.dll` 的**版本号**才是准的 ✓（本次日志已自动打印它）",
+            "② **CPU 不支持 AVX2**（torch 2.x 的硬性要求）：老 Xeon / 低配云主机常见 ✗。"
+            "命令行执行 `wmic cpu get name` 判断；不支持就只能换机器。",
             "③ **杀软拦截了 DLL 初始化**：查隔离区、把该环境目录加白名单，或临时关闭安全软件试一次。",
             '④ **PATH 里有冲突的同名 DLL**（开发机/云主机常见）：把 PATH 收窄成系统目录，'
             '再单独跑一次 import。',
@@ -1136,10 +1192,14 @@ def _torch_import_hints(err):
             "⑤ **轮子是手动放进缓存的**（未经下载校验）可能本身损坏 ✗："
             "删掉 `cache\\pytorch_wheels` 里的 whl 后重装，让它从镜像**重新下载并校验** ✓",
         ]
+    if "winerror 127" in _low or "找不到指定的程序" in _e or "procedure could not be found" in _low:
+        return ["→ **缺导出函数**（WinError 127）：通常是**运行库比库编译时旧** —— "
+                "装**最新**的「Microsoft Visual C++ 2015-2022 Redistributable (x64）」后重启 ✓"]
     if ("winerror 126" in _low or "dll load failed" in _low or "找不到指定的模块" in _e
             or "0xc0000135" in _low or "the specified module could not be found" in _low):
-        return ["→ 典型原因：**缺 VC++ 运行库**。装「Microsoft Visual C++ 2015-2022 "
-                "Redistributable (x64)」（微软官网免费），重启软件后重试。"]
+        return ["→ 典型原因：**缺 VC++ 运行库**（文件缺失 / 架构不匹配）。"
+                "装「Microsoft Visual C++ 2015-2022 Redistributable (x64）」（微软官网免费），"
+                "重启软件后重试 ✓"]
     if ("access is denied" in _low or "拒绝访问" in _e or "permission" in _low
             or "being used by another process" in _low):
         return ["→ 疑似被**杀软/安全软件拦截**（文件被隔离或占用）：到安全软件里看隔离区，"
@@ -1355,6 +1415,13 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
             # **只写型号是不够的**（2026-09-16 我们拿到型号后还得自己去查，还查错了 ✗）：
             # 这里直接给出 AVX2 的结论，日志一眼可判，用户复制即可 ✓
             logf("[%s]   · 当前 CPU：%s" % (label, _cpu_desc()))
+            # 同时打印 **VC++ 运行库的实际版本**：1114 的头号原因就是"版本比 torch 编译时低"
+            # ✗（2026-09-16 实测：文件在、日期也新，但 14.34 < 需要的 14.44 ✗）。
+            # 光有"文件在不在"判断不出来 ✗ —— 把版本号写进日志，用户复制即可定性 ✓
+            _vc = _vc_runtime_file_version()
+            if _vc:
+                logf("[%s]   · 系统 VC++ 运行库：System32\\msvcp140.dll = %s"
+                     "（torch 2.10 实测需要 14.44 及以上）" % (label, _vc))
             for _h in _torch_import_hints(_err):
                 logf("[%s]   %s" % (label, _h))
         else:
@@ -4585,8 +4652,13 @@ def install_fizgig_engine(logf=print):
             logf("[第四引擎]   · 本次会重新走一遍安装与校验，但**不会重复下载**"
                  "（轮子已在本地缓存，直接本地安装）。")
             if r.returncode == 0:
-                logf("[第四引擎]   · 若你正用远程桌面：独显常在此类会话里不可见，"
-                     "请在**本机**确认显卡驱动后重试，否则训练会报 CUDA 不可用。")
+                # ⚠️ 2026-09-16 修正（用户实测报告）：远程桌面下 `nvidia-smi` 常报
+                #    "Failed to initialize NVML: Unknown Error"，但**显卡是好的** ✗ ——
+                #    cuInit 返回 0、CUDA 实测可用 ✓。旧文案会让人误以为"没有显卡" ✗。
+                logf("[第四引擎]   · 若正用远程桌面：这里查不到显卡**不代表没有显卡** ✗ —— "
+                     "RDP 会话下 `nvidia-smi` 常报 NVML 错误，可忽略 ✓。"
+                     "想确认真实情况：在**本机**跑 `nvidia-smi`，或运行 "
+                     "`python -c \"import torch;print(torch.cuda.is_available())\"` 验证 ✓")
         except Exception:
             pass
         if not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):

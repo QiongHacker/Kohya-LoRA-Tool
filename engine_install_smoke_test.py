@@ -863,7 +863,11 @@ def test_torch_import_hints_split_1114_vs_126(base: Path):
     assert "初始化失败" in _t1, _t1
     # 1114 的排查顺序（2026-09-16 实证修正：VC++ 已在、CPU 才是头号嫌疑）
     assert "AVX2" in _t1, "1114 未把 CPU AVX2 列为头号嫌疑（低配云主机最常见的 1114 原因）"
-    assert "vcruntime140_1.dll" in _t1 and "msvcp140" in _t1, "1114 未给出运行库自检命令"
+    # ⚠️ 这里**故意不再要求**提到 `vcruntime140_1.dll`：
+    #    2026-09-16 就是让人查"那个文件在不在"、看到它在就**排除了运行库** ✗ ——
+    #    而真因是**版本**（14.34 < torch 需要的 14.44）✗。所以指引的重点是**版本号**，
+    #    "目录里有没有这个文件"是个会误导人的检查 ✗（留着它反而会复制那次错误判断）。
+    assert "msvcp140.dll" in _t1, "1114 未给出运行库自检命令"
     assert "杀软" in _t1, "1114 未给出杀软这条"
     assert "wmic cpu get name" in _t1, "1114 未给出可直接复制的 CPU 自检命令"
     # 干净 PATH 复测必须写成**分两行执行**，并同时给 PowerShell 与 cmd 语法：
@@ -890,6 +894,26 @@ def test_torch_import_hints_split_1114_vs_126(base: Path):
     _d = str(core._cpu_desc())
     assert "AVX2：" in _d and _d.strip(), _d
     assert core._cpu_name(), "读不到 CPU 型号"
+
+    # ---- 2026-09-16 拿到用户实测报告后的修正：1114 的真因是 **VC++ 运行库版本低** ----
+    # 当时我们让他 `dir vcruntime140*.dll`，看到"文件在、日期 2022"就**排除了运行库** ✗，
+    # 真因恰恰是它：文件是 14.34，而 torch 2.10 需要 14.44 ✗（注册表里还只记着 14.22 ✗）。
+    # 教训：**"存在且不旧"≠"够新"**，必须取到**版本号**再下结论。
+    assert "版本太低" in _t1, "1114 未把「VC++ 运行库版本低」放在头号位置（实测确认的真因）"
+    assert "vc_redist.x64.exe" in _t1, "1114 未给出 VC++ 安装直链"
+    assert "194" in _t1, "1114 未提醒「静默安装退出码 194 也可能成功」这个坑"
+    assert "msvcp140.dll" in _t1, "1114 没说要复查 msvcp140.dll 的版本号"
+    assert "winerror 127" in core._torch_import_hints("WinError 127")[0].lower(), "127 未分类"
+    # ⚠️ 断言必须能识别"读出了垃圾"：写第一版时按 [0][1] 取结构体字段（signature/strucVersion ✗），
+    #    结果是 `65536.4277077181.…` 这种值，而 `count(".") == 3` 这种弱断言**照样通过** ✗。
+    #    VS2015-2022 运行库的版本号**一定以 14. 开头**（msvcp140 = v14.0）→ 用它兜底 ✓
+    _v = str(core._vc_runtime_file_version())
+    assert _v.startswith("14.") and _v.count(".") == 3, \
+        "msvcp140.dll 版本读取异常（应为 14.x.y.z）：%r" % _v
+    _src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert "系统 VC++ 运行库" in _src, "导入失败时未把运行库版本写进日志"
+    # 修正误判：RDP 下 nvidia-smi 报 NVML 错误 ≠ 没有显卡（用户实测：4090 正常可用）
+    assert "不代表没有显卡" in _src, "RDP 下查不到显卡仍会被当成「没有显卡」"
 
     _t2 = "\n".join(core._torch_import_hints(
         "ImportError: DLL load failed while importing _C: 找不到指定的模块"))
