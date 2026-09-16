@@ -43,3 +43,8 @@ build_exe/amd_rocm_gfx103x/
 # 本地基准测试脚本/产物（不入库）
 _bench/
 
+# 临时调试脚本（不入库）
+# 2026-09-16：release.py 的 git_push 用 git add -A，把 _tmp_finish_release.py
+# 一并提交进了 v0.16.13 的发布提交 —— 补这条规则杜绝复发。
+_tmp*
+
