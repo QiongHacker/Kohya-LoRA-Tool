@@ -1335,28 +1335,168 @@ def test_wd14_model_fallback():
     print("WD14_MODEL_FALLBACK_OK")
 
 
-def test_no_unimported_stdlib_modules():
-    """所有发布脚本里**用到的标准库模块都必须真的导入**（静态审计，兜住整类问题）。
+def test_env_paths_custom():
+    """「自带 Python / Git」：自己选文件夹 → 识别 → 校验 → 采用（失效则回落自动）。
 
-    ★ 2026-09-17 一天之内两次同类事故：
+    需求来源（2026-09-17 用户反馈原话）：
+      「环境文件可以增加一个自己选择环境文件所在的文件夹然后识别这些环境文件的功能吗?
+        我之前用的秋叶绘图，里面的 Python 和 Git 都不在系统盘，而在秋叶的文件夹里
+        （重装系统它也能识别，很方便）」
+
+    这里守住四条**最容易做错**的：
+      ① 校验不过的**绝不采用** ✗（否则要到建训练环境时才炸，更晚更难查 ✗）
+      ② 原因必须**具体** —— 尤其「版本对但没有 venv」这种整合包常见情况 ✗
+      ③ 指定路径失效 → **回落自动**，不阻断用户 ✓
+      ④ 保存时**不能覆盖其它设置项**（data_dir / 各种开关 ✗）
+    """
+    import json as _json
+    import shutil as _sh
+    import tempfile as _tf
+    import types as _types
+    from kohya_core import utils as U      # noqa: E402
+    from kohya_core import paths as _P
+
+    sp_dir = _tf.mkdtemp(prefix="envset_")
+    sp = os.path.join(sp_dir, "settings.json")
+    _orig_sp = _P._settings_path
+    _P._settings_path = lambda: sp          # 用临时设置文件，不碰用户真实设置 ✓
+    try:
+        # ① 校验：真 Python 通过；假 exe 必须被拒绝
+        ok, ver, why = U.check_python_exe(sys.executable)
+        assert ok and ver, "本机 Python 没通过校验：%s" % why
+        _fd = _tf.mkdtemp(prefix="envfake_")
+        _fake = os.path.join(_fd, "python.exe")
+        with open(_fake, "wb") as f:
+            f.write(b"MZ" + b"\x00" * 64)
+        ok2, _v2, why2 = U.check_python_exe(_fake)
+        assert not ok2 and why2, "假 python.exe 没被拒绝"
+        _sh.rmtree(_fd, ignore_errors=True)
+
+        # ② 「没有 venv」的整合包精简版必须**单独**说清（不能笼统一句"不行"）
+        _h = U._py_has_venv
+        U._py_has_venv = lambda p: False
+        try:
+            ok3, ver3, why3 = U.check_python_exe(sys.executable)
+        finally:
+            U._py_has_venv = _h
+        assert not ok3 and ver3 and "venv" in why3, \
+            "没区分「版本可用但没有 venv」这种情况：%s" % why3
+
+        # ③ 存取往返 + 失效回落 + 只给目录也能识别
+        assert U.set_env_paths(python_dir="", python_exe=sys.executable, git_exe="")
+        assert U.get_env_paths()["python_exe"] == sys.executable
+        assert U.custom_python_exe() == sys.executable
+        assert U.set_env_paths(python_exe=r"D:\不存在的\python.exe")
+        assert U.custom_python_exe() == "", "失效的指定 Python 没回落（会拿坏路径建环境 ✗）"
+        assert U.explain_custom_python_problem(), "失效时没有说明原因"
+        assert U.set_env_paths(python_dir=os.path.dirname(sys.executable), python_exe="")
+        assert U.custom_python_exe() == sys.executable, "只指定文件夹时没识别出 Python"
+        assert U.clear_env_paths()
+        assert U.get_env_paths() == {"python_dir": "", "python_exe": "", "git_exe": ""}
+
+        # ④ 保存环境路径不能覆盖其它设置项
+        with open(sp, "w", encoding="utf-8") as f:
+            _json.dump({"data_dir": r"D:\keep", "download_official_first": True}, f)
+        assert U.set_env_paths(git_exe="")
+        with open(sp, encoding="utf-8") as f:
+            _d = _json.load(f)
+        assert _d.get("data_dir") == r"D:\keep", "保存环境路径时覆盖了 data_dir ✗"
+        assert _d.get("download_official_first") is True, "覆盖了其它开关 ✗"
+
+        # ⑤ 应用层：建训练环境必须用**指定的解释器**（真建已在端到端单独验过 ✓）
+        import Kohya一键工具 as core      # noqa: E402
+        U.set_env_paths(python_dir=os.path.dirname(sys.executable), python_exe=sys.executable)
+        assert core.find_python()[0] == sys.executable, "find_python 没用指定的解释器"
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        _calls = []
+        _orig_sub = core.subprocess                       # 只替换 core 里的引用，不动全局模块 ✓
+        core.subprocess = _types.SimpleNamespace(
+            run=lambda cmd, *a, **k: (_calls.append(cmd), _R())[1])
+        _td = _tf.mkdtemp(prefix="venvcmd_")
+        try:
+            core.create_python_venv("3.12", os.path.join(_td, "v"))
+        finally:
+            core.subprocess = _orig_sub
+            _sh.rmtree(_td, ignore_errors=True)
+        assert _calls and _calls[0][0] == sys.executable, \
+            "建训练环境没用指定的解释器（用的是 %s）" % (_calls[0][0] if _calls else "?")
+        assert "-m" in _calls[0] and "venv" in _calls[0], "命令不是 `python -m venv`：%s" % _calls[0]
+        U.clear_env_paths()
+    finally:
+        _P._settings_path = _orig_sp
+        _sh.rmtree(sp_dir, ignore_errors=True)
+    print("ENV_PATHS_CUSTOM_OK")
+
+
+def test_env_locations_ui():
+    """「环境位置（自带 Python / Git）」入口必须存在、不在折叠区、且点得开。
+
+    避免做完功能却没有入口（用户根本找不到 ✗）—— 这与 WD14 模型选择那次
+    「做在折叠区里、用户看不见」是同一类问题 ✓
+    """
+    import kohya_gui as G      # noqa: E402
+
+    _app = G.App()
+    try:
+        _app.root.update_idletasks()
+        _b = getattr(_app, "btn_env_locations", None)
+        assert _b is not None, "「环境位置」按钮不存在 —— 用户找不到入口 ✗"
+        _adv = getattr(_app, "adv_body", None)
+        _p, _in_adv = _b, False
+        while _p is not None:
+            if _p is _adv:
+                _in_adv = True
+                break
+            _p = getattr(_p, "master", None)
+        assert not _in_adv, "「环境位置」被放进高级参数折叠区 —— 用户翻不到 ✗"
+        _app.cmd_env_locations()          # 必须能打开且不抛异常
+        _app.root.update_idletasks()
+    finally:
+        try:
+            _app.root.destroy()
+        except Exception:
+            pass
+    print("ENV_LOCATIONS_UI_OK")
+
+
+def test_no_undefined_names():
+    """所有发布脚本里**用到的名字都必须真的可见**（静态审计，兜住整类问题）。
+
+    ★ 2026-09-17 一天之内**三次**同类事故，全都是"名字看不见"：
       · `preprocess.py` 用了 `time.time()` 却**没 `import time`** ✗
         → 打标模型下载 100% 失败 → 静默降级成 `1girl, solo` 兜底标签 ✗✓
       · `Kohya一键工具.py` 用了 `io.open()` 却**没 `import io`** ✗
         → 被 `except Exception: pass` 吞掉 → 模板示例 caption **一直静默为空** ✗
+      · `Kohya一键工具.py` 用了 `_py_has_venv`，而它**不在 `utils.__all__` 里** ✗
+        → `from kohya_core.utils import *` 取不到 → NameError ✗ →
+        被 `except Exception: pass` 吞掉 → 「装完 Python 却识别不到」的兜底扫描静默失效 ✗
 
-    这类错误只在**运行时、且只在那条具体分支上**才炸 ✗ —— 我发布前测的用例恰好都绕开了
-    出错那行 ✗，所以靠"多测几条路径"是防不住的 ✓ 用静态审计一次兜住到底 ✓
+    这类错误只在**运行时、且只在那条具体分支上**才炸 ✗，而且常被 except 吞掉、连日志都没有 ✗
+    → 靠"多测几条路径"防不住 ✓ 用静态审计一次兜住整类 ✓
     """
     import ast as _ast
+    import builtins as _bi
+    import importlib as _il
 
-    stdlib = set((
-        "os sys re json time shutil subprocess traceback argparse io math random "
-        "hashlib zipfile tempfile glob collections functools itertools urllib socket "
-        "struct io csv unicodedata ctypes platform threading queue datetime warnings "
-        "contextlib copy base64 html string textwrap uuid secrets statistics sqlite3 "
-        "logging signal shlex codecs pathlib typing dataclasses enum abc inspect ast "
-        "importlib textwrap getpass fnmatch difflib"
-    ).split())
+    # 模块级 dunder（`__file__` / `__name__` …）任何函数里都可见 ✓ 不能算未定义 ✗
+    BUI = set(dir(_bi)) | {
+        "__file__", "__name__", "__doc__", "__package__", "__spec__", "__loader__",
+        "__builtins__", "__path__", "__dict__", "__class__", "__annotations__",
+    }
+
+    def _star_names(mod_name):
+        """`from M import *` 到底带来哪些名字 —— 按**运行时真实行为**取（`__all__` 优先）✓"""
+        try:
+            m = _il.import_module(mod_name)
+        except Exception:
+            return None                      # 导不进来 → 该文件放弃检查（不做误报）
+        al = getattr(m, "__all__", None)
+        return set(al) if al is not None else {n for n in dir(m) if not n.startswith("_")}
     # 随包发布的脚本 + 核心包（注意本文件里 ROOT 是 **str**，不是 Path ✗）
     targets = [os.path.join(ROOT, _n) for _n in
                ("preprocess.py", "video_caption.py", "model_downloader.py",
@@ -1366,35 +1506,75 @@ def test_no_unimported_stdlib_modules():
         targets += [os.path.join(_core, _f) for _f in sorted(os.listdir(_core))
                     if _f.endswith(".py")]
     bad = []
+    checked = 0
     for p in targets:
         if not os.path.isfile(p):
             continue
         with open(p, encoding="utf-8-sig") as _fh:
             tree = _ast.parse(_fh.read())
-        bound = set()
+        # 模块级可见的名字
+        top = set(BUI)
+        star_ok = True
         for n in _ast.walk(tree):
-            if isinstance(n, _ast.Name) and isinstance(n.ctx, _ast.Store):
-                bound.add(n.id)                       # 赋值 / for 目标 / with-as / 推导式
-            elif isinstance(n, _ast.arg):
-                bound.add(n.arg)                      # 函数参数
-            elif isinstance(n, (_ast.FunctionDef, _ast.ClassDef)):
-                bound.add(n.name)
-            elif isinstance(n, _ast.Import):
+            if isinstance(n, _ast.Import):
                 for a in n.names:
-                    bound.add(a.asname or a.name.split(".")[0])
+                    top.add(a.asname or a.name.split(".")[0])
             elif isinstance(n, _ast.ImportFrom):
-                for a in n.names:
-                    bound.add(a.asname or a.name)
+                if any(a.name == "*" for a in n.names):
+                    names = _star_names(n.module or "")
+                    if names is None:
+                        star_ok = False          # 导不进来 → 该文件跳过（宁可不查，不误报 ✓）
+                    else:
+                        top |= names
+                else:
+                    for a in n.names:
+                        top.add(a.asname or a.name)
+            elif isinstance(n, _ast.Name) and isinstance(n.ctx, (_ast.Store, _ast.Del)):
+                top.add(n.id)                    # 模块级赋值 / for 目标 / with-as / 推导式
+            elif isinstance(n, _ast.arg):
+                top.add(n.arg)
+            elif isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                top.add(n.name)
+            elif isinstance(n, _ast.alias):
+                top.add(n.asname or n.name.split(".")[0])
             elif isinstance(n, _ast.ExceptHandler) and n.name:
-                bound.add(n.name)
-        for n in _ast.walk(tree):
-            if isinstance(n, _ast.Attribute) and isinstance(n.value, _ast.Name):
-                nm = n.value.id
-                if nm in stdlib and nm not in bound:
-                    bad.append("%s L%d: 用了 %s.… 但没有导入 %s"
-                               % (os.path.basename(p), n.lineno, nm, nm))
-    assert not bad, "发现「用了却没导入」的标准库模块：\n    " + "\n    ".join(sorted(set(bad)))
-    print("NO_UNIMPORTED_STDLIB_MODULES_OK")
+                top.add(n.name)
+            elif isinstance(n, (_ast.Global, _ast.Nonlocal)):
+                top.update(n.names)
+        if not star_ok:
+            continue
+        checked += 1
+        for fn in [x for x in _ast.walk(tree)
+                   if isinstance(x, (_ast.FunctionDef, _ast.AsyncFunctionDef))]:
+            vis = set(top)
+            for a in (fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs):
+                vis.add(a.arg)
+            if fn.args.vararg:
+                vis.add(fn.args.vararg.arg)
+            if fn.args.kwarg:
+                vis.add(fn.args.kwarg.arg)
+            # 函数体内所有绑定的名字（含嵌套函数 / 推导式 / with-as / except-as / 局部 import）
+            for sub in _ast.walk(fn):
+                if isinstance(sub, _ast.Name) and isinstance(sub.ctx, (_ast.Store, _ast.Del)):
+                    vis.add(sub.id)
+                elif isinstance(sub, (_ast.arg,)):
+                    vis.add(sub.arg)
+                elif isinstance(sub, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    vis.add(sub.name)
+                elif isinstance(sub, _ast.alias):
+                    vis.add(sub.asname or sub.name.split(".")[0])
+                elif isinstance(sub, _ast.ExceptHandler) and sub.name:
+                    vis.add(sub.name)
+                elif isinstance(sub, (_ast.Global, _ast.Nonlocal)):
+                    vis.update(sub.names)
+            for sub in _ast.walk(fn):
+                if isinstance(sub, _ast.Name) and isinstance(sub.ctx, _ast.Load) \
+                        and sub.id not in vis:
+                    bad.append("%s L%d: %s() 里用了看不见的名字 `%s`"
+                               % (os.path.basename(p), sub.lineno, fn.name, sub.id))
+    assert checked, "一个文件都没检查到，测试本身失效了"
+    assert not bad, "发现「用了但看不见」的名字：\n    " + "\n    ".join(sorted(set(bad)))
+    print("NO_UNDEFINED_NAMES_OK")
 
 
 def main():
@@ -1420,7 +1600,9 @@ def main():
     check("打标模型选择必须可见（不在折叠区）", test_wd14_selector_visible)
     check("打标模型能真的下载（完整正常路径）", test_wd14_download_http_path)
     check("打标模型缺失时回退到已有模型", test_wd14_model_fallback)
-    check("无「用了却没导入」的标准库模块", test_no_unimported_stdlib_modules)
+    check("无「用了但看不见」的名字（防同名静默失效）", test_no_undefined_names)
+    check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
+    check("自带环境入口可见且能打开", test_env_locations_ui)
     check("标签撤销可连退多步", test_label_undo_stack)
     check("Python 环境来源校验 + 徽章如实显示", test_python_env_source_guard)
     check("训练 native 崩溃诊断", test_native_crash_diagnosis)

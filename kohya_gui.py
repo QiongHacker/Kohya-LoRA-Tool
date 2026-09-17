@@ -394,6 +394,21 @@ def _collect_env_lines():
         out.append("Git: %s" % (_git or "未找到"))
     except Exception:
         pass
+    # 环境来源：用户是否自己指定过 Python / Git（2026-09-17 新增「自带环境」功能）
+    # 排查时这行很关键 —— 指定过的环境与自动找到的**不是同一套** ✗
+    try:
+        _ep = core.get_env_paths()
+        if _ep.get("python_exe") or _ep.get("python_dir") or _ep.get("git_exe"):
+            out.append("环境位置: 用户指定（Python=%s、Git=%s）"
+                       % (_ep.get("python_exe") or _ep.get("python_dir") or "自动",
+                          _ep.get("git_exe") or "自动"))
+            _why = core.explain_custom_python_problem()
+            if _why:
+                out.append("⚠ 指定的 Python 当前用不了：%s（已自动回落到自动查找）" % _why)
+        else:
+            out.append("环境位置: 全自动")
+    except Exception:
+        pass
     try:
         _gi = core.detect_gpu_info()
         out.append("显卡: %s（厂商 %s，显存 %sGB）" % (_gi.get("name") or "?", _gi.get("vendor") or "?", _gi.get("vram_gb") or "?"))
@@ -1128,6 +1143,19 @@ class App:
                                               font=ui_font(FONT_HINT), text_color=SUB, justify="left")
         self.guide_placeholder.pack(anchor="w", pady=(6, 2))
         self.guide_host = ctk.CTkFrame(self.guide_area, fg_color="transparent")
+        # 「自带 Python / Git」入口（2026-09-17 用户需求）—— 放在①环境引导下面，常显 ✓
+        # 需求原话：「环境文件可以增加一个自己选择环境文件所在的文件夹然后识别这些环境文件的功能吗?
+        #           我之前用的秋叶绘图，里面的 Python 和 Git 都不在系统盘，而在秋叶的文件夹里
+        #           （重装系统它也能识别，很方便）」
+        self.btn_env_locations = ctk.CTkButton(
+            self.guide_area, text="⚙ 环境位置（自带 Python / Git）", height=26,
+            fg_color="transparent", hover_color="#343a46", border_width=1, border_color=BORDER,
+            text_color=SUB, corner_radius=6, font=ui_font(FONT_HINT),
+            command=self.cmd_env_locations)
+        self.btn_env_locations.pack(fill="x", pady=(6, 0))
+        self._tip(self.btn_env_locations,
+                  "Python / Git 不想装在系统盘？这里可以自己选文件夹，工具会识别并校验，之后就用它们 —— "
+                  "放在别的盘 / 整合包文件夹里，重装系统后照样能用。")
 
         self.btn_one_click = ctk.CTkButton(self.sidebar, text="🚀 一键开始训练", height=42,
                                            fg_color=CARD2, hover_color="#343a46", corner_radius=8,
@@ -1619,6 +1647,21 @@ class App:
         try:
             self.guide_placeholder.configure(text=text)
             self.guide_placeholder.pack(anchor="w", pady=(6, 2))
+            self._pack_env_loc_btn()
+        except Exception:
+            pass
+
+    def _pack_env_loc_btn(self):
+        """把「环境位置（自带 Python / Git）」按钮排到最后。
+
+        pack 会把控件移到末位 ✓ 这样就保证它始终在引导步骤**下面**，
+        不会因为 guide_host 是后 pack 的而跑到上面去 ✗
+        """
+        try:
+            _b = getattr(self, "btn_env_locations", None)
+            if _b is not None:
+                _b.pack_forget()
+                _b.pack(fill="x", pady=(6, 0))
         except Exception:
             pass
 
@@ -1687,6 +1730,7 @@ class App:
             self._show_guide_placeholder("👆 请先选择训练模式\\n\\n引导会按模式自动生成")
             return
         self.guide_host.pack(fill="x", pady=3)
+        self._pack_env_loc_btn()
         for step in steps:
             row = ctk.CTkFrame(self.guide_host, fg_color="transparent")
             row.pack(fill="x", pady=3)
@@ -2626,6 +2670,160 @@ class App:
         finally:
             self.q.put("__DONE__")
             self.q.put(("STATUS",))
+
+    # ---------- 环境位置：自带 Python / Git（2026-09-17 用户需求） ----------
+    def cmd_env_locations(self):
+        """自己选文件夹，让工具识别并校验里面的 Python / Git。
+
+        需求原话：「环境文件可以增加一个自己选择环境文件所在的文件夹然后识别这些环境文件的功能吗?
+                   我之前用的秋叶绘图，里面的 Python 和 Git 都不在系统盘，而在秋叶的文件夹里
+                   （重装系统它也能识别，很方便）」
+        → 指定后建训练环境就用它 ✓ 不必装到系统盘 ✓ 重装系统也不丢 ✓
+        ⚠️ 必须校验：整合包自带的 Python 很多是**精简/嵌入式版**（没有 venv ✗）
+           拿它建环境会失败 —— 所以要**当场告诉他**，而不是装作成功 ✗
+        """
+        try:
+            self._env_loc_dialog()
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, "打开环境位置设置失败：\n%s" % e)
+
+    def _env_loc_dialog(self):
+        w = ctk.CTkToplevel(self.root)
+        w.title("环境位置（自带 Python / Git）")
+        w.geometry("700x460")
+        w.transient(self.root)
+        ctk.CTkLabel(w, text="环境位置（自带 Python / Git）",
+                     font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(anchor="w", padx=18, pady=(16, 4))
+        ctk.CTkLabel(w, text="Python / Git 不想装在系统盘？选一下它们所在的文件夹即可 —— 工具会识别并校验，\n"
+                             "之后就用它们。放在别的盘 / 整合包文件夹里，重装系统后照样能用。",
+                     font=ui_font(FONT_HINT), text_color=HINT, justify="left").pack(anchor="w", padx=18)
+        py_var = tk.StringVar(value="…")
+        git_var = tk.StringVar(value="…")
+        box = ctk.CTkFrame(w, fg_color="transparent")
+        box.pack(fill="x", padx=18, pady=(12, 4))
+        ctk.CTkLabel(box, text="Python", font=ui_font(FONT_BODY), text_color=TXT,
+                     width=56, anchor="nw").grid(row=0, column=0, sticky="nw", pady=(2, 8))
+        ctk.CTkLabel(box, textvariable=py_var, font=ui_font(FONT_HINT), text_color=SUB,
+                     anchor="w", justify="left", wraplength=560).grid(row=0, column=1, sticky="w", pady=(2, 8))
+        ctk.CTkLabel(box, text="Git", font=ui_font(FONT_BODY), text_color=TXT,
+                     width=56, anchor="nw").grid(row=1, column=0, sticky="nw", pady=(0, 8))
+        ctk.CTkLabel(box, textvariable=git_var, font=ui_font(FONT_HINT), text_color=SUB,
+                     anchor="w", justify="left", wraplength=560).grid(row=1, column=1, sticky="w", pady=(0, 8))
+
+        def refresh():
+            """显示**当前实际在用**的与**已指定**的状态（两者可能不同 ✗ 要分别说清）。"""
+            try:
+                ep = core.get_env_paths()
+                _p, _v = core.find_python()
+                _g = core.find_git() or ""
+                if ep.get("python_exe") or ep.get("python_dir"):
+                    _why = core.explain_custom_python_problem()
+                    if _why:
+                        py_var.set("已指定：%s\n⚠ 但它现在用不了：%s\n（目前仍用自动找到的：%s）"
+                                   % (ep.get("python_exe") or ep.get("python_dir"), _why, _p or "未找到"))
+                    else:
+                        py_var.set("已指定：%s（%s）✓" % (ep.get("python_exe") or ep.get("python_dir"), _v or "?"))
+                else:
+                    py_var.set("自动（当前：%s）" % (_p or "未找到"))
+                if ep.get("git_exe"):
+                    git_var.set("已指定：%s" % ep["git_exe"])
+                else:
+                    git_var.set("自动（当前：%s）" % (_g or "未找到"))
+            except Exception as e:
+                py_var.set("读取失败：%s" % e)
+
+        def pick_python():
+            d = filedialog.askdirectory(
+                title="选择 python.exe 所在的文件夹（整合包 / Python 安装目录都行）")
+            if not d:
+                return
+            self._log("[环境] 正在识别 %s 里的 Python…" % d)
+            try:
+                w.configure(cursor="watch")
+                w.update()
+            except Exception:
+                pass
+            try:
+                cands = core.scan_python_dir(d)
+            finally:
+                try:
+                    w.configure(cursor="")
+                except Exception:
+                    pass
+            ok = [t for t in cands if t[1]]
+            if ok:
+                exe, _o, ver, _why = ok[0]
+                core.set_env_paths(python_dir=d, python_exe=exe)
+                self._log(f"[环境] ✓ 已改用你指定的 Python {ver}：{exe}")
+                for p, _o2, v2, _w2 in ok[1:4]:
+                    self._log(f"[环境]   （该文件夹里还有可用的 Python {v2}：{p}）")
+                # 旧训练环境是用别的 Python 建的 —— 提醒要不要重建
+                self._log("[环境]   注意：已存在的训练环境仍是旧解释器建的；"
+                          "想改用这个重建，请到【② 安装训练内核】里重装一次。")
+            else:
+                why = cands[0][3] if cands else "这个文件夹里没有找到 python.exe"
+                self._log("[环境] ✗ 这个 Python 用不了，未做改动：%s" % why)
+                messagebox.showwarning(
+                    core.APP_NAME,
+                    "这个文件夹里的 Python 用不了，已保持原设置不变。\n\n原因：%s\n\n"
+                    "提示：整合包自带的常常是「精简/嵌入式」版本 —— 能跑，但没有 venv 模块，"
+                    "无法用来创建训练环境。" % why)
+            refresh()
+            self.q.put(("STATUS",))
+
+        def pick_git():
+            d = filedialog.askdirectory(title="选择 git.exe 所在的文件夹（如 Git 安装目录）")
+            if not d:
+                return
+            self._log("[环境] 正在识别 %s 里的 Git…" % d)
+            try:
+                w.configure(cursor="watch")
+                w.update()
+            except Exception:
+                pass
+            try:
+                cands = core.scan_git_dir(d)
+            finally:
+                try:
+                    w.configure(cursor="")
+                except Exception:
+                    pass
+            ok = [t for t in cands if t[1]]
+            if ok:
+                exe, _o, ver = ok[0]
+                core.set_env_paths(git_exe=exe)
+                self._log(f"[环境] ✓ 已改用你指定的 Git：{exe}（{ver}）")
+            else:
+                self._log("[环境] ✗ 这个文件夹里没有找到可用的 git.exe，未做改动")
+                messagebox.showwarning(core.APP_NAME, "这个文件夹里没有找到可用的 git.exe，已保持原设置不变。")
+            refresh()
+            self.q.put(("STATUS",))
+
+        def reset_auto():
+            core.clear_env_paths()
+            self._log("[环境] 已恢复「全自动」：Python / Git 由工具自行查找")
+            refresh()
+            self.q.put(("STATUS",))
+
+        row = ctk.CTkFrame(w, fg_color="transparent")
+        row.pack(fill="x", padx=18, pady=(8, 4))
+        ctk.CTkButton(row, text="📂 选择 Python 文件夹…", width=170, height=34, fg_color=ACC,
+                      hover_color=ACC_H, corner_radius=6, font=ui_font(FONT_BODY),
+                      command=pick_python).pack(side="left")
+        ctk.CTkButton(row, text="📂 选择 Git 文件夹…", width=160, height=34, fg_color=ACC,
+                      hover_color=ACC_H, corner_radius=6, font=ui_font(FONT_BODY),
+                      command=pick_git).pack(side="left", padx=8)
+        ctk.CTkButton(row, text="↺ 恢复自动", width=110, height=34, fg_color="transparent",
+                      hover_color="#343a46", border_width=1, border_color=BORDER, text_color=TXT,
+                      corner_radius=6, font=ui_font(FONT_BODY),
+                      command=reset_auto).pack(side="left")
+        ctk.CTkLabel(w, text="提示：整合包自带的 Python 常见「精简版」——能跑、版本也对，但没有 venv 模块，\n"
+                             "无法用来创建训练环境。选中这种时工具会直接告诉你原因，不会装作成功。",
+                     font=ui_font(FONT_HINT), text_color=HINT, justify="left").pack(anchor="w", padx=18, pady=(10, 4))
+        ctk.CTkButton(w, text="关闭", width=90, height=32, fg_color=CARD2, hover_color="#343a46",
+                      corner_radius=6, font=ui_font(FONT_BODY),
+                      command=w.destroy).pack(anchor="e", padx=18, pady=(4, 14))
+        refresh()
 
     def cmd_install(self):
         self._start_worker(self._install_worker, "安装 Kohya-SS 训练内核")

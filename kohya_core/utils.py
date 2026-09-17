@@ -28,7 +28,17 @@ __all__ = [
     "StopRequested", "format_eta", "_terminate_tree", "stop_active_process", "reset_stop", "active_process_pids",
     "build_env", "build_direct_env", "clear_proxy_env", "proxy_reachable", "run_stream", "_download", "find_git", "_py_version", "find_python",
     "venv_python", "_yq", "split_triggers", "system_proxy",
-]
+    # ⚠️ 2026-09-17 补：`_py_has_venv` 原来**不在** __all__ 里 ✗ 而 Kohya一键工具.py 里
+    # 有一处直接调用它（`_detect_installed_python` 的兜底扫描）✗ →
+    # `from kohya_core.utils import *` 取不到 → 运行时 NameError ✗ →
+    # 又被那里的 `except Exception: pass` 吞掉 → **"装完 Python 却识别不到"的兜底扫描静默失效** ✗
+    # （同一天第三次同类问题：用了却没导入/没导出 ✓ 靠静态审计兜住整类 ✓）
+    "_py_has_venv",
+    # 用户指定的环境路径（自带 Python / Git）
+    "get_env_paths", "set_env_paths", "clear_env_paths",
+    "check_python_exe", "check_git_exe", "scan_python_dir", "scan_git_dir",
+    "custom_python_exe", "custom_git_exe", "explain_custom_python_problem",
+    ]
 
 class StopRequested(Exception):
     """用户手动停止当前任务（训练/预处理/安装等）。"""
@@ -376,6 +386,10 @@ def _download(url, dest, logf=print):
     logf(f"[下载] 完成 -> {dest}")
 
 def find_git():
+    # ① 用户指定的 git.exe 优先（自带环境 / 不装到系统盘）✓
+    c = custom_git_exe()
+    if c:
+        return c
     cands = []
     p = shutil.which("git")
     if p:
@@ -389,7 +403,11 @@ def find_git():
             cands.append(c)
     for c in cands:
         try:
-            r = subprocess.run([c, "--version"], capture_output=True, text=True, timeout=15)
+            # errors="replace"：用户指到的目录里可能有同名但**不是 git** 的程序 ✗，
+            # 它输出的是非 UTF-8 字节 → 不加这句会在读取线程里抛 UnicodeDecodeError，
+            # 往日志里喷一大段 traceback ✗（2026-09-17 真机实测）
+            r = subprocess.run([c, "--version"], capture_output=True, text=True,
+                               errors="replace", timeout=15)
             if r.returncode == 0:
                 return c
         except Exception:
@@ -398,9 +416,11 @@ def find_git():
 
 def _py_version(p):
     try:
+        # errors="replace"：见 find_git 的说明 —— 同名但不是 Python 的程序会输出
+        # 非 UTF-8 字节，不加这句会抛 UnicodeDecodeError 并喷 traceback ✗
         r = subprocess.run(
             [p, "-c", "import sys;print('%d.%d.%d'%sys.version_info[:3])"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, errors="replace", timeout=20,
         )
         if r.returncode == 0:
             s = r.stdout.strip()
@@ -418,7 +438,7 @@ def _py_has_venv(p):
     """
     try:
         r = subprocess.run([p, "-c", "import venv, ensurepip"],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, errors="replace", timeout=30)
         return r.returncode == 0
     except Exception:
         return False
@@ -431,6 +451,11 @@ def find_python():
     之前 PATH python 排最前：若用户 PATH 里是 3.10（或 ComfyUI 精简版），
     建出来的 venv 是 3.10，而内置离线 wheel 是 cp312，导致 numpy/torch 装不上
     （训练只有 CPU 版 torch → 'accelerator device: cpu' 卡死）。"""
+    # ⓿ 用户自己指定的 Python 最优先（见下方「用户指定的环境路径」）✓
+    c = custom_python_exe()
+    if c:
+        s, _ = _py_version(c)
+        return c, s
     cands = []
     # 标准安装路径全扫一遍（3.12 优先）：PATH 里即使只有 ComfyUI 等精简 python，
     # 也能找到真正可建 venv 的 Python；且 3.12 与内置离线 wheel（cp312）匹配。
@@ -462,6 +487,202 @@ def find_python():
 def venv_python(kdir=None):
     kdir = kdir or get_kohya_dir()
     return os.path.join(kdir, "venv", "Scripts", "python.exe")
+
+
+# ---------- 用户指定的环境路径：自带 Python / Git（不装到系统盘） ----------
+# 需求来源（2026-09-17 用户反馈）：「我之前用的秋叶绘图，里面的 Python 和 Git 都不在系统盘，
+# 而在秋叶的文件夹里（重装系统它也能识别，很方便）」→ 希望本工具也能**自己选文件夹并识别** ✓
+#
+# 设计要点：
+#   · 存 `%APPDATA%\KohyaLoraTool\settings.json` 的 `env_paths`（与 data_dir 同一份文件 ✓）
+#   · 选完**必须校验**，校验不过就**不采用并说明原因** ✓ —— 不能"点了没反应" ✗
+#   · 为什么必须校验：秋叶 / ComfyUI 这类整合包自带的 Python 多是**精简嵌入式版** ✗
+#     （能跑、版本也对，但**没有 venv / ensurepip** ✗）→ 拿它 `-m venv` 会报
+#     `No module named venv` ✗ 而 `_py_has_venv` 正是为识别这种而写的 ✓
+#   · 指定路径失效（被删 / 移动）→ **自动回落到全自动查找** ✓ 绝不因此阻断用户 ✓
+_ENV_PATHS_KEY = "env_paths"
+
+# 扫描时跳过的目录名：这些地方**不可能**放 python.exe / git.exe，却常有几个 G ✗
+_SCAN_SKIP_DIRS = {
+    "$recycle.bin", "system volume information", "windows", "node_modules",
+    "__pycache__", "site-packages", ".git", ".cache", "models", "datasets",
+    "dataset", "output", "logs", "samples", "embeddings", "extensions",
+}
+
+
+def _read_all_settings():
+    """读 settings.json（与 paths._settings_path 同一份）。失败返回 {}。"""
+    try:
+        from kohya_core.paths import _settings_path
+        with open(_settings_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_all_settings(d):
+    """写 settings.json（整体覆盖）。返回是否成功。"""
+    try:
+        from kohya_core.paths import _settings_path
+        with open(_settings_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def get_env_paths():
+    """读用户指定的环境路径。返回 {"python_dir","python_exe","git_exe"}（缺项为空串）。"""
+    v = _read_all_settings().get(_ENV_PATHS_KEY)
+    v = v if isinstance(v, dict) else {}
+    return {k: str(v.get(k) or "").strip()
+            for k in ("python_dir", "python_exe", "git_exe")}
+
+
+def set_env_paths(python_dir=None, python_exe=None, git_exe=None):
+    """保存用户指定的环境路径（只覆盖传入的键，保留其它设置项）。返回是否成功。"""
+    d = _read_all_settings()
+    cur = d.get(_ENV_PATHS_KEY)
+    cur = dict(cur) if isinstance(cur, dict) else {}
+    for k, v in (("python_dir", python_dir), ("python_exe", python_exe), ("git_exe", git_exe)):
+        if v is not None:
+            cur[k] = str(v).strip()
+    d[_ENV_PATHS_KEY] = cur
+    return _write_all_settings(d)
+
+
+def clear_env_paths():
+    """清掉用户指定的环境路径（回到全自动）。返回是否成功。"""
+    d = _read_all_settings()
+    d.pop(_ENV_PATHS_KEY, None)
+    return _write_all_settings(d)
+
+
+def _scan_for_files(d, names, max_depth=3, budget=4000):
+    """在 d 下**浅层**扫描指定文件名（跳过明显的无关大目录）。返回路径列表（稳定排序）。
+
+    为什么要浅扫 + 限预算：秋叶这类整合包一整个目录常有几 GB / 上万个文件 ✗，
+    无脑 walk 会让界面卡死 ✗。深度 3 层足够覆盖 `<根>\\python\\python.exe` 与
+    `<根>\\Git\\cmd\\git.exe` 这两种典型布局 ✓
+    """
+    out, seen = [], set()
+    try:
+        d = os.path.abspath(d)
+        if not os.path.isdir(d):
+            return []
+        base_depth = d.rstrip("\\/").count(os.sep)
+        visited = 0
+        for root, dirs, files in os.walk(d):
+            visited += 1
+            if visited > budget:
+                break
+            if root.rstrip("\\/").count(os.sep) - base_depth >= max_depth:
+                dirs[:] = []
+            dirs[:] = [x for x in dirs
+                       if x.lower() not in _SCAN_SKIP_DIRS and not x.startswith(".")]
+            for f in files:
+                if f.lower() in names:
+                    p = os.path.join(root, f)
+                    if p not in seen:
+                        seen.add(p)
+                        out.append(p)
+    except Exception:
+        pass
+    out.sort(key=lambda p: (p.count(os.sep), p.lower()))
+    return out
+
+
+def check_python_exe(p):
+    """校验一个 python.exe 能否用来**创建训练环境**。返回 (ok, 版本, 原因)。
+
+    ok=False 时"原因"要能直接给用户看 ✓ —— 尤其要区分开「版本不对」和
+    「版本对但没有 venv（整合包的精简版）」✗ 这两种的处置方式完全不同 ✓
+    """
+    if not p or not os.path.isfile(p):
+        return False, "", "文件不存在"
+    s, parts = _py_version(p)
+    if not s:
+        return False, "", "它跑不起来（可能是别的程序改的名，或缺少依赖文件）"
+    if not parts or not (PY_MIN <= parts < PY_MAX):
+        return False, s, "版本 %s 不在支持范围（需要 3.10.9 ~ 3.12.x）" % s
+    if not _py_has_venv(p):
+        return False, s, ("版本 %s 没问题，但它是**精简/嵌入式**版本：没有 venv 模块，"
+                          "不能用来创建训练环境（整合包自带的多半是这种）" % s)
+    return True, s, ""
+
+
+def check_git_exe(p):
+    """校验一个 git.exe 是否可用。返回 (ok, 版本行)。"""
+    if not p or not os.path.isfile(p):
+        return False, ""
+    try:
+        r = subprocess.run([p, "--version"], capture_output=True, text=True,
+                           errors="replace", timeout=15)
+        if r.returncode == 0:
+            return True, (r.stdout or "").strip()
+    except Exception:
+        pass
+    return False, ""
+
+
+def scan_python_dir(d, max_depth=3):
+    """在目录里找 python.exe 并逐个校验。返回 [(exe, ok, 版本, 原因)]，**可用的排前面**。"""
+    res = []
+    for p in _scan_for_files(d, {"python.exe"}, max_depth=max_depth):
+        ok, ver, why = check_python_exe(p)
+        res.append((p, ok, ver, why))
+    res.sort(key=lambda t: (not t[1], t[0].count(os.sep), t[0].lower()))
+    return res
+
+
+def scan_git_dir(d, max_depth=3):
+    """在目录里找 git.exe 并校验。返回 [(exe, ok, 版本行)]，**可用的排前面**。
+
+    每个 Git 安装目录下常有多个 git.exe（`cmd\\` / `mingw64\\bin\\` / `libexec\\git-core\\`），
+    按路径深度排序能让最适合直接调用的 `cmd\\git.exe` 排在前面 ✓
+    """
+    res = []
+    for p in _scan_for_files(d, {"git.exe"}, max_depth=max_depth):
+        ok, ver = check_git_exe(p)
+        res.append((p, ok, ver))
+    res.sort(key=lambda t: (not t[1], t[0].count(os.sep), t[0].lower()))
+    return res
+
+
+def custom_python_exe():
+    """用户指定且**校验通过**的 python.exe；未指定 / 已失效返回 ""（调用方回落自动 ✓）。"""
+    ep = get_env_paths()
+    p = ep.get("python_exe")
+    if not p and ep.get("python_dir"):
+        ok = [t for t in scan_python_dir(ep["python_dir"]) if t[1]]
+        p = ok[0][0] if ok else ""
+    if p and check_python_exe(p)[0]:
+        return p
+    return ""
+
+
+def custom_git_exe():
+    """用户指定且**校验通过**的 git.exe；未指定 / 已失效返回 ""（调用方回落自动 ✓）。"""
+    p = get_env_paths().get("git_exe")
+    return p if (p and check_git_exe(p)[0]) else ""
+
+
+def explain_custom_python_problem():
+    """用户指定了 Python 但用不了时，说明**具体**原因（用于日志/提示）。没指定返回 ""。"""
+    ep = get_env_paths()
+    if ep.get("python_exe"):
+        ok, _v, why = check_python_exe(ep["python_exe"])
+        return "" if ok else why
+    if ep.get("python_dir"):
+        cands = scan_python_dir(ep["python_dir"])
+        if not cands:
+            return "该文件夹下没找到 python.exe"
+        for _p, ok, _v, why in cands:
+            if ok:
+                return ""
+        return cands[0][3] or "该文件夹下的 Python 不可用"
+    return ""
 
 def _yq(s):
     """生成合法 yaml 字符串标量（含中文/空格/转义都安全）。"""

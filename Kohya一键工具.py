@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.1"
+APP_VERSION = "0.17.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -698,6 +698,20 @@ def _python_is_conda(py):
 
 
 def install_python(logf=print):
+    # ⓿ 用户指定了自带的 Python（2026-09-17 新增：自己选文件夹并识别）→ 直接用 ✓
+    #    这条需求来自用户反馈：「Python 和 Git 都不在系统盘，而在整合包文件夹里，
+    #    重装系统它也能识别，很方便」✓
+    _c = custom_python_exe()
+    if _c:
+        _s, _ = _py_version(_c)
+        logf(f"[环境] 使用你指定的 Python {_s or '?'}：{_c}")
+        return _c, _s
+    # 指定了但用不了 → **说清具体原因**再回落自动 ✓（不能默默换掉 ✗）
+    _why = explain_custom_python_problem()
+    if _why:
+        logf(f"[环境] ⚠ 你指定的 Python 用不了：{_why}")
+        logf("[环境]   本次自动改用「自动查找 / 自动安装」；也可在「① 环境」里重新指定，"
+             "或点「恢复自动」。")
     py, ver = find_python()
     _conda = _python_is_conda(py)
     if py and ver and not _conda:
@@ -7731,6 +7745,16 @@ def detect_system_pythons():
             return bool(s)
         except Exception:
             return False
+    # 0) 用户指定的自带 Python 也要算进来 ✓ —— 否则他指定完，这里（安装引导/环境检查）
+    #    仍然显示"未检测到 Python"，等于白指定 ✗（2026-09-17 新增功能）
+    try:
+        _c = custom_python_exe()
+        if _c:
+            _s, _ = _py_version(_c)
+            if _s:
+                _add(".".join(_s.split(".")[:2]))
+    except Exception:
+        pass
     # 1) py launcher：解析版本 + 实际路径，校验路径真实存在（排除 Astral/uv 等第三方）
     try:
         r = subprocess.run(["py", "-0p"], capture_output=True, text=True, timeout=30)
@@ -8690,16 +8714,28 @@ def verify_amd_torch(venv_dir):
     backend = f"HIP {hip}" if hip else (f"CUDA {cuda}" if cuda else "CPU")
     return False, f"torch {version} 已导入，但 GPU 不可用（后端：{backend}）。请检查 AMD 驱动/ROCm 兼容性。", False
 
-def create_python_venv(py_ver, target, logf=print):
-    """用指定 Python 版本创建虚拟环境（py -<ver> -m venv <target>）。返回 (ok, msg)。"""
+def create_python_venv(py_ver, target, logf=print, py_exe=None):
+    """用指定 Python 创建虚拟环境。返回 (ok, msg)。
+
+    以前只能用 `py -<版本>`（**只认版本号，不认"哪个 python.exe"** ✗）→ 无法使用
+    用户自带的 Python ✗。现在：
+      · py_exe 显式给定时用它 ✓
+      · 否则若用户指定过自带 Python（见「用户指定的环境路径」）→ 也用它 ✓
+      · 都没有 → 仍是 `py -<ver> -m venv`（行为与以前一致 ✓ 向后兼容 ✓）
+    """
     try:
         if os.path.isfile(os.path.join(target, "Scripts", "python.exe")):
             return True, "环境已存在，跳过创建"
         parent = os.path.dirname(target)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        r = subprocess.run(["py", "-" + py_ver, "-m", "venv", target],
-                           capture_output=True, text=True, timeout=600)
+        py_exe = py_exe or custom_python_exe()
+        cmd = ([py_exe, "-m", "venv", target] if py_exe
+               else ["py", "-" + py_ver, "-m", "venv", target])
+        if py_exe:
+            logf(f"[环境] 用你指定的 Python 创建训练环境：{py_exe}")
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", timeout=600)
         if r.returncode == 0 and os.path.isfile(os.path.join(target, "Scripts", "python.exe")):
             logf(f"[AMD] 训练环境创建成功：{target}")
             return True, "创建成功"

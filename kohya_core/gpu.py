@@ -8,7 +8,12 @@ __all__ = [
     "detect_nvidia_gpu", "nvidia_driver_version", "_dxgi_adapters", "detect_vram_gb",
     "_registry_vram_gb", "detect_gpu_vendor", "detect_gpu_name", "detect_gpu_info",
     "detect_torch_backend", "detect_ram_gb", "safe_nvidia_smi", "nvidia_smi_broken",
-]
+    # ⚠️ 2026-09-17 补：Kohya一键工具.py 的 gpu_status_text() 里直接用了 `_is_igpu_name` ✗，
+    # 但它原来**不在 __all__ 里** ✗ → `from kohya_core.gpu import *` 取不到 → NameError ✗ →
+    # 又被那里的 `except Exception: pass` 吞掉 → AMD/未知平台上「总显存(约) X GB」这行
+    # **一直静默消失** ✗（一天内第四次同类问题：用了却没导入/没导出 ✓ 已加静态审计兜住整类 ✓）
+    "_is_igpu_name",
+    ]
 
 # ---------- nvidia-smi 安全封装 ----------
 # 重装系统未装 NVIDIA 驱动时，nvidia-smi.exe 启动即崩（0xc0000142），Windows 会弹
