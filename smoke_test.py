@@ -953,6 +953,255 @@ def test_label_undo_stack():
     print("LABEL_UNDO_STACK_OK")
 
 
+def test_krea2_warmup_notice():
+    """Krea2(Fizgig) 必须提前说明「前 2 个 epoch 是预热期」。
+
+    2026-09-17 多用户反馈「Krea2 训练速度降低」（4090：一秒多/步 → 3 秒；5070 Ti：5s → 8.8s）。
+    复盘两份用户日志后确认的机制：**引擎自己就打印了预热说明** ——
+      INFO:fizgig.krea2.trainer:[warm-up] Warm-up phase — the first two epochs start slowly
+      while the GPU plans kernels and fills its caches.
+    实测步速在预热期是 7.38 → 7.74 → 7.87 → 7.95 → 8.00 → 8.06 **逐步爬升**；
+    而工具此前只写「5s/it 左右步速正常」✗ → 用户在预热期看到 7~8s/it，必然误判成「变慢了」✗；
+    且日志显示用户两次都在 33 步（第一个存档点之前）就停 → **重开又回到预热** ✗，
+    怎么试看到的都是慢的那一段 ✓ 必须提前说清楚。
+    """
+    from pathlib import Path
+    import Kohya一键工具 as core      # noqa: E402
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert "前 2 个 epoch" in src and "预热阶段" in src, "缺少 Krea2 预热期说明"
+    _i = src.index("前 2 个 epoch 是**预热阶段**")
+    assert "warm-up" in src[max(0, _i - 700):_i + 700].lower(), \
+        "预热说明没有引用引擎原文 —— 属于凭猜，不是证据"
+    assert "重新预热" in src, "没说明「中途停止重开会重新预热」（用户就是栽在这里）"
+    # ★ 不得写"未经证实的应然速度"（例如「稳态 5s/it 正常」）——
+    # 工具里原有的「5s/it 左右步速正常」就是这么来的 ✗，而它**当初怎么测出来的已不可考** ✗，
+    # 结果用户拿它当标尺、看到 7~8s 就以为坏了 ✗ 这种数字没验证过就不该写进日志。
+    _seg = src[src.index("[Krea2(Fizgig)] ⚠ 前 2 个 epoch"):]
+    _seg = _seg[:_seg.index('")')]
+    assert "s/it" not in _seg, "预热提示里写了具体 s/it 数字 —— 未经验证的应然速度会误导用户"
+    # 内存提示不能再说「已自动降低块交换数」：该函数体里**只有这条日志、没有任何调整动作** ✗
+    # 注意只看**函数体**：注释里为了说明来龙去脉仍会引用这句旧文案，
+    # 直接对全文断言会误判（本轮就又踩了一次「断言太字面」✗）。
+    _w = src.index("def _warn_low_ram(")
+    _body = src[_w:_w + src[_w:].index("\n\n\n")]
+    # 只看**代码行**（去掉注释行）：注释里会引用旧文案来说明来龙去脉 ✓
+    _code = "\n".join(_l for _l in _body.splitlines() if not _l.strip().startswith("#"))
+    assert "已自动降低块交换数" not in _code, \
+        "内存提示又在说假动作（并未真的调整参数）—— 会让人把变慢归因到没发生的事"
+    assert "请把「块交换(blocks_to_swap)」调小" in _body, "内存提示没给出可执行建议"
+    print("KREA2_WARMUP_NOTICE_OK")
+
+
+def test_krea2_auto_quant_is_int8():
+    """Krea2 的 auto 档必须走 int8 —— fp8 在 K2 上是**灾难档** ✗。
+
+    2026-09-17 用户汇总实测（512px）：
+        · 4090 24G：fp8 7 s/步 → int8 **1 s/步**（7×）
+        · 16G 卡  ：fp8 50~100 s/步 → int8 **2.2 s/步**（25~45×）
+    根因：K2 的 fp8 路径**没用上 scaled_mm**（per-channel 量化与它不兼容，强开会 raise，
+    见 `_patch_musubi_fp8_scaled_mm`），每次前向要反量化回 bf16；块交换越多越惨。
+    官方数据同向：3090 上 fp8 7.1 vs convrot_int8 5.3；Blackwell 上 bf16 2.0 快过 fp8 2.3。
+    """
+    import Kohya一键工具 as core      # noqa: E402
+
+    # ① 两个引擎的 auto 档，只要不是低显存，都必须走 int8
+    for _v in (12, 16, 24, 47.48):
+        _q, _d = core._resolve_quant_mode(None, lambda s: None, _v, requested="auto")
+        assert _q == "int8", "%.0fG 的 auto 档没走 int8（得到 %s）" % (_v, _q)
+        _f, _s, _dd = core._fizgig_quant_swap(_v, "auto")
+        assert _f == ["--quant_int8", "bf16"], \
+            "Fizgig %.0fG 的 auto 档没走 int8（得到 %s）" % (_v, _f)
+        # ⚠️ swap 必须**沿用该档位原值**，不能顺手改 0：16G 档靠块交换才跑得起来，
+        # 改成 0 会 OOM。这里就是最初写错、被 engine 套件拦下的地方 ✓
+        _expect_swap = 0 if _v >= 32 else (12 if _v >= 24 else (20 if _v >= 16 else 26))
+        assert _s == _expect_swap, \
+            "%.0fG 的 swap 应保持档位原值 %s，得到 %s" % (_v, _expect_swap, _s)
+
+    # ② 低显存仍以显存优先：<10G 走 NF4（不能因为提速把兜底弄丢）
+    assert core._fizgig_quant_swap(8, "auto")[0] == ["--quantize_4bit"], "8G 档的 NF4 兜底被破坏"
+
+    # ③ 显式选择必须仍被尊重 —— 老项目存档里可能就存着 fp8，不能静默改掉
+    assert core._fizgig_quant_swap(24, "fp8")[0] == [], "显式 fp8 被静默改成了别的档"
+    assert core._resolve_quant_mode(None, lambda s: None, 24, requested="fp8")[0] == "fp8", \
+        "musubi 的显式 fp8 被静默改掉"
+    assert core._resolve_quant_mode(None, lambda s: None, 24, requested="int8")[0] == "int8"
+
+    # ④ 显式 fp8 必须带实测代价 —— 否则老用户不知道自己还踩在慢档上
+    assert "慢" in core._fizgig_quant_swap(24, "fp8")[2], "Fizgig 显式 fp8 没给出实测代价"
+    assert "慢" in core._resolve_quant_mode(None, lambda s: None, 24, requested="fp8")[1], \
+        "musubi 显式 fp8 没给出实测代价"
+
+    # ⑤ 底模已预量化时不做工具侧量化（原有行为不能丢）
+    assert core._resolve_quant_mode(None, lambda s: None, 24, requested="auto",
+                                    prequantized=True)[0] == "none", "预量化底模被重复量化"
+    print("KREA2_AUTO_QUANT_OK")
+
+
+def test_wd14_model_selectable():
+    """WD14 打标模型必须「可选 + 缺失时静默回默认」—— 这就是老用户无缝、新用户无感的关键。
+
+    2026-09-17 变更：模型不再内置（内含 311MB onnx，发布包 562MB / 安装包 488MB，
+    分发吃力）→ 改为首次使用时下载（魔搭优先 → hf-mirror 兜底）。
+    社区主流是 swinv2-v3（月下载约 70 万，是旧版 moat-v2 的数千倍，标签库更新到 2024-02）。
+    """
+    import preprocess as P      # noqa: E402
+
+    # ① 缺失 / 空 / 垃圾值 → 一律静默落默认，**绝不抛异常**
+    #    （老用户升级后项目里没有这个键，走的就是这条路 ✓）
+    for _bad in (None, "", "   ", "不存在的模型", "Auto"):
+        _k, _r = P.resolve_wd14_model(_bad)
+        assert _k == P.WD14_DEFAULT_MODEL, "%r 没落到默认模型（得到 %s）" % (_bad, _k)
+        assert _r == P.WD14_MODELS[P.WD14_DEFAULT_MODEL], "默认模型 repo 不对"
+    # ② 用户显式选择必须被尊重（含切回旧模型）
+    assert P.resolve_wd14_model("moat-v2")[0] == "moat-v2", "显式选旧模型被改掉"
+    assert P.resolve_wd14_model("swinv2-v3")[0] == "swinv2-v3"
+    # ③ 默认必须是社区主流的 swinv2-v3
+    assert P.WD14_DEFAULT_MODEL == "swinv2-v3", "默认模型被改动"
+    # ④ 两个模型的目录名互不相同 → 天然共存，互不覆盖
+    _dirs = {P._wd14_repo_dirname(r) for r in P.WD14_MODELS.values()}
+    assert len(_dirs) == len(P.WD14_MODELS), "两个模型的目录名冲突，会互相覆盖"
+    # ⑤ 下载源策略：魔搭优先（hf 作兜底）—— 魔搭 URL 必须指向本项目仓库
+    assert P.WD14_MS_REPO in P.WD14_MS_BASE, "魔搭下载源没指向本项目仓库"
+    assert "wd14_models" in P.WD14_MS_BASE, "魔搭路径与上传位置不一致"
+    # ⑥ 命令行参数必须存在且**不用 choices**（未知值要静默回默认，而不是 argparse 报错退出）
+    _src = open(os.path.join(ROOT, "preprocess.py"), encoding="utf-8").read()
+    assert '"--wd14-model"' in _src, "缺少 --wd14-model 参数"
+    _line = [l for l in _src.splitlines() if '"--wd14-model"' in l][0]
+    assert "choices=" not in _line, "用了 choices → 未知值会让 argparse 直接报错退出（破坏无缝）"
+    print("WD14_MODEL_SELECTABLE_OK")
+
+
+def test_close_confirm_while_running():
+    """训练/安装进行中关闭窗口必须**先确认**——误点关闭会直接终止任务、白跑几小时。
+
+    2026-09-17 用户反馈：「软件没有关闭提醒，如果在训练不小心误关，会直接停掉」。
+    以前 `_on_close` 是「保存配置 → 直接 destroy()」✗，训练在跑也照关不误。
+
+    这里**真跑行为**（用假 self 直接调 `_on_close`），而不是查源码里有没有某句文案 ✗。
+    """
+    import kohya_gui as G      # noqa: E402
+    import Kohya一键工具 as core      # noqa: E402
+    from tkinter import messagebox as MB
+
+    class _Root:
+        def __init__(self):
+            self.destroyed = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    def _make(busy):
+        class _Fake:
+            def __init__(self):
+                self.busy = busy
+                self._task_title = "一键开始训练" if busy else ""
+                self.current_project = None
+                self.ui_proc = None
+                self.root = _Root()
+
+            def _autosave(self):
+                pass
+
+            def _task_running(self):
+                # 直接用真实实现的语义（busy 或底层有活跃子进程），但底层探测在本测试里
+                # 不依赖真实进程 —— 单测不该去问系统
+                return bool(self.busy)
+
+        return _Fake()
+
+    _real_ask = MB.askyesno
+    _real_stop = core.stop_active_process
+    _stops = []
+    try:
+        # ⚠️ 必须把 stop_active_process 打桩：它会 set 全局 _STOP_EVENT，
+        # 真跑一次会把**同一个测试进程里后续的 run_stream 全部带停** ✗
+        core.stop_active_process = lambda: _stops.append(1)
+        # ① 有任务 + 用户选「否（继续跑）」→ **窗口不能关**，也不能停任务
+        _f = _make(True)
+        MB.askyesno = lambda *a, **k: False
+        G.App._on_close(_f)
+        assert _f.root.destroyed is False, "选了「不关」，窗口却关了"
+        assert not _stops, "选了「不关」，任务却被停了"
+        # ② 有任务 + 用户选「是（仍要关）」→ 关窗 **且主动停任务**
+        _f2 = _make(True)
+        MB.askyesno = lambda *a, **k: True
+        G.App._on_close(_f2)
+        assert _f2.root.destroyed is True, "确认关闭后窗口没关"
+        assert _stops, "确认关闭时没有主动停止任务（只 destroy 会让子进程管道断裂）"
+        # ③ 没有任务 → **不打扰**，直接关（不能给每次正常退出都弹框）
+        _called = {"n": 0}
+
+        def _count(*a, **k):
+            _called["n"] += 1
+            return True
+
+        _f3 = _make(False)
+        MB.askyesno = _count
+        G.App._on_close(_f3)
+        assert _f3.root.destroyed is True, "空闲时关不掉"
+        assert _called["n"] == 0, "空闲退出也弹了确认框（打扰）"
+    finally:
+        MB.askyesno = _real_ask
+        core.stop_active_process = _real_stop
+        try:
+            core.reset_stop()          # 保险：清掉可能被置位的停止事件
+        except Exception:
+            pass
+
+    # ④ 源码层确认：确认框必须**默认选中「否」**（误点的代价是继续跑，不是白跑）
+    _gsrc = open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8").read()
+    _i = _gsrc.index("def _on_close(self)")
+    _seg = _gsrc[_i:_i + 2000]
+    assert "default=" in _seg and "no" in _seg.lower(), "关闭确认框没设默认值为「否」"
+    print("CLOSE_CONFIRM_WHILE_RUNNING_OK")
+
+
+def test_wd14_selector_visible():
+    """打标模型的选择必须**在折叠区之外**——用户要能直接看到，而不是去翻高级参数。
+
+    2026-09-17 教训：我第一版把它放进了「高级参数」折叠区（`adv_collapsed = True` 默认收起），
+    用户反馈「打标模型选择组件在哪里？我没有看到啊」✗ —— 位置选错了：
+    它是常规选择，不是"老手参数" ✓
+
+    这里**真构造界面**并断言控件确实 mapped（折叠区里的子控件 `winfo_ismapped()` 为 False，
+    所以这条断言正好能抓住"又被塞进折叠区"的回归 ✓）。
+    """
+    import kohya_gui as G      # noqa: E402
+
+    _app = G.App()
+    try:
+        _app._build_main_cards()
+        _app.root.update_idletasks()
+        _m = getattr(_app, "wd14_model_menu", None)
+        assert _m is not None, "打标模型下拉不存在"
+        # ⚠️ 判据不能用 winfo_ismapped()：_build_main_cards() 之后界面可能还停在主页，
+        # 祖先不可见 → 所有子控件都是 not mapped，那会误报（第一次就踩了 ✗）。
+        # 真正要保证的是语义：**它不在折叠容器 adv_body 里**（那才是"用户看不到"的原因）。
+        _adv = getattr(_app, "adv_body", None)
+        _p, _in_adv = _m, False
+        while _p is not None:
+            if _p is _adv:
+                _in_adv = True
+                break
+            _p = getattr(_p, "master", None)
+        assert not _in_adv, "打标模型控件在「高级参数」折叠区里 —— 用户翻不到 ✗"
+        # 也不该藏在"高级参数"卡片里（哪怕折叠区之外）—— 它属于「① 准备图片数据」
+        _p2, _in_card3 = _m, False
+        while _p2 is not None:
+            if _p2 is getattr(_app, "btn_toggle_adv", None):
+                _in_card3 = True
+            _p2 = getattr(_p2, "master", None)
+        assert not _in_card3, "打标模型还在「高级参数」卡片里，应放在①准备图片数据 ✓"
+        assert _app.wd14_model_var.get().startswith("swinv2-v3"), \
+            "默认值不是新模型（%s）" % _app.wd14_model_var.get()
+    finally:
+        try:
+            _app.root.destroy()
+        except Exception:
+            pass
+    print("WD14_SELECTOR_VISIBLE_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -969,6 +1218,11 @@ def main():
     check("主页输出目录入口", test_home_output_button)
     check("预处理进度（WD14 打标）", test_preprocess_progress)
     check("Anima 组件指定已有文件", test_anima_component_picker)
+    check("Krea2 预热期说明（防「更新后变慢」误判）", test_krea2_warmup_notice)
+    check("Krea2 auto 量化必须是 int8（fp8 是灾难档）", test_krea2_auto_quant_is_int8)
+    check("WD14 打标模型可选 + 缺失静默回默认", test_wd14_model_selectable)
+    check("任务进行中关闭窗口必须先确认", test_close_confirm_while_running)
+    check("打标模型选择必须可见（不在折叠区）", test_wd14_selector_visible)
     check("标签撤销可连退多步", test_label_undo_stack)
     check("Python 环境来源校验 + 徽章如实显示", test_python_env_source_guard)
     check("训练 native 崩溃诊断", test_native_crash_diagnosis)

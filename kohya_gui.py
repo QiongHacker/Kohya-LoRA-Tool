@@ -198,8 +198,16 @@ _MAIN_BTN_TIPS = {
 
 # GUI 显示 → 训练参数 optimizer 映射（resolve_optimizer 接受小写）
 _OPT_GUI_MAP = {"自动": "auto", "AdamW": "adamw", "Lion": "lion", "AdamW8bit": "adamw8bit"}
-# GUI 显示 → Krea2/FLUX.2 底模量化方式（auto=按显存档位自动选 fp8/int8）
+# GUI 显示 → Krea2/FLUX.2 底模量化方式（auto = int8，见 core._resolve_quant_mode）
 _QUANT_GUI_MAP = {"自动": "auto", "fp8": "fp8", "int8": "int8", "nf4": "nf4"}
+# GUI 显示 → WD14 打标模型（2026-09-17：模型改为「首次使用时下载 + 可选」，
+# 默认 swinv2-v3（社区主流、标签库更新到 2024）；不满意可切回 moat-v2。
+# 取值规则见 core/preprocess 的 resolve_wd14_model —— **缺失/未知一律静默用默认**，
+# 所以老用户升级后这里读到空值也不会出问题 ✓
+_WD14_MODEL_GUI_MAP = {
+    "swinv2-v3（推荐）": "swinv2-v3",
+    "moat-v2（旧版）": "moat-v2",
+}
 # 预处理裁切比例：显示文本 -> 宽:高（"" = 不裁切保比例）
 _CROP_RATIO_PRESETS = {
     "不裁切（保比例）": "",
@@ -451,6 +459,7 @@ class App:
         self.mode = "character"
         self.base_type = "sd15"
         self.busy = False
+        self._task_title = ""           # 当前任务名（关闭确认框显示"正在：xxx"）
         self._manual_override = set()
         self._applying_preset = False
         self._override_rendered = []        # 「已手动设定」提示条当前渲染的键（避免每次输入都重建控件）
@@ -643,6 +652,8 @@ class App:
         if self.busy:
             messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
             return
+        # 记住任务名，供「关闭窗口」确认框显示"正在：xxx"（2026-09-17）
+        self._task_title = title
         self._set_busy(True)
         self._log("开始：" + title)
         # 清掉上一次任务上报的「实际生效值」，避免把旧值显示成这一次的
@@ -651,6 +662,8 @@ class App:
 
     def _set_busy(self, v):
         self.busy = v
+        if not v:
+            self._task_title = ""     # 任务结束，清掉标题（关闭确认框用）
         state = ("disabled" if v else "normal")
         # 左侧引导按钮（①环境 ②安装 ③底模 ④图片）
         for b in getattr(self, "_guide_btns", {}).values():
@@ -744,7 +757,9 @@ class App:
         self.mon_progress.set(0)
         self.mon_progress.pack(fill="x", padx=26, pady=(6, 0))
         self.mon_row2 = ctk.CTkFrame(self.mon, fg_color="transparent"); self.mon_row2.pack(fill="x", padx=26, pady=(6, 0))
-        self.mon_loss_var = tk.StringVar(value="loss: --")
+        # 标「均值」：引擎日志给的字段是 avr_loss（平均），不是瞬时 loss。
+        # 实测逐条比对过（3 份日志 4243 条，0 条不一致）→ 数值就是引擎原值，未加工 ✓
+        self.mon_loss_var = tk.StringVar(value="loss（均值）: --")
         self.mon_lr_var = tk.StringVar(value="lr: --")
         self.mon_speed_var = tk.StringVar(value="速度: --")
         self.mon_eta_var = tk.StringVar(value="预计剩余: --")
@@ -888,9 +903,9 @@ class App:
                 if snap.get("loss_prev") is not None:
                     d = loss - snap["loss_prev"]
                     diff = " ↓" if d < 0 else (" ↑" if d > 0 else " →")
-                self.mon_loss_var.set(f"loss: {loss:.4f}{diff}")
+                self.mon_loss_var.set(f"loss（均值）: {loss:.4f}{diff}")
             else:
-                self.mon_loss_var.set("loss: --")
+                self.mon_loss_var.set("loss（均值）: --")
             lr = snap.get("lr")
             self.mon_lr_var.set(f"lr: {lr:.2e}" if lr else "lr: --")
             sp = snap.get("speed") or 0.0
@@ -1001,12 +1016,54 @@ class App:
                 pts.append((x, y))
             flat = [p for pt in pts for p in pt]
             c.create_line(flat, fill="#7AA2F7", width=2, smooth=True)
-            c.create_text(w - pad, 4, text=f"loss 最近{len(data)}步 ↓", anchor="ne",
+            c.create_text(w - pad, 4, text=f"loss（均值）· 最近 {len(data)} 步", anchor="ne",
                           fill="#9aa0ad", font=("Microsoft YaHei", 9))
         except Exception:
             pass
 
+    def _task_running(self):
+        """是否有任务正在进行（安装 / 预处理 / 训练 / 下载）。
+
+        两个信号都看，双保险：
+          · self.busy —— 后台任务标记（_start_worker 置位，覆盖所有走 worker 的任务）
+          · core.active_process_pids() —— 底层**真实还有活跃子进程**
+            （万一某条路径没用 worker，也不会漏掉）
+        """
+        try:
+            if getattr(self, "busy", False):
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(core.active_process_pids())
+        except Exception:
+            return False
+
     def _on_close(self):
+        """关闭窗口。**任务进行中必须先确认**。
+
+        2026-09-17 用户反馈：训练中不小心点到关闭，任务直接被停掉。
+        以前这里是「保存配置 → 直接 destroy()」✗ —— 训练还在跑也照关不误。
+        提醒里明确写后果（训练会丢进度、预处理/安装已完成的文件会保留），
+        并且**默认选中「否」**——误点的代价是继续跑，不是白跑几小时。
+        """
+        if self._task_running():
+            _what = getattr(self, "_task_title", "") or "任务"
+            if not messagebox.askyesno(
+                    core.APP_NAME,
+                    "⚠ 有任务正在进行：%s\n\n"
+                    "现在关闭软件会**终止它**：\n"
+                    "· 训练：没跑到存档点就停 → 本次进度**无法续训**（白跑）\n"
+                    "· 预处理 / 安装 / 下载：已完成的文件会保留\n\n"
+                    "确定要关闭吗？（选「否」= 继续跑完）" % _what,
+                    icon="warning", default="no"):
+                return
+            # 用户确认要关：**主动停掉任务**，而不是只 destroy() 让父进程退出 ——
+            # 后者会让子进程的 stdout 管道断裂、以莫名的方式崩掉（残留/半截状态更难收拾）。
+            try:
+                core.stop_active_process()
+            except Exception:
+                pass
         try:
             if getattr(self, "current_project", None):
                 self._autosave()
@@ -2156,6 +2213,14 @@ class App:
                 self.quant_var.set(_quant_gui)
             except Exception:
                 pass
+            # 打标模型：**老项目里没有这个键 → 取默认（新模型）** ✓ 不弹错、不阻塞 ——
+            # 这就是「老用户无缝衔接、新用户无感」的落点（见 core/preprocess.resolve_wd14_model）
+            _wd_gui = {v: k for k, v in _WD14_MODEL_GUI_MAP.items()}.get(
+                (p.get("wd14_model") or "swinv2-v3"), "swinv2-v3（推荐）")
+            try:
+                self.wd14_model_var.set(_wd_gui)
+            except Exception:
+                pass
             _swap_gui = str(p.get("blocks_to_swap") or "自动")
             try:
                 self.swap_var.set(_swap_gui if str(_swap_gui).isdigit() else "自动")
@@ -2257,7 +2322,30 @@ class App:
         self.btn_pick_raw.pack(side="left")
         self.card1_hint = ctk.CTkLabel(card1, text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好",
                                         font=ui_font(FONT_HINT), text_color=HINT)
-        self.card1_hint.pack(anchor="w", padx=22, pady=(2, 14))
+        self.card1_hint.pack(anchor="w", padx=22, pady=(2, 6))
+        # 打标模型（2026-09-17 新增）——⚠️ 一开始放在「高级参数」折叠区里，
+        # 结果用户**根本找不到**（折叠区默认收起 ✗）。它其实是常规选择，不是老手参数，
+        # 所以挪到「① 准备图片数据」里：常显、且在流程第一步就能看到 ✓
+        self.wd14_row = ctk.CTkFrame(card1, fg_color="transparent")
+        self.wd14_row.pack(fill="x", padx=22, pady=(0, 4))
+        ctk.CTkLabel(self.wd14_row, text="自动打标模型", font=ui_font(FONT_BODY),
+                     text_color=SUB).pack(side="left")
+        self.wd14_model_var = tk.StringVar(value="swinv2-v3（推荐）")
+        try:
+            self.wd14_model_var.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        self.wd14_model_menu = ctk.CTkOptionMenu(
+            self.wd14_row, variable=self.wd14_model_var, values=list(_WD14_MODEL_GUI_MAP.keys()),
+            width=140, height=28, fg_color=CARD2, button_color=CARD2,
+            button_hover_color="#3a4150", text_color=TXT, font=ui_font(FONT_BODY),
+            dropdown_font=ui_font(FONT_BODY), dropdown_fg_color=CARD2,
+            dropdown_hover_color="#3a4150")
+        self.wd14_model_menu.pack(side="left", padx=(12, 8))
+        ctk.CTkLabel(self.wd14_row, text="（首次使用会下载，之后离线可用）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        ctk.CTkLabel(card1, text="", font=ui_font(FONT_HINT),
+                     text_color=HINT).pack(anchor="w", padx=22, pady=(0, 14))
 
         # 卡片2：触发词 + 正则（人物模式）
         c2, card2 = create_soft_shadow_card(s); c2.pack(fill="x", pady=(0, 10))
@@ -4644,8 +4732,9 @@ class App:
             text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
             dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
         self.quant_menu.pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(qw, text="（自动=16G 及以上 fp8、8~12G int8；fp8 为 musubi 官方/社区 16G 主流，int8 适合带宽紧张的低显存）",
+        ctk.CTkLabel(qw, text="（自动=int8；Krea2 的 fp8 明显更慢）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
+        # 打标模型已挪到「① 准备图片数据」卡片（常显）—— 放这里用户找不到 ✗
         bw = ctk.CTkFrame(self.adv_body, fg_color="transparent"); bw.pack(anchor="w", pady=(6, 0))
         ctk.CTkLabel(bw, text="块交换数（Krea2/FLUX.2）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self.swap_var = tk.StringVar(value="自动")
@@ -4862,6 +4951,9 @@ class App:
             "quant_mode": (_QUANT_GUI_MAP.get(self.quant_var.get()) if hasattr(self, "quant_var") else "auto"),
             "blocks_to_swap": (self.swap_var.get() if (hasattr(self, "swap_var") and str(self.swap_var.get()).isdigit()) else ""),
             "compile": ("1" if (hasattr(self, "compile_var") and self.compile_var.get()) else ""),
+            # 打标模型：老项目保存后就会带上这个键，此后以此为准（含用户选回旧模型的情况 ✓）
+            "wd14_model": (_WD14_MODEL_GUI_MAP.get(self.wd14_model_var.get(), "swinv2-v3")
+                           if hasattr(self, "wd14_model_var") else "swinv2-v3"),
         }
 
     def _maybe_migrate_legacy_dataset(self, name):
@@ -5437,6 +5529,7 @@ class App:
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=False, crop_ratio=params.get("crop_ratio") or "",
+        wd14_model=params.get("wd14_model") or "",
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
@@ -5635,6 +5728,7 @@ class App:
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=False, crop_ratio=params.get("crop_ratio") or "",
+        wd14_model=params.get("wd14_model") or "",
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",

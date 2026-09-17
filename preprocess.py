@@ -75,8 +75,139 @@ def default_style_caption(style_target):
 # 人物模式兜底 caption（仅在无法运行 WD14 打标、且原图没有自带 .txt 时使用）
 DEFAULT_CHARACTER_CAPTION = "1girl, solo"
 
-# WD14 打标模型
-WD14_REPO_ID = "SmilingWolf/wd-v1-4-moat-tagger-v2"
+# ---- WD14 打标模型（2026-09-17 改为「可选 + 首次使用时下载」）----
+# 背景：模型原先内置在安装包里（onnx 311MB），导致 Setup.exe 488MB、
+# 发布包解压后 562MB —— 分发/更新都吃力（用户反馈「安装包太大了，分发也不方便」）。
+# 现在改为**首次使用时下载**：发布包 562MB → 251MB，安装包约 488MB → 200MB 左右。
+# 下载源策略与工具其他资源一致：**魔搭优先 → hf-mirror 兜底**
+# （hf-mirror 在国内不稳；模型已上传到魔搭 wd14_models/<repo>/ 下，并做过回读校验）。
+WD14_MODELS = {
+    "swinv2-v3": "SmilingWolf/wd-swinv2-tagger-v3",
+    "moat-v2": "SmilingWolf/wd-v1-4-moat-tagger-v2",
+}
+WD14_MODEL_LABELS = {
+    "swinv2-v3": "WD14 swinv2-v3（推荐，标签库更新到 2024）",
+    "moat-v2": "WD14 moat-v2（旧版，2022 标签库）",
+}
+# 默认模型：社区主流（月下载 ~70 万，是旧版的数千倍），标签库更新到 2024-02
+WD14_DEFAULT_MODEL = "swinv2-v3"
+WD14_REPO_ID = WD14_MODELS[WD14_DEFAULT_MODEL]      # 兼容旧引用，见 resolve_wd14_model
+
+# 魔搭仓库（与 release.py 的 ms_repo 一致）—— 模型文件放在 wd14_models/<repo 名>/ 下
+WD14_MS_REPO = "FGtiancai/Kohya-LoRA-Tool"
+WD14_MS_BASE = "https://modelscope.cn/models/%s/resolve/master/wd14_models" % WD14_MS_REPO
+WD14_HF_BASE = "https://hf-mirror.com"
+
+
+def resolve_wd14_model(key=None):
+    """把「打标模型选项」解析成 (key, repo)。
+
+    ★★ 这是「老用户无缝衔接、新用户无感」的关键所在：
+
+       **任何缺失 / 未知 / 空值，都静默回退到默认模型，绝不抛异常、绝不弹错误。**
+       · 老用户升级后：设置/项目里没有这个键 → 直接拿到默认模型 ✓ 什么都不用做 ✓
+       · 新用户：从没设过 → 走同一条路径 ✓ 装完即用 ✓
+       · 用户显式选过（含选旧模型）→ 按他选的走 ✓
+
+    之所以能这么简单，是因为**不做迁移**：旧项目不去动它，新建/之后的项目一律用默认；
+    这样也不会出现「有的项目新、有的项目旧」的混乱 ✓
+    """
+    k = (key or "").strip()
+    if k not in WD14_MODELS:
+        k = WD14_DEFAULT_MODEL
+    return k, WD14_MODELS[k]
+
+
+def _wd14_repo_dirname(repo):
+    """模型目录名：repo 里的 '/' 换成 '_'（内置目录与下载缓存都用它，天然支持多模型共存）。"""
+    return repo.replace("/", "_")
+
+
+def _http_download(url, dst, logf=print):
+    """下载 url 到 dst（先写 .part 再改名，避免半截文件被后续当成完整的）。
+
+    每 3 秒报一次进度 —— 445MB 的 onnx 约 2~3 分钟，没有进度用户会以为卡死。
+    """
+    import urllib.request
+    tmp = dst + ".part"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "KohyaLoraTool"})
+        with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            t0 = last = time.time()
+            while True:
+                chunk = r.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                if time.time() - last >= 3:
+                    last = time.time()
+                    _sp = got / 1024 / 1024 / max(0.001, time.time() - t0)
+                    if total:
+                        logf("[WD14]   进度 %d%%（%.1f / %.1f MB，%.1f MB/s）"
+                             % (got * 100 // total, got / 1048576.0, total / 1048576.0, _sp))
+                    else:
+                        logf("[WD14]   已下载 %.1f MB（%.1f MB/s）" % (got / 1048576.0, _sp))
+        os.replace(tmp, dst)
+        return True
+    except Exception as e:
+        logf("[WD14]   下载异常：%s" % e)
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return False
+
+
+def download_wd14_model(key=None, logf=print):
+    """首次使用时下载打标模型。成功返回模型目录，失败返回 None。
+
+    **魔搭优先 → hf-mirror 兜底**；两个源都失败则**明确报错 + 告知手动放置路径**。
+
+    ⚠️ 绝不静默成功：2026-09-16 魔搭上传就因为「大文件传输中断、小文件没传上去、
+    脚本却照样打印成功」而静默失败过 —— 所以这里每个文件都要**校验大小**再认。
+    """
+    key, repo = resolve_wd14_model(key)
+    _r = _wd14_repo_dirname(repo)
+    dst = os.path.join(_wd14_cache_root(), _r)
+    try:
+        os.makedirs(dst, exist_ok=True)
+    except Exception as e:
+        logf("[WD14] 无法创建模型目录：%s" % e)
+        return None
+    logf("[WD14] 打标模型尚未下载（%s），现在下载…" % WD14_MODEL_LABELS.get(key, key))
+    # (文件名, 认它完整的最小字节数) —— onnx 至少几十 MB，csv 至少 1KB
+    for fn, min_sz in (("model.onnx", 10 * 1024 * 1024), ("selected_tags.csv", 1024)):
+        tgt = os.path.join(dst, fn)
+        if os.path.isfile(tgt) and os.path.getsize(tgt) >= min_sz:
+            continue                                   # 已有且大小合理 → 跳过，不重复下
+        ok = False
+        for name, url in (
+            ("魔搭", "%s/%s/%s" % (WD14_MS_BASE, _r, fn)),
+            ("hf-mirror", "%s/%s/resolve/main/%s" % (WD14_HF_BASE, repo, fn)),
+        ):
+            logf("[WD14] 下载 %s（%s 源）…" % (fn, name))
+            if _http_download(url, tgt, logf) and os.path.getsize(tgt) >= min_sz:
+                logf("[WD14] ✓ %s 已就绪（%.1f MB）" % (fn, os.path.getsize(tgt) / 1048576.0))
+                ok = True
+                break
+            logf("[WD14] %s 源未成功，换下一个源…" % name)
+        if not ok:
+            logf("[WD14] ⚠ 打标模型下载失败：%s（魔搭与 hf-mirror 都不可用）" % fn)
+            logf("[WD14]   ① 可稍后重试（重新点训练即可，已下好的文件不会重下）")
+            logf("[WD14]   ② 或手动下载该文件放到：%s" % tgt)
+            return None
+    logf("[WD14] 打标模型已就绪：%s" % dst)
+    return dst
+
+
+def _wd14_cache_root():
+    """下载缓存根目录：%APPDATA%\\KohyaLoraTool\\wd14_tagger_model。"""
+    return os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "KohyaLoraTool", "wd14_tagger_model")
 
 # 画风模式要过滤的“强人物特征”标签（精确匹配，下划线等价于空格）
 STYLE_FILTERED_TAGS = {
@@ -626,29 +757,46 @@ def _system_proxy():
     return None
 
 
-def _wd14_model_dir():
-    """WD14 模型目录：优先用程序内置（wd14_tagger_model，随安装包分发），否则用 %APPDATA% 缓存。
+def _wd14_model_dir(key=None):
+    """查找打标模型目录，返回 (目录, 是否已就绪)。
 
-    返回 (目录, 是否已就绪)。就绪 = 该目录里已有对应 repo 的 model.onnx。
+    顺位：
+      ① **程序目录** `wd14_tagger_model/` —— 兼容**已装的老版本**（老安装包里内置过模型 ✓）；
+        新安装包不再内置（安装包 488MB → 约 200MB，见文件头注释）。
+      ② `%APPDATA%\\KohyaLoraTool\\wd14_tagger_model\\` —— **首次使用时下载到这里** ✓
+
+    就绪 = 该目录下已有**对应模型**的 `model.onnx`。
+    注意两个模型的目录名不同（`SmilingWolf_wd-swinv2-tagger-v3` / `…moat-tagger-v2`），
+    所以它们**天然共存**、互不覆盖 ✓
     """
-    repo = WD14_REPO_ID.replace("/", "_")
-    candidates = []
+    _, repo = resolve_wd14_model(key)
+    _r = _wd14_repo_dirname(repo)
     kit = os.path.dirname(os.path.abspath(__file__))
-    candidates.append(os.path.join(kit, "wd14_tagger_model"))            # 内置（随安装包）
-    candidates.append(os.path.join(
-        os.environ.get("APPDATA", os.path.expanduser("~")),
-        "KohyaLoraTool", "wd14_tagger_model"))                           # 下载缓存
+    candidates = [os.path.join(kit, "wd14_tagger_model"), _wd14_cache_root()]
     for d in candidates:
-        if os.path.isfile(os.path.join(d, repo, "model.onnx")):
+        if os.path.isfile(os.path.join(d, _r, "model.onnx")):
             return d, True
     return candidates[-1], False
 
 
-def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.35):
+def ensure_wd14_model(key=None, logf=print):
+    """确保打标模型就绪：已有 → 返回模型目录；没有 → **下载**（魔搭优先）；失败返回 None。
+
+    两条打标路径（kohya 官方脚本 / 内置 onnx）**都在开头调用它** ——
+    这样「首次使用下载」只有一处逻辑，且两条路径都能自动拿到模型 ✓
+    """
+    _dir, ready = _wd14_model_dir(key)
+    if ready:
+        return _dir
+    return download_wd14_model(key, logf)
+
+
+def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.35,
+                    model_key=None):
     """调用 kohya 官方 WD14 打标脚本，为 output_dir 里每张图生成 .txt 标签。
 
     返回是否成功。失败时由调用方做兜底处理，不会中断整体预处理。
-    模型优先用内置 wd14_tagger_model（开箱即用，不联网）；缺失时才自动下载一次。
+    模型**首次使用时下载**（魔搭优先 → hf-mirror 兜底），之后离线可用 ✓
 
     增强（整合 2026-08-17 现场修复）：
     - 解释器自动选择：当前解释器缺 torch/onnxruntime 时自动改用带 torch 的 venv 并补装 onnx；
@@ -681,19 +829,22 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
         return False
     # 隔离损坏图片：避免一张坏图导致整批打标中断
     _quarantine_corrupt_images(output_dir, logf)
-    model_dir, ready = _wd14_model_dir()
+    # ★ 首次使用时下载模型（魔搭优先 → hf-mirror 兜底）；已下好则秒回，不重复下载 ✓
+    model_dir = ensure_wd14_model(model_key, logf)
+    if not model_dir:
+        logf("[WD14] 打标模型不可用，官方脚本跳过（会走内置打标或兜底 caption）")
+        return False
+    _key, _repo = resolve_wd14_model(model_key)
     logf(f"[WD14] 使用官方打标脚本: {script}")
     logf(f"[WD14] 打标解释器: {py}")
-    logf(f"[WD14] 打标模型目录: {model_dir}" + ("（内置，已就绪）" if ready else "（未就绪，将自动下载）"))
+    logf(f"[WD14] 打标模型: {WD14_MODEL_LABELS.get(_key, _key)}（{model_dir}）")
     cmd = [
         py, script, output_dir,
-        "--onnx", "--repo_id", WD14_REPO_ID,
+        "--onnx", "--repo_id", _repo,
         "--model_dir", model_dir,
         "--batch_size", str(batch_size), "--thresh", str(thresh),
         "--remove_underscore", "--caption_extension", ".txt",
     ]
-    if not ready:
-        cmd.append("--force_download")
     env = dict(os.environ)
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
     for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -874,10 +1025,11 @@ def _ensure_wd14_script_deps(py, logf=print):
     return ok
 
 
-def _wd14_onnx_files():
-    """定位随包内置的 WD14 onnx 模型 + 标签表；缺任一返回 (None, None)。"""
-    model_dir, _ready = _wd14_model_dir()
-    repo_dir = os.path.join(model_dir, WD14_REPO_ID.replace("/", "_"))
+def _wd14_onnx_files(key=None):
+    """定位 WD14 onnx 模型 + 标签表；缺任一返回 (None, None)。"""
+    _, repo = resolve_wd14_model(key)
+    model_dir, _ready = _wd14_model_dir(key)
+    repo_dir = os.path.join(model_dir, _wd14_repo_dirname(repo))
     onnx_p = os.path.join(repo_dir, "model.onnx")
     csv_p = os.path.join(repo_dir, "selected_tags.csv")
     if os.path.isfile(onnx_p) and os.path.isfile(csv_p):
@@ -885,16 +1037,20 @@ def _wd14_onnx_files():
     return None, None
 
 
-def _run_wd14_onnx(output_dir, logf=print, threshold=0.35):
-    """内置 WD14 打标：onnxruntime 直读随包 model.onnx（CPU/GPU 自动），不依赖 kohya sd-scripts。
+def _run_wd14_onnx(output_dir, logf=print, threshold=0.35, model_key=None):
+    """内置 WD14 打标：onnxruntime 直读 model.onnx（CPU/GPU 自动），不依赖 kohya sd-scripts。
 
     适用：没装第一引擎（找不到官方打标脚本）、或官方脚本环境损坏（缺 cv2 等）的机器。
     预处理 / 阈值 / 输出格式与 kohya 官方 tag_images_by_wd14_tagger 的 default_format 一致
     （pad 白边到正方形 -> resize 448 -> 只取 general/character，>threshold 的标签，下划线转空格）。
     """
-    onnx_p, csv_p = _wd14_onnx_files()
+    onnx_p, csv_p = _wd14_onnx_files(model_key)
     if not onnx_p:
-        logf("[WD14] 内置打标：未找到 wd14_tagger_model 里的 model.onnx/selected_tags.csv")
+        # 首次使用：先确保模型就绪（与官方脚本路径共用同一个下载器，魔搭优先 ✓）
+        if ensure_wd14_model(model_key, logf):
+            onnx_p, csv_p = _wd14_onnx_files(model_key)
+    if not onnx_p:
+        logf("[WD14] 内置打标：未找到 model.onnx/selected_tags.csv（模型未下载成功）")
         return False
     # 面包屑：onnxruntime / cv2 都是 native 代码，一旦硬崩（DLL 冲突 / AVX 不兼容 /
     # provider 初始化失败）**不是 Python 异常，try/except 拦不住，也没有 traceback** ——
@@ -1074,7 +1230,7 @@ def _probe_onnxruntime_import(vpy, logf=print, timeout=180):
     return _classify_ort_probe(r.returncode, (r.stdout or "") + (r.stderr or ""))
 
 
-def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35):
+def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35, model_key=None):
     """在**独立子进程**里跑内置打标 —— 隔离 native 硬崩。
 
     背景（2026-09-15 qionglora 用户实测）：`_run_wd14_onnx` 里的 `import onnxruntime`
@@ -1090,21 +1246,23 @@ def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35):
     """
     if not sys.executable:
         logf("[WD14] 内置打标：拿不到解释器路径，回退进程内执行")
-        return _run_wd14_onnx(output_dir, logf=logf, threshold=threshold)
+        return _run_wd14_onnx(output_dir, logf=logf, threshold=threshold, model_key=model_key)
     # 显式把脚本目录作为 argv 传进去并用 sys.path.insert，**不依赖 PYTHONPATH 传递** ——
     # 环境变量在某些宿主（测试框架 / 被清过 env 的调用链）里不保证生效，
     # 那样子进程会直接 ModuleNotFoundError 而对生产行为毫无帮助。
     _here = os.path.dirname(os.path.abspath(__file__))
+    # argv[4] = 打标模型选项（空串 = 用默认模型，见 resolve_wd14_model）
     code = ("import sys; sys.path.insert(0, sys.argv[3]);"
             "import preprocess as P;"
-            "sys.exit(0 if P._run_wd14_onnx(sys.argv[1], threshold=float(sys.argv[2])) else 1)")
+            "sys.exit(0 if P._run_wd14_onnx(sys.argv[1], threshold=float(sys.argv[2]),"
+            " model_key=(sys.argv[4] or None)) else 1)")
     env = dict(os.environ)
     env["PYTHONPATH"] = _here          # 双保险
     env["PYTHONUNBUFFERED"] = "1"
     logf("[WD14] 内置打标：在独立子进程中运行（隔离 onnxruntime 的 native 崩溃）…")
     try:
-        rc = subprocess.run([sys.executable, "-c", code, output_dir, str(threshold), _here],
-                            env=env, timeout=1800).returncode
+        rc = subprocess.run([sys.executable, "-c", code, output_dir, str(threshold), _here,
+                             model_key or ""], env=env, timeout=1800).returncode
     except Exception as e:
         logf(f"[WD14] ⚠ 内置打标子进程启动失败：{e}；改用兜底标签继续")
         return False
@@ -1130,7 +1288,7 @@ def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35):
                 logf("[WD14] onnxruntime 已修复，自动重试内置打标…")
                 try:
                     _rc2 = subprocess.run([sys.executable, "-c", code, output_dir,
-                                           str(threshold), _here],
+                                           str(threshold), _here, model_key or ""],
                                           env=env, timeout=1800).returncode
                 except Exception as _e2:
                     _rc2 = -1
@@ -1157,16 +1315,21 @@ def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35):
         return False
     return True
 
-def _run_wd14_auto(output_dir, logf=print, script=None):
-    """自动打标总入口：官方脚本（GPU/CPU 回退）优先，失败/缺失改用内置 onnx 打标。"""
+def _run_wd14_auto(output_dir, logf=print, script=None, model_key=None):
+    """自动打标总入口：官方脚本（GPU/CPU 回退）优先，失败/缺失改用内置 onnx 打标。
+
+    model_key：打标模型选项（`swinv2-v3` / `moat-v2` / None=默认）。
+    **任何未知值都会静默回退到默认模型**（见 resolve_wd14_model）——
+    老用户升级后设置里没有这个键时走的就是这条路，不该有任何报错或阻塞 ✓
+    """
     script = script or find_wd14_tagger()
     if script:
-        if run_wd14_tagger(output_dir, logf=logf, script=script):
+        if run_wd14_tagger(output_dir, logf=logf, script=script, model_key=model_key):
             return True
         logf("[WD14] 官方打标脚本失败，自动改用内置打标（onnx）重试…")
     else:
         logf("[WD14] 未找到 kohya 官方打标脚本，改用内置打标（onnx，不依赖第一引擎）…")
-    return _run_wd14_onnx_isolated(output_dir, logf=logf)
+    return _run_wd14_onnx_isolated(output_dir, logf=logf, model_key=model_key)
 
 
 def _sd_scripts_root(script=None):
@@ -1782,6 +1945,10 @@ def main():
                         help="概念模式关闭「自动清洗概念标签」（默认开：删掉描述概念本身的标签，让 trigger 独占）")
     parser.add_argument("--dedup", action="store_true", help="按 MD5 跳过重复图片")
     parser.add_argument("--no-wd14", action="store_true", help="人物模式不自动调用 WD14 打标")
+    # 打标模型选项。★ 刻意**不用 choices**：未知/空值要走「静默回退默认」而不是 argparse 报错退出
+    # （老用户升级后设置里没有这个键，传过来的可能是空串 ✓）
+    parser.add_argument("--wd14-model", default="",
+                        help="打标模型：swinv2-v3（默认）/ moat-v2；留空或未知值都按默认处理")
     parser.add_argument("--min-size", type=int, default=0,
                         help="过滤过小图片：长边小于该像素则跳过（0=不过滤）")
     parser.add_argument("--blur-threshold", type=float, default=0,
@@ -2032,7 +2199,7 @@ def main():
                 if _purge_placeholder_captions(output_dir, DEFAULT_CHARACTER_CAPTION, trigger):
                     imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
-                wd14_ok = _run_wd14_auto(output_dir)
+                wd14_ok = _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None))
                 if not wd14_ok:
                     _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
                     print("[WARN] WD14/内置打标都失败，缺标签图片使用兜底 caption（只有 1girl, solo 等极简词，训练效果会差；请查看上方日志排查后重试）")
@@ -2135,7 +2302,7 @@ def main():
                         output_dir, (DEFAULT_CAPTION, DEFAULT_CAPTION_REALISTIC), trigger):
                     imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
-                wd14_ok = _run_wd14_auto(output_dir)
+                wd14_ok = _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None))
                 if not wd14_ok:
                     _fill_missing_captions(output_dir, style_fb)
                     print("[WARN] WD14/内置打标都失败，缺标签图片使用兜底 caption（训练效果会差；请查看上方日志排查后重试）")

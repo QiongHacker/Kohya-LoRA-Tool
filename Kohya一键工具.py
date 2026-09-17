@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.16.15"
+APP_VERSION = "0.17.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2917,7 +2917,12 @@ def _warn_low_ram(logf, ram_gb, label):
     if ram_gb < 32:
         logf(f"[{label}] ⚠ 检测到系统内存仅 {ram_gb:.0f}G：{label} 训练建议 32G 内存。"
              "内存不足时块交换会读写硬盘页面文件，表现为「卡在第一步/极慢」。"
-             "已自动降低块交换数以减少内存压力（可手动调回）。")
+             # ⚠️ 2026-09-17 修正文案：这里原来写「已自动降低块交换数以减少内存压力」✗，
+             # 但函数体里**只有这一行日志、没有任何调整动作** —— 是**假动作** ✗。
+             # 后果：用户以为某个参数被自动改小了，对着命令行/界面对不上；
+             # 也会让人把「变慢」归因到一个根本没发生的调整上（本轮排查就差点被带偏）。
+             # 不是「降低块交换就不慢」：块交换数调小 = 更多层常驻显存，显存不够反而更慢。
+             "请把「块交换(blocks_to_swap)」调小或改用更小的分辨率，以减少内存压力。")
 
 
 def _cleanup_leftover_trainers(logf, label):
@@ -3278,6 +3283,10 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
                 cmd += ["--compile"]
         else:
             logf(f"[Krea2] ⚠ torch.compile 已自动禁用（{_compile_note}），本次用标准 SDPA 继续训练，不会中断。")
+            # 2026-09-17：把"这会变慢"说清楚 —— 否则用户只会觉得「莫名其妙的变慢了」✗
+            logf("[Krea2]   注意：不开编译会明显更慢（本工具实测 fp8 + compile ≈2×；"
+                 "Krea2 官方也标注 compile 大约 2 倍提速）。想更快可在高级参数里开启「torch.compile」"
+                 "（需 Windows 的 triton / MSVC 构建工具就绪，本工具会自动检测）。")
     if swap > 0:
         cmd += ["--blocks_to_swap", str(swap)]
     if h2d_only:
@@ -3309,7 +3318,12 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
             elif vram_gb is not None and vram_gb <= 16.5:
                 logf("[Krea2] ⚠ 16G 显存开采样预览：已把采样分辨率压到 512 防 OOM（每 100 步采样仍会略拖慢，4080S 实测 13.9→54s/it）；若仍异常请取消勾选「训练中采样预览」")
             else:
-                logf("[Krea2] 采样预览：每 100 步出一张预览图（输出目录）")
+                # ≥20G 卡默认开采样 —— 必须写明代价，否则就是"莫名其妙变慢"的来源 ✗
+                # （采样要额外加载文本编码器出图，采样后残留显存会让后续训练换页 → 越跑越慢；
+                #   16G 档实测第 100 步后 13.9→54s/it）
+                logf("[Krea2] 采样预览：每 100 步出一张预览图（输出目录）。"
+                     "⚠ 采样会额外占用显存与时间（越跑越慢的常见来源）——"
+                     "如果觉得步速变慢，取消勾选「训练中采样预览」即可恢复。")
 
     # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
     # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
@@ -4797,6 +4811,14 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
         return (["--quantize_4bit"], 0, "NF4 4bit（冻结底模 ~5.6GB，12G 以下推荐）")
     if q in ("int8",):
         return (["--quant_int8", "bf16"], 0, "INT8 W8A8（~18G 显存常驻，最快）")
+    if q in ("fp8", "fp8_scaled"):
+        # ★ 显式选 fp8 仍然尊重（老项目存档里可能就存着 fp8，不该被静默改掉 ✗），
+        #   但必须把实测代价说清楚：K2 的 fp8 没用上 scaled_mm、每步反量化回 bf16，
+        #   实测 512px 下 16G 卡 50~100s/步、4090 24G 7s/步 —— 而 int8 分别是 2.2 / 1 s/步。
+        _t8 = round(vram_gb) if vram_gb is not None else None
+        _sw8 = 0 if (_t8 is None or _t8 >= 32) else (12 if _t8 >= 24 else (20 if _t8 >= 16 else 26))
+        return ([], _sw8, "动态 fp8（你指定的）⚠ 实测 K2 上比 int8 慢 7~45 倍"
+                           "（512px：16G 卡 50~100s/步 vs int8 2.2s/步），建议把「量化」改回「自动」")
     tier = round(vram_gb) if vram_gb is not None else None
     if backend == "amd-rocm" and tier is not None and tier >= 18:
         # 7900 XT（20G）实测：auto 默认的 fp8+块交换在 ROCm 上很慢；int8 常驻 + 关块交换最快
@@ -4811,7 +4833,17 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
         swap = 26
     else:
         return (["--quantize_4bit"], 0, "NF4 4bit（<10G 自动切换）")
-    return ([], swap, "动态 fp8 + blocks_to_swap=%d" % swap)
+    # ★ 2026-09-17 改：auto 档从「动态 fp8 + blocks_to_swap=N」改成 **int8**。
+    # 实测（用户汇总，512px）：16G 卡 fp8 50~100s/步 ✗ → int8 2.2s/步 ✓（25~45×）；
+    # 4090 24G fp8 7s/步 ✗ → int8 1s/步 ✓（7×）。根因是 K2 的 fp8 没用上 scaled_mm、
+    # 每步要反量化回 bf16，和块交换叠加后极慢（详见 _resolve_quant_mode 的注释）。
+    # ⚠️ **只换量化，`swap` 沿用该档位原有取值** ✗ —— 绝不能顺手改成 0：
+    #   16G 档本来就靠块交换才跑得起来，改成 0 会直接 OOM；而且"int8+swap0 在 16G 可行"
+    #   我们**没有**实测证据（代码注释里 5070 Ti 的 2.5s/it 是 int8+**swap12**+pinned）。
+    #   （这一条最初写错过、被 engine 套件的 train-pipeline 用例拦下 ✗ —— 测试挡住了真回归 ✓）
+    return (["--quant_int8", "bf16"], swap,
+            "INT8 W8A8 + blocks_to_swap=%d（自动档；实测 512px 下 4090 = 1s/步、"
+            "16G 卡 = 2.2s/步，fp8 慢 7~45×）" % swap)
 
 
 def _fizgig_preview_swap(vram_gb):
@@ -5076,6 +5108,17 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
                          "显存紧张时建议取消勾选「训练中采样预览」。")
     # 首次运行提示：AMD 需加载/量化 26GB 底模并编译内核，LoRA 创建后到首个步数可能几分钟无输出
     logf("[Krea2(Fizgig)] 提示：首次运行需加载并量化 26GB 底模、编译内核，前几分钟可能无步数输出，属正常现象，请耐心等待。")
+    # ⚠️ 2026-09-17：多用户反馈「更新后变慢」。引擎自己会打印预热说明 ——
+    #   INFO:fizgig.krea2.trainer:[warm-up] Warm-up phase — the first two epochs start slowly
+    #   while the GPU plans kernels and fills its caches.
+    # 历史日志也证明**预热现象真实存在**（09-08 一份 Krea2 日志：98 → 19 → 10 → 7.5 → 5.8 → 2.55 s/it，
+    # 几十步后进入稳态）✓
+    # ⚠️ 但这**是否就是本次「更新后变慢」的原因，尚未确认** ✗（老日志版本差太多、不能当对照 ✗）。
+    # 所以这里**只陈述引擎原文 + 判断方法**，不写任何"应该多少 s/it"的数字 ——
+    # 那种数字一旦没验证过就会反过来误导用户（工具里原有的「5s/it 左右正常」就是这么来的 ✗）。
+    logf("[Krea2(Fizgig)] ⚠ 前 2 个 epoch 是**预热阶段**（引擎原文：GPU 在规划 kernel、填缓存），"
+         "这一段本来就比之后慢 —— **判断快慢请跑过 2 个 epoch 再看**；"
+         "中途停止重开会**重新预热**，只看开头几步很容易误判。")
     logf(f"[Krea2(Fizgig)] 底模(RAW): {files['raw']}")
     logf(f"[Krea2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
     logf(f"[Krea2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap} | torch.compile={'开' if _k2_compile else '关'}")
@@ -7512,7 +7555,7 @@ def normalize_crop_ratio(s):
 
 
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
-               reg_dir=None, repeats=5, dedup=False, wd14=True,
+               reg_dir=None, repeats=5, dedup=False, wd14=True, wd14_model=None,
                square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
                strong_bind=True, concept_type="", clean_concept=True, concept_mode=False,
@@ -7572,6 +7615,10 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             cmd.append("--dedup")
         if not wd14:
             cmd.append("--no-wd14")
+        # 打标模型（留空 = preprocess 侧用默认模型；未知值也会被静默回退成默认 ✓
+        # —— 老用户升级后设置里没这个键，传的就是空串）
+        if wd14_model:
+            cmd += ["--wd14-model", str(wd14_model)]
         # 概念标签清洗只在概念模式执行（2026-09-12 修）：界面「概念类型」默认 form 且无条件传入，
         # 此前只按 concept_type 判断，人物模式也会跑 form 词表清洗，
         # 导致人物 LoRA 里的 horns / animal ears / wings 被静默删掉。
@@ -9871,7 +9918,10 @@ def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", al
     if prequantized:
         return "none", "底模已是预量化（fp8/int8），跳过工具侧量化"
     if req == "fp8":
-        return "fp8", "用户指定 fp8"
+        # 尊重用户显式选择（老项目存档里可能就存着 fp8 ✗），但把实测代价写明 ——
+        # 2026-09-17 用户汇总：512px 下 16G 卡 fp8 50~100s/步 vs int8 2.2s/步；
+        # 4090 24G fp8 7s/步 vs int8 1s/步。K2 的 fp8 没用上 scaled_mm（每步反量化回 bf16）。
+        return "fp8", "用户指定 fp8 ⚠ 实测 K2 上比 int8 慢 7~45 倍（16G 卡 512px：50~100s/步 vs 2.2s/步），建议改回「自动」"
     if req == "int8":
         return "int8", "用户指定 int8（W8A8 对称量化）"
     # 本机实测（4070 8G, 512px, H2D-only swap24）：
@@ -9882,10 +9932,17 @@ def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", al
     #   未标分辨率，疑似 768+，勿与 512 的 2.5s/it 直接对比）—— stock musubi 下 16G 仍是 int8 更快
     #   （社区 fp8 优势是其自编译内核，无法照搬）。故 <=16G（取整）默认 int8，20G+ 默认 fp8；
     #   NF4 因 bnb 反量化开销 + 与块交换冲突，仅显式指定时启用。
-    _tier = round(vram_gb) if vram_gb is not None else None
-    want_int8 = (req == "auto" and _tier is not None and _tier <= 16)
-    if want_int8:
-        return "int8", "8~16G 档自动 int8（W8A8；4080S 实测 int8+swap12=7s/it，fp8 反而慢）"
+    # ★ 2026-09-17 改：auto 档**一律 int8**（原来是「<=16G 才 int8、20G+ 给 fp8」✗）。
+    # 用户汇总实测（512px）：
+    #   · 4090 24G：fp8   7 s/步 ✗ → int8 **1 s/步** ✓（7×）
+    #   · 16G 卡  ：fp8 50~100 s/步 ✗ → int8 **2.2 s/步** ✓（25~45×）
+    # 根因：K2 的 fp8 路径**没用上 scaled_mm**（见 _patch_musubi_fp8_scaled_mm ——
+    #   Krea2 的 fp8 是 per-channel，与 scaled_mm 不兼容，强开会直接 raise），
+    #   于是每次前向都要**反量化回 bf16** —— 块交换越多越惨，16G 档直接掉到 50~100s/步。
+    # 官方数据同向：3090 上 fp8 7.1 vs convrot_int8 5.3；Blackwell 上 bf16 2.0 反而快过 fp8 2.3。
+    # 故 auto 不再给 fp8；想用 fp8 仍可显式指定（req == "fp8" 会原样尊重 ✓）。
+    if req == "auto":
+        return "int8", "自动档 int8（W8A8；实测 512px 下 4090 = 1s/步、16G 卡 = 2.2s/步，fp8 慢 7~45×）"
     if req == "nf4" and allow_nf4:
         if _ensure_musubi_bnb(mvpy, logf, label=label):
             ok, detail = _probe_nf4(mvpy, logf)

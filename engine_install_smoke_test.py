@@ -1596,10 +1596,16 @@ def test_quant_mode_resolution(base):
     try:
         core._ensure_musubi_bnb = lambda mvpy, logf=print, label="X": True
         core._probe_nf4 = lambda vpy, logf=print, timeout=180: (True, "ok")
+        # ★ 2026-09-17 变更：auto 档**一律 int8**（原先是 (None/24,"auto") 期望 fp8 ✗）。
+        # 用户汇总实测（512px）：4090 24G fp8 7s/步 → int8 **1s/步**；
+        # 16G 卡 fp8 50~100s/步 → int8 **2.2s/步**。
+        # 根因：K2 的 fp8 没用上 scaled_mm（per-channel 与它不兼容），每步要反量化回 bf16；
+        # 与块交换叠加后代价放大 —— 详见 Kohya一键工具.py 里 _resolve_quant_mode 的注释。
+        # 显式 fp8 / int8 / nf4 的选择仍然照旧尊重 ✓（下面几条没动）。
         cases = [
-            ((None, "auto"), "fp8"), ((8, "auto"), "int8"), ((12, "auto"), "int8"),
+            ((None, "auto"), "int8"), ((8, "auto"), "int8"), ((12, "auto"), "int8"),
             ((14, "auto"), "int8"), ((15.67, "auto"), "int8"),  # 4080S 16G：实测 int8+swap12=7s/it，fp8 反而慢
-            ((16, "auto"), "int8"), ((24, "auto"), "fp8"),
+            ((16, "auto"), "int8"), ((24, "auto"), "int8"), ((47.48, "auto"), "int8"),
             ((8, "fp8"), "fp8"), ((8, "int8"), "int8"),
             ((8, "nf4"), "nf4"), ((24, "nf4"), "nf4"),
         ]
@@ -2061,7 +2067,12 @@ def test_wd14_onnx_isolated(base: Path):
     src = (ROOT / "preprocess.py").read_text(encoding="utf-8")
     # 1) 隔离实现存在，且总入口已改用它
     assert "def _run_wd14_onnx_isolated(" in src, "缺子进程隔离实现"
-    assert "return _run_wd14_onnx_isolated(output_dir, logf=logf)" in src, "总入口未接隔离版"
+    # ⚠️ 用**结构化**判断，别绑死完整调用串：2026-09-17 给该调用加了 model_key 参数，
+    # 原先写成 "return _run_wd14_onnx_isolated(output_dir, logf=logf)" 的断言立刻失效 ✗
+    # （这个项目已经因为「断言太字面」误报过好几次了，统一改成看函数体内是否存在该调用）
+    _ai = src.index("def _run_wd14_auto(")
+    _abody = src[_ai:_ai + src[_ai:].index("\n\n\n")]
+    assert "_run_wd14_onnx_isolated(" in _abody, "总入口未接隔离版"
     # 2) native 崩溃没有 traceback，必须有面包屑才能定位
     assert "正在加载 onnxruntime…" in src, "缺崩溃定位面包屑"
     # 3) 行为：外层子进程必须「正常收尾并拿到 bool」，而不是被内层一起带走
@@ -3326,6 +3337,14 @@ def test_run_stream_pipe_held_by_grandchild(base: Path):
     # 崩溃前/退出前的输出必须照样收到（不能为了不卡住而丢日志）
     assert "CHILD_DONE" in blob, "没收到子进程输出：%s" % blob[-400:]
     assert _dt < 10, ("子进程已退出却被孙进程拖住 %.1fs —— 仍在等管道 EOF" % _dt)
+    # 高频输出下父进程吞吐不能退化成「等待与打日志串行」。
+    # 2026-09-17 实测：主循环每轮固定 sleep(0.15) 时，父进程总耗时 4.01s，而边读边打的
+    # 旧实现只要 1.86s ✗（子进程不受影响 ✓ 但界面日志会积压、进度看着卡 ✗）。
+    # 这里只做**结构性**断言（计时断言会飘 ✗）：必须存在「有积压就不睡」的实现。
+    _u = (ROOT / "kohya_core" / "utils.py").read_text(encoding="utf-8")
+    assert "def _drain_counted()" in _u, "缺少带计数的排空（无法判断是否有积压）"
+    assert "_last_drained" in _u and "if not _last_drained:" in _u, \
+        "主循环又变成每轮无条件 sleep —— 高频输出下吞吐会掉一半"
     print("RUN_STREAM_NO_PIPE_HANG_OK")
 
 
