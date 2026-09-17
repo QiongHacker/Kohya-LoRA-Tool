@@ -5008,6 +5008,17 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
         "--learning_rate", str(lr),
         "--max_train_epochs", str(epochs),
         "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        # ★ 2026-09-17 修：这里原来**漏了 --save_state** ✗ —— 第四引擎 Krea2 的「续训」因此
+        #   从存在起就一直是坏的 ✗：Fizgig 只在**带这个参数时**才写断点
+        #   （{output_name}-NNNNNN-state/ + training_state.json），否则只存 LoRA 权重。
+        #   用户实证（三角洲蝶妹）：跑满 6 个 epoch / 3 小时手动停止，工具报
+        #   「本次没有产生可续训的快照」✗ 并把原因归到「停在第一个存档点之前，
+        #   至少跑完第一个 epoch 再停」✗ —— 把机器的问题说成用户的操作问题 ✗，
+        #   用户照做重跑、又在 step 33 停掉 ✗。
+        #   同引擎的 FLUX.2 路径（见下面 train_flux2_* 的同一段）一直带着这三个参数 ✓，
+        #   Krea2 这条是复制时漏的 ✗。**已核对 Fizgig v5.0.0 的 krea2_train.py：
+        #   三个参数都受支持** ✓（不是猜的 —— 查了本地缓存的 v5.0.0 源码包）。
+        "--save_state", "--save_state_on_train_end", "--keep_last_n_states", "2",
         "--lr_scheduler", "cosine", "--lr_warmup_steps", "120",
         "--seed", "42",
     ] + quant_flags

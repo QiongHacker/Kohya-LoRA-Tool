@@ -926,6 +926,34 @@ def test_torch_import_hints_split_1114_vs_126(base: Path):
     assert core._torch_import_hints(None) == [], "None 应返回空"
     print("TORCH_IMPORT_HINTS_SPLIT_OK")
 
+def test_fizgig_krea2_saves_state(base: Path):
+    """第四引擎 Krea2 路径**必须**传 --save_state，否则断点永不产生、续训无从谈起。
+
+    2026-09-17 用户实证（三角洲蝶妹）：跑满 6 个 epoch / 3 小时手动停止，工具报
+    「本次没有产生可续训的快照」✗ 并归因「停在第一个存档点之前，至少跑完第一个
+    epoch 再停」✗ —— 真因是命令行**漏了 `--save_state`**：
+    Fizgig 只在带该参数时才写 `{output_name}-NNNNNN-state/training_state.json` ✗，
+    否则只存 LoRA 权重 → 无论跑多久都没有断点 ✗。
+    同引擎的 FLUX.2 路径一直带着 ✓，Krea2 这条是复制时漏的 ✗。
+    （已核对本地缓存的 Fizgig v5.0.0 源码：`krea2_train.py` 支持这三个参数 ✓）
+    """
+    k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+
+    def _cmd_of(anchor):
+        _i = k.index(anchor)
+        return k[_i:k.index("if resume_from:", _i)]      # 只看构建命令那段
+
+    _k2 = _cmd_of("def train_krea2_fizgig(")
+    assert '"--save_every_n_epochs"' in _k2, "Krea2(Fizgig) 没传保存间隔"
+    assert '"--save_state"' in _k2, \
+        "Krea2(Fizgig) 漏了 --save_state → 断点永不产生，续训形同不存在（本次用户报的问题）"
+    assert '"--keep_last_n_states"' in _k2, "缺 --keep_last_n_states：状态目录会无限堆积"
+    # 同引擎的参考路径（一直是对的）——用它当"该有什么"的标尺。
+    # 锚点选 FLUX.2 命令里独有的参数（用常量名当锚点会命中它的**定义**，切片会跨过整个文件 → 断言形同虚设 ✗）
+    _fz = _cmd_of('"--model_version", FLUX2FZ_MODEL_VERSION')
+    assert '"--save_state"' in _fz, "FLUX.2(Fizgig) 的 --save_state 丢了（回归）"
+    print("FIZGIG_KREA2_SAVE_STATE_OK")
+
 def test_fizgig_skip_reason_logged(base: Path):
     """第四引擎「徽章显示就绪、点安装却整段重装」时必须说明原因（而不是静默继续）。
 
@@ -3487,6 +3515,7 @@ def main():
         test_official_source_option(base)
         test_optimizer_resolution(base)
         test_preprocess_deps(base)
+        test_fizgig_krea2_saves_state(base)
         test_torch_import_hints_split_1114_vs_126(base)
         test_fizgig_skip_reason_logged(base)
         test_preinstall_torch_mirror_fallback(base)
