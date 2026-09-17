@@ -33,9 +33,10 @@ import json
 import os
 import re
 import shutil
-import sys
-import traceback
 import subprocess
+import sys
+import time
+import traceback
 
 # 全局隐藏子进程窗口：GUI 宿主无控制台，直接 subprocess 会弹黑色 cmd 窗口，
 # 这里统一加 CREATE_NO_WINDOW（0x08000000），WD14 打标等子进程全部后台静默运行。
@@ -200,7 +201,14 @@ def download_wd14_model(key=None, logf=print):
             logf("[WD14]   ② 或手动下载该文件放到：%s" % tgt)
             return None
     logf("[WD14] 打标模型已就绪：%s" % dst)
-    return dst
+    # ⚠️ 必须返回**根目录**（`%APPDATA%\...\wd14_tagger_model`），不是上面这个模型目录 ✗
+    # 2026-09-17 真机实测抓到：本函数原先 `return dst`（模型目录），而 `_wd14_ready_dir()`
+    # 返回的是根目录，两者不一致 ✗ → 调用方再拼一次 `repo 目录名` 就变成嵌套两层
+    # （`...\SmilingWolf_wd-swinv2-tagger-v3\SmilingWolf_wd-swinv2-tagger-v3\`）✗ →
+    # 内置打标照样「找不到 model.onnx」，官方脚本的 `--model_dir` 也是错的 ✗。
+    # 这个 bug 此前**一直没暴露**，正是因为 `_http_download` 缺 import time、下载从未成功过 ✓
+    # —— "修好下载"之后它立刻就会发作，所以必须一起修 ✓
+    return _wd14_cache_root()
 
 
 def _wd14_cache_root():
@@ -757,38 +765,99 @@ def _system_proxy():
     return None
 
 
-def _wd14_model_dir(key=None):
-    """查找打标模型目录，返回 (目录, 是否已就绪)。
+def _wd14_model_roots():
+    """两个模型根目录（同一个模型可能躺在任一处）：
 
-    顺位：
-      ① **程序目录** `wd14_tagger_model/` —— 兼容**已装的老版本**（老安装包里内置过模型 ✓）；
-        新安装包不再内置（安装包 488MB → 约 200MB，见文件头注释）。
+      ① **程序目录** `wd14_tagger_model/` —— 兼容**已装的老版本**（老安装包里内置过模型 ✓，
+         自 2026-08-15 起随包分发；新安装包不再内置，见 release.py 注释）；
       ② `%APPDATA%\\KohyaLoraTool\\wd14_tagger_model\\` —— **首次使用时下载到这里** ✓
 
-    就绪 = 该目录下已有**对应模型**的 `model.onnx`。
+    顺序即优先级：程序目录里的先命中。
+    """
+    kit = os.path.dirname(os.path.abspath(__file__))
+    return [os.path.join(kit, "wd14_tagger_model"), _wd14_cache_root()]
+
+
+def _wd14_ready_dir(key):
+    """找**指定模型**，返回 (根目录, 是否就绪)。就绪 = 该根下已有`对应模型`的 model.onnx。
+
     注意两个模型的目录名不同（`SmilingWolf_wd-swinv2-tagger-v3` / `…moat-tagger-v2`），
     所以它们**天然共存**、互不覆盖 ✓
     """
     _, repo = resolve_wd14_model(key)
     _r = _wd14_repo_dirname(repo)
-    kit = os.path.dirname(os.path.abspath(__file__))
-    candidates = [os.path.join(kit, "wd14_tagger_model"), _wd14_cache_root()]
-    for d in candidates:
+    roots = _wd14_model_roots()
+    for d in roots:
         if os.path.isfile(os.path.join(d, _r, "model.onnx")):
             return d, True
-    return candidates[-1], False
+    return roots[-1], False
+
+
+def _wd14_model_dir(key=None):
+    """（兼容入口）查找**指定模型**目录，返回 (目录, 是否就绪)。见 `_wd14_ready_dir`。"""
+    return _wd14_ready_dir(key)
+
+
+def lookup_wd14_model(key=None):
+    """**只看机器上已就绪的**模型（不下载、不联网），返回 (key, repo, 根目录或 None)。
+
+    优先用指定的模型；指定模型不在时，**退而用机器上已有的另一个模型** ✓
+
+    ⚠️ 为什么必须回退（2026-09-17 事故，用户 RTX 2060 实测）：
+      老安装包内置的是 `moat-v2`，而 v0.17.0 把默认模型换成了 `swinv2-v3` ——
+      两者目录名不同，于是**老用户本地明明有一份能用的模型，`_wd14_model_dir` 也从不看它** ✗，
+      直接判定「未下载」→ 触发下载 → 当时下载代码有个 `import time` 缺失的 bug → 失败 →
+      **一路掉到兜底 caption（只剩 `1girl, solo`），训练效果白瞎** ✗✓
+      本地有模型却不用，是纯粹的浪费 ✓
+    """
+    k0, _ = resolve_wd14_model(key)
+    d, ready = _wd14_ready_dir(k0)
+    if ready:
+        return k0, WD14_MODELS[k0], d
+    for k in WD14_MODELS:                       # 字典顺序即优先级（新的在前）
+        if k == k0:
+            continue
+        d, ready = _wd14_ready_dir(k)
+        if ready:
+            return k, WD14_MODELS[k], d
+    return k0, WD14_MODELS[k0], None
+
+
+def pick_wd14_model(key=None, logf=print):
+    """选定**本次实际使用**的打标模型，返回 (key, repo, 根目录或 None)。
+
+    顺序：
+      ① 指定模型已就绪 → 直接用 ✓
+      ② 指定模型没有、但机器上有别的 → **仍先尝试下载指定模型** ✓
+         （默认模型标签库更新、效果更好，能下就下 ✓）
+      ③ 下载失败 → **回退用机器上已有的那个** ✓（标签库旧一些，但远好于兜底 caption）
+      ④ 一个都没有 → None（调用方走兜底 caption）
+    """
+    k0, repo0 = resolve_wd14_model(key)
+    k, repo, d = lookup_wd14_model(k0)
+    if d and k == k0:
+        return k, repo, d
+    if d:
+        logf("[WD14] 未找到 %s，先尝试下载…" % WD14_MODEL_LABELS.get(k0, k0))
+    got = download_wd14_model(k0, logf)
+    if got:
+        return k0, repo0, got
+    if d:
+        logf("[WD14] ⚠ 指定模型（%s）下载失败，**改用机器上已有的「%s」打标** ——"
+             % (WD14_MODEL_LABELS.get(k0, k0), WD14_MODEL_LABELS.get(k, k)))
+        logf("[WD14]   标签库比新版旧一些，但**远好于兜底 caption**（那种只有 1girl, solo）✓")
+        logf("[WD14]   想用新模型：联网后重跑一次即可自动补下 ✓")
+        return k, repo, d
+    return k0, repo0, None
 
 
 def ensure_wd14_model(key=None, logf=print):
-    """确保打标模型就绪：已有 → 返回模型目录；没有 → **下载**（魔搭优先）；失败返回 None。
+    """（兼容入口）确保打标模型就绪，返回模型根目录；失败返回 None。内部走 `pick_wd14_model`。
 
-    两条打标路径（kohya 官方脚本 / 内置 onnx）**都在开头调用它** ——
-    这样「首次使用下载」只有一处逻辑，且两条路径都能自动拿到模型 ✓
+    两条打标路径（kohya 官方脚本 / 内置 onnx）都用它 ——
+    这样「首次使用下载 / 回退」只有一处逻辑，且两条路径行为一致 ✓
     """
-    _dir, ready = _wd14_model_dir(key)
-    if ready:
-        return _dir
-    return download_wd14_model(key, logf)
+    return pick_wd14_model(key, logf)[2]
 
 
 def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.35,
@@ -830,11 +899,12 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
     # 隔离损坏图片：避免一张坏图导致整批打标中断
     _quarantine_corrupt_images(output_dir, logf)
     # ★ 首次使用时下载模型（魔搭优先 → hf-mirror 兜底）；已下好则秒回，不重复下载 ✓
-    model_dir = ensure_wd14_model(model_key, logf)
+    # 注意 `_key/_repo` **必须取 pick 的返回值**：指定模型缺失时会回退到机器上已有的另一个
+    # 模型，若这里仍用 resolve_wd14_model(model_key) 拿 repo，就会与 model_dir 对不上 ✗
+    _key, _repo, model_dir = pick_wd14_model(model_key, logf)
     if not model_dir:
         logf("[WD14] 打标模型不可用，官方脚本跳过（会走内置打标或兜底 caption）")
         return False
-    _key, _repo = resolve_wd14_model(model_key)
     logf(f"[WD14] 使用官方打标脚本: {script}")
     logf(f"[WD14] 打标解释器: {py}")
     logf(f"[WD14] 打标模型: {WD14_MODEL_LABELS.get(_key, _key)}（{model_dir}）")
@@ -1026,9 +1096,15 @@ def _ensure_wd14_script_deps(py, logf=print):
 
 
 def _wd14_onnx_files(key=None):
-    """定位 WD14 onnx 模型 + 标签表；缺任一返回 (None, None)。"""
-    _, repo = resolve_wd14_model(key)
-    model_dir, _ready = _wd14_model_dir(key)
+    """定位 WD14 onnx 模型 + 标签表；缺任一返回 (None, None)。
+
+    **只看已有、不下载**（要下载请先调 `pick_wd14_model`）；指定模型不在时同样会
+    回退到机器上已有的另一个模型 ✓ 所以 `repo` 必须取 `lookup_wd14_model` 的返回值，
+    否则会去拼一个不存在的目录名 ✗
+    """
+    _, repo, model_dir = lookup_wd14_model(key)
+    if not model_dir:
+        return None, None
     repo_dir = os.path.join(model_dir, _wd14_repo_dirname(repo))
     onnx_p = os.path.join(repo_dir, "model.onnx")
     csv_p = os.path.join(repo_dir, "selected_tags.csv")
@@ -1046,8 +1122,8 @@ def _run_wd14_onnx(output_dir, logf=print, threshold=0.35, model_key=None):
     """
     onnx_p, csv_p = _wd14_onnx_files(model_key)
     if not onnx_p:
-        # 首次使用：先确保模型就绪（与官方脚本路径共用同一个下载器，魔搭优先 ✓）
-        if ensure_wd14_model(model_key, logf):
+        # 首次使用：先确保模型就绪（与官方脚本路径共用同一个选择/下载器，魔搭优先 ✓）
+        if pick_wd14_model(model_key, logf)[2]:
             onnx_p, csv_p = _wd14_onnx_files(model_key)
     if not onnx_p:
         logf("[WD14] 内置打标：未找到 model.onnx/selected_tags.csv（模型未下载成功）")

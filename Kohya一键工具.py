@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.0"
+APP_VERSION = "0.17.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -9493,7 +9493,12 @@ def _usage_sample_caption(mode, params, train_dir=None):
         if d and os.path.isdir(d):
             for fn in sorted(os.listdir(d)):
                 if fn.lower().endswith(".txt"):
-                    c = io.open(os.path.join(d, fn), encoding="utf-8-sig").read().strip()
+                    # ⚠️ 这里原来写的是 `io.open(...)`，但本文件**从未 `import io`** ✗ ——
+                    # 2026-09-17 全库审计发现（同一天 preprocess.py 也栽在同类问题上：
+                    # 用了 time.time() 却没 import time ✗）。它被下面那句
+                    # `except Exception: pass` 吞掉，所以**从来不报错、只是静默不生效** ✗
+                    # → 模板示例 caption 一直是空的 ✓ 用内置 open 即可（py3 支持 encoding）✓
+                    c = open(os.path.join(d, fn), encoding="utf-8-sig").read().strip()
                     if c:
                         return c
     except Exception:

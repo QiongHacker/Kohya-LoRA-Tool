@@ -1202,6 +1202,201 @@ def test_wd14_selector_visible():
     print("WD14_SELECTOR_VISIBLE_OK")
 
 
+def test_wd14_download_http_path():
+    """打标模型下载必须真的能下 —— 走**完整正常路径**（URL 正常 + 目录正常）。
+
+    ★ 2026-09-17 事故（用户 RTX 2060 实测日志 L81/L84/L146/L149 原文）：
+        [WD14] 下载异常：name 'time' is not defined
+      `preprocess.py` **没有 `import time`** ✗，而 `_http_download()` 里第一处
+      `time.time()` 在 `urlopen` **成功之后**才执行 ✗ →
+        · 我发布前测的两条"失败路径"（坏域名 / 不存在的目录）**都在那一行之前就挂了** ✗，
+          所以这个问题**完全没被暴露** ✓；
+        · 真实用户 URL 正常、目录正常 → 正好走到那一行 → NameError ✗✓
+          → 魔搭 / hf-mirror **两个源全废** → 模型永远下不来 →
+          打标静默降级成兜底 caption（只剩 `1girl, solo`），训练效果白瞎 ✗
+    ★ 同一次真机验证还抓到第二个 bug：`download_wd14_model()` 原本 `return dst`
+      （**模型目录**），而就绪路径返回的是**根目录** ✗ → 下载"成功"后调用方再拼一次
+      目录名就嵌套两层 ✗ → 内置打标照样找不到 model.onnx ✗
+      （此 bug 因下载从未成功过而一直潜伏 ✓ 修好下载才发作 ✓）
+
+    这里用**本机 HTTP 服务**跑完整下载路径（不依赖外网）：上面两条 bug 都会被抓到 ✓
+    """
+    import http.server
+    import shutil as _sh
+    import tempfile as _tf
+    import threading as _th
+    import preprocess as P      # noqa: E402
+
+    srv_dir = _tf.mkdtemp(prefix="wd14_srv_")
+    cache_dir = _tf.mkdtemp(prefix="wd14_cache_")
+    try:
+        # 按魔搭的路径结构（<base>/<repo 目录名>/<文件>）提供两个文件
+        _r = P._wd14_repo_dirname(P.WD14_MODELS[P.WD14_DEFAULT_MODEL])
+        os.makedirs(os.path.join(srv_dir, _r), exist_ok=True)
+        body = b"WD14FAKE" * 1400000                      # ≈10.7MB（必须 >10MB 才算"完整"）
+        with open(os.path.join(srv_dir, _r, "model.onnx"), "wb") as f:
+            f.write(body)
+        with open(os.path.join(srv_dir, _r, "selected_tags.csv"), "w", encoding="utf-8") as f:
+            # ⚠️ 必须 >1024 字节：download_wd14_model 对 csv 有**大小校验**
+            #    （`min_sz=1024` ✓ 挡掉"下到了但只有半截/是错误页"的情况 ✓）
+            f.write("tag_id,name,category,count\n")
+            f.write("".join("%d,tag_%d,0,0\n" % (i, i) for i in range(200)))
+
+        class _H(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def __init__(self, *a, **kw):
+                super().__init__(*a, directory=srv_dir, **kw)
+
+        class _Srv(http.server.ThreadingHTTPServer):
+            daemon_threads = True
+
+        srv = _Srv(("127.0.0.1", 0), _H)
+        port = srv.server_address[1]
+        _th.Thread(target=srv.serve_forever, daemon=True).start()
+
+        _ms, _hf, _root = P.WD14_MS_BASE, P.WD14_HF_BASE, P._wd14_cache_root
+        P.WD14_MS_BASE = "http://127.0.0.1:%d" % port
+        P.WD14_HF_BASE = "http://127.0.0.1:%d" % port
+        P._wd14_cache_root = lambda: cache_dir
+        try:
+            logs = []
+            _k, _repo, d = P.pick_wd14_model(P.WD14_DEFAULT_MODEL, logs.append)
+            assert d, "下载失败（完整正常路径都下不来）：%s" % " / ".join(logs)
+            # 返回的必须是**根目录**：与就绪路径同形，调用方要拿它拼 repo 目录名、
+            # 也要当 `--model_dir` 传给官方脚本 ✗ 返回模型目录会让这两处全错
+            assert d == cache_dir, "返回的不是根目录（调用方拼目录名会嵌套）：%s" % d
+            onnx_p, csv_p = P._wd14_onnx_files(P.WD14_DEFAULT_MODEL)
+            assert onnx_p and csv_p, "下载完成后仍定位不到模型：%s" % onnx_p
+            assert os.path.getsize(onnx_p) == len(body), "落盘内容不完整"
+            # 已就绪 → 秒回、不重复下载
+            logs2 = []
+            assert P.pick_wd14_model(P.WD14_DEFAULT_MODEL, logs2.append)[2] == cache_dir
+            assert not any("下载" in s for s in logs2), "已就绪却仍在下载"
+        finally:
+            P.WD14_MS_BASE, P.WD14_HF_BASE, P._wd14_cache_root = _ms, _hf, _root
+            srv.shutdown()
+    finally:
+        _sh.rmtree(srv_dir, ignore_errors=True)
+        _sh.rmtree(cache_dir, ignore_errors=True)
+    print("WD14_DOWNLOAD_HTTP_OK")
+
+
+def test_wd14_model_fallback():
+    """指定模型下不到、但机器上**已有另一个模型** → 必须回退用它，不能掉到兜底 caption。
+
+    ★ 2026-09-17 事故：老安装包（自 2026-08-15 起）**内置**的是 `moat-v2` ✓，
+      而 v0.17.0 把默认模型换成了 `swinv2-v3` ✗ —— 两者目录名不同，
+      于是**老用户本地明明有一份能用的模型，代码却从不看它** ✗（只找指定模型）→
+      直接判定「未下载」→ 触发下载 → 撞上缺 import time 的 bug → 失败 →
+      **一路掉到兜底 caption（只剩 `1girl, solo`）** ✗✓
+      本地有模型却不用，是纯粹的浪费 ✓
+
+    判据：① 指定模型已就绪 → 就用它（不因回退而改）；② 指定模型缺失 + 下载失败 →
+    必须回退到已就绪的那个，并明确说明 ✓
+    """
+    import shutil as _sh
+    import tempfile as _tf
+    import preprocess as P      # noqa: E402
+
+    tmp = _tf.mkdtemp(prefix="wd14_fb_")
+    _orig_roots, _orig_dl = P._wd14_model_roots, P.download_wd14_model
+    try:
+        _mr = os.path.join(tmp, P._wd14_repo_dirname(P.WD14_MODELS["moat-v2"]))
+        os.makedirs(_mr, exist_ok=True)
+        with open(os.path.join(_mr, "model.onnx"), "wb") as f:
+            f.write(b"0" * (11 * 1024 * 1024))
+        P._wd14_model_roots = lambda: [tmp]          # 隔离出确定的环境
+
+        def _has(root, k):
+            return bool(root) and os.path.isfile(
+                os.path.join(root, P._wd14_repo_dirname(P.WD14_MODELS[k]), "model.onnx"))
+
+        # ② 指定模型缺失 + 下载失败 → 回退，且**不能返回 None**（None = 用户吃兜底 caption ✗）
+        P.download_wd14_model = lambda k=None, logf=print: None
+        logs = []
+        k, repo, d = P.pick_wd14_model("swinv2-v3", logs.append)
+        assert k == "moat-v2" and _has(d, "moat-v2"), \
+            "没有回退到机器上已有的模型（得到 %s @ %s）" % (k, d)
+        assert any("改用机器上已有的" in s for s in logs), "回退时没有明确说明"
+        assert repo == P.WD14_MODELS["moat-v2"], "回退后 repo 仍是旧值 → 目录拼错"
+
+        # ① 指定模型已就绪时 → 必须仍用它，别被回退逻辑改掉
+        _sr = os.path.join(tmp, P._wd14_repo_dirname(P.WD14_MODELS["swinv2-v3"]))
+        os.makedirs(_sr, exist_ok=True)
+        with open(os.path.join(_sr, "model.onnx"), "wb") as f:
+            f.write(b"0" * (11 * 1024 * 1024))
+        k2, repo2, d2 = P.pick_wd14_model("swinv2-v3", lambda s: None)
+        assert k2 == "swinv2-v3" and _has(d2, "swinv2-v3"), "指定模型就绪时却没有用它"
+    finally:
+        P._wd14_model_roots, P.download_wd14_model = _orig_roots, _orig_dl
+        _sh.rmtree(tmp, ignore_errors=True)
+    print("WD14_MODEL_FALLBACK_OK")
+
+
+def test_no_unimported_stdlib_modules():
+    """所有发布脚本里**用到的标准库模块都必须真的导入**（静态审计，兜住整类问题）。
+
+    ★ 2026-09-17 一天之内两次同类事故：
+      · `preprocess.py` 用了 `time.time()` 却**没 `import time`** ✗
+        → 打标模型下载 100% 失败 → 静默降级成 `1girl, solo` 兜底标签 ✗✓
+      · `Kohya一键工具.py` 用了 `io.open()` 却**没 `import io`** ✗
+        → 被 `except Exception: pass` 吞掉 → 模板示例 caption **一直静默为空** ✗
+
+    这类错误只在**运行时、且只在那条具体分支上**才炸 ✗ —— 我发布前测的用例恰好都绕开了
+    出错那行 ✗，所以靠"多测几条路径"是防不住的 ✓ 用静态审计一次兜住到底 ✓
+    """
+    import ast as _ast
+
+    stdlib = set((
+        "os sys re json time shutil subprocess traceback argparse io math random "
+        "hashlib zipfile tempfile glob collections functools itertools urllib socket "
+        "struct io csv unicodedata ctypes platform threading queue datetime warnings "
+        "contextlib copy base64 html string textwrap uuid secrets statistics sqlite3 "
+        "logging signal shlex codecs pathlib typing dataclasses enum abc inspect ast "
+        "importlib textwrap getpass fnmatch difflib"
+    ).split())
+    # 随包发布的脚本 + 核心包（注意本文件里 ROOT 是 **str**，不是 Path ✗）
+    targets = [os.path.join(ROOT, _n) for _n in
+               ("preprocess.py", "video_caption.py", "model_downloader.py",
+                "Kohya一键工具.py", "kohya_gui.py")]
+    _core = os.path.join(ROOT, "kohya_core")
+    if os.path.isdir(_core):
+        targets += [os.path.join(_core, _f) for _f in sorted(os.listdir(_core))
+                    if _f.endswith(".py")]
+    bad = []
+    for p in targets:
+        if not os.path.isfile(p):
+            continue
+        with open(p, encoding="utf-8-sig") as _fh:
+            tree = _ast.parse(_fh.read())
+        bound = set()
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Name) and isinstance(n.ctx, _ast.Store):
+                bound.add(n.id)                       # 赋值 / for 目标 / with-as / 推导式
+            elif isinstance(n, _ast.arg):
+                bound.add(n.arg)                      # 函数参数
+            elif isinstance(n, (_ast.FunctionDef, _ast.ClassDef)):
+                bound.add(n.name)
+            elif isinstance(n, _ast.Import):
+                for a in n.names:
+                    bound.add(a.asname or a.name.split(".")[0])
+            elif isinstance(n, _ast.ImportFrom):
+                for a in n.names:
+                    bound.add(a.asname or a.name)
+            elif isinstance(n, _ast.ExceptHandler) and n.name:
+                bound.add(n.name)
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Attribute) and isinstance(n.value, _ast.Name):
+                nm = n.value.id
+                if nm in stdlib and nm not in bound:
+                    bad.append("%s L%d: 用了 %s.… 但没有导入 %s"
+                               % (os.path.basename(p), n.lineno, nm, nm))
+    assert not bad, "发现「用了却没导入」的标准库模块：\n    " + "\n    ".join(sorted(set(bad)))
+    print("NO_UNIMPORTED_STDLIB_MODULES_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -1223,6 +1418,9 @@ def main():
     check("WD14 打标模型可选 + 缺失静默回默认", test_wd14_model_selectable)
     check("任务进行中关闭窗口必须先确认", test_close_confirm_while_running)
     check("打标模型选择必须可见（不在折叠区）", test_wd14_selector_visible)
+    check("打标模型能真的下载（完整正常路径）", test_wd14_download_http_path)
+    check("打标模型缺失时回退到已有模型", test_wd14_model_fallback)
+    check("无「用了却没导入」的标准库模块", test_no_unimported_stdlib_modules)
     check("标签撤销可连退多步", test_label_undo_stack)
     check("Python 环境来源校验 + 徽章如实显示", test_python_env_source_guard)
     check("训练 native 崩溃诊断", test_native_crash_diagnosis)
