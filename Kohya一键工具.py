@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.2"
+APP_VERSION = "0.17.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4815,37 +4815,48 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
     """Fizgig Krea2 量化档 + blocks_to_swap（Fizgig 官方 VRAM 表；AMD ROCm 另有实测）。
 
     NF4 4bit（--quantize_4bit）冻结底模 ~5.6GB，10-12G 卡主路径，强制关闭块交换；
-    INT8 W8A8（--quant_int8 bf16）；官方：16G+ 可跑（配合块交换），显存常驻需 ~18G；默认动态 fp8 + blocks_to_swap。
+    INT8 W8A8（--quant_int8 bf16）；官方：16G+ 可跑（**必须配合块交换**），显存常驻需 ~18G；
+    默认动态 fp8 + blocks_to_swap。
     AMD ROCm（backend="amd-rocm"）：块交换 H2D 搬运在 ROCm 上无官方加速、动态 fp8 也慢，
     7900 XT 用户实测 auto（fp8+块交换）很慢，int8 + blocks_to_swap=0 最快 → AMD ≥18G 的 auto 档直接给 int8+0。
     返回 (quant_flags, swap, detail)。
     """
     q = str(requested or "auto").strip().lower()
+    tier = round(vram_gb) if vram_gb is not None else None
+
+    # 显存 → 块交换：**所有量化方式共用这一处** ✓（以前是散在三处的重复映射 ✗）
+    # ⚠️ 2026-09-18 修：以前「手动选 int8」那条分支把 swap **写死为 0** ✗（文案还写着"最快" ✗），
+    #    但 int8 要 ~18G 常驻 —— 16G 卡（5060 Ti / 5070 Ti / 4080）**装不下** ✗ →
+    #    溢出到系统内存 / 页面文件 → 一位 5060 Ti 用户的日志显示步速**逐 epoch 单调恶化**：
+    #    epoch1 末 3.80s/it ✓ → epoch6 末 13.86s/it ✗（4 倍，且每轮起点都比上轮终点更慢 ✗）；
+    #    而同一张卡的实测基准（int8 + swap12 + pinned）是 **2.5s/it** ✓✓
+    #    → 也就是说：**只要用户手动把量化选成 int8，就会越训越慢，而且找不到原因** ✗✓
+    #    现在统一按显存配块交换 ✓；**auto 档的取值与行为完全不变** ✓（保持向后一致 ✓）
+    swap_for_vram = 0 if (tier is None or tier >= 32) else (
+        12 if tier >= 24 else (20 if tier >= 16 else 26))
+
     if q in ("nf4", "4bit", "4-bit", "4"):
         return (["--quantize_4bit"], 0, "NF4 4bit（冻结底模 ~5.6GB，12G 以下推荐）")
     if q in ("int8",):
-        return (["--quant_int8", "bf16"], 0, "INT8 W8A8（~18G 显存常驻，最快）")
+        # 手动选 int8：**尊重选择** ✓，但块交换按显存给 ✓（不再写死 0 ✗）
+        if tier is not None and tier < 10:
+            return (["--quantize_4bit"], 0,
+                    "NF4 4bit（你选了 int8，但显存 <10G 装不下它的 ~18G 常驻，已自动改用）")
+        return (["--quant_int8", "bf16"], swap_for_vram,
+                "INT8 W8A8 + blocks_to_swap=%d（你指定的 int8；块交换按显存自动配）"
+                % swap_for_vram)
     if q in ("fp8", "fp8_scaled"):
         # ★ 显式选 fp8 仍然尊重（老项目存档里可能就存着 fp8，不该被静默改掉 ✗），
         #   但必须把实测代价说清楚：K2 的 fp8 没用上 scaled_mm、每步反量化回 bf16，
         #   实测 512px 下 16G 卡 50~100s/步、4090 24G 7s/步 —— 而 int8 分别是 2.2 / 1 s/步。
-        _t8 = round(vram_gb) if vram_gb is not None else None
-        _sw8 = 0 if (_t8 is None or _t8 >= 32) else (12 if _t8 >= 24 else (20 if _t8 >= 16 else 26))
-        return ([], _sw8, "动态 fp8（你指定的）⚠ 实测 K2 上比 int8 慢 7~45 倍"
-                           "（512px：16G 卡 50~100s/步 vs int8 2.2s/步），建议把「量化」改回「自动」")
-    tier = round(vram_gb) if vram_gb is not None else None
+        return ([], swap_for_vram,
+                "动态 fp8（你指定的）⚠ 实测 K2 上比 int8 慢 7~45 倍"
+                "（512px：16G 卡 50~100s/步 vs int8 2.2s/步），建议把「量化」改回「自动」")
     if backend == "amd-rocm" and tier is not None and tier >= 18:
         # 7900 XT（20G）实测：auto 默认的 fp8+块交换在 ROCm 上很慢；int8 常驻 + 关块交换最快
+        # （≥18G 装得下 18G 常驻 ✓ 有实测依据，这里**保持 0** ✓ 不动）
         return (["--quant_int8", "bf16"], 0, "INT8 W8A8 + blocks_to_swap=0（AMD ROCm ≥18G auto：7900 XT 实测最快）")
-    if tier is None or tier >= 32:
-        swap = 0
-    elif tier >= 24:
-        swap = 12
-    elif tier >= 16:
-        swap = 20
-    elif tier >= 10:
-        swap = 26
-    else:
+    if tier is not None and tier < 10:
         return (["--quantize_4bit"], 0, "NF4 4bit（<10G 自动切换）")
     # ★ 2026-09-17 改：auto 档从「动态 fp8 + blocks_to_swap=N」改成 **int8**。
     # 实测（用户汇总，512px）：16G 卡 fp8 50~100s/步 ✗ → int8 2.2s/步 ✓（25~45×）；
@@ -4855,9 +4866,9 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
     #   16G 档本来就靠块交换才跑得起来，改成 0 会直接 OOM；而且"int8+swap0 在 16G 可行"
     #   我们**没有**实测证据（代码注释里 5070 Ti 的 2.5s/it 是 int8+**swap12**+pinned）。
     #   （这一条最初写错过、被 engine 套件的 train-pipeline 用例拦下 ✗ —— 测试挡住了真回归 ✓）
-    return (["--quant_int8", "bf16"], swap,
+    return (["--quant_int8", "bf16"], swap_for_vram,
             "INT8 W8A8 + blocks_to_swap=%d（自动档；实测 512px 下 4090 = 1s/步、"
-            "16G 卡 = 2.2s/步，fp8 慢 7~45×）" % swap)
+            "16G 卡 = 2.2s/步，fp8 慢 7~45×）" % swap_for_vram)
 
 
 def _fizgig_preview_swap(vram_gb):
@@ -5508,6 +5519,18 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
     lr = float(params.get("unet_lr", 2e-4))
     steps = int(params.get("video_steps", H3_DEFAULT_STEPS))
     steps = max(100, min(H3_MAX_STEPS, steps))
+    # 「模型保存间隔」/「采样预览间隔」接上界面参数（2026-09-18）
+    # 这两项以前在这个 yaml 里是**硬编码** 200 / 250 ✗，而它们在**全部 11 个模式**都显示 ✓
+    # → 用户填了完全没反应 ✗（2026-09-18 实测生成的文件确认 ✓）
+    # ⚠️ 风险控制：**只有用户显式填了才覆盖** ✓ 留空 / 0 一律保持原来的 200 / 250 ✓
+    #    （默认行为完全不变 ✓ —— 这是这次改动唯一有"行为变化"风险的地方 ✓）
+    _save_every = str(params.get("save_every") or "").strip()
+    _save_every = int(_save_every) if (_save_every.isdigit() and int(_save_every) > 0) else 200
+    try:
+        _sample_iv = int(params.get("sample_interval") or 0)
+    except Exception:
+        _sample_iv = 0
+    _sample_every = _sample_iv if _sample_iv > 0 else 250
     # 帧数 / 分辨率必须吸附到 H3 的硬约束网格（理由见 H3_FRAME_STEP / H3_ALIGN 的常量注释）：
     # 此前 resolution 与 sample 宽高是写死的 1280/720，video_frames 又从未被界面写入，
     # 于是用户改了这两项都不生效；而手改 yaml 会被本函数下次生成时覆盖（2026-09-15 用户反馈）。
@@ -5580,7 +5603,7 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        linear_alpha: " + str(alpha) + "\n"
         "      save:\n"
         "        dtype: float16\n"
-        "        save_every: 200\n"
+        "        save_every: " + str(_save_every) + "\n"
         "        max_step_saves_to_keep: 5\n"
         "      datasets:\n"
         "        - folder_path: " + _yq(video_dir) + "\n"
@@ -5611,7 +5634,7 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        quantize: false\n"
         "      sample:\n"
         "        sampler: \"flowmatch\"\n"
-        "        sample_every: 250\n"
+        "        sample_every: " + str(_sample_every) + "\n"
         "        width: " + str(reso) + "\n"
         "        height: " + str(sample_h) + "\n"
         "        num_frames: " + str(frames) + "\n"
@@ -5933,6 +5956,16 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     alpha = int(params.get("alpha", 16))
     lr = float(params.get("unet_lr", 1e-4))
     steps = max(100, min(6000, int(params.get("video_steps", 2000))))
+    # 「模型保存间隔」/「采样预览间隔」接上界面参数（2026-09-18）—— 原因与口径同视频 H3：
+    # 这两项以前在 yaml 里是**硬编码** 200 / 250 ✗ 而界面在全部模式都显示它们 ✓
+    # ⚠️ **只有用户显式填了才覆盖** ✓ 留空 / 0 一律保持 200 / 250 ✓（默认行为不变 ✓）
+    _save_every = str(params.get("save_every") or "").strip()
+    _save_every = int(_save_every) if (_save_every.isdigit() and int(_save_every) > 0) else 200
+    try:
+        _sample_iv = int(params.get("sample_interval") or 0)
+    except Exception:
+        _sample_iv = 0
+    _sample_every = _sample_iv if _sample_iv > 0 else 250
     trig = params.get("trigger") or ""
     reso = int(params.get("resolution", 1024))
     # ⚡ 8G 快跑档（Z-Image 第三引擎，2026-09-06）：分辨率钳到 512 + 关采样 + 量化 TE + 官方 weighted 时间步
@@ -5998,7 +6031,7 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         "        linear_alpha: " + str(alpha) + "\n"
         "      save:\n"
         "        dtype: float16\n"
-        "        save_every: 200\n"
+        "        save_every: " + str(_save_every) + "\n"
         "        max_step_saves_to_keep: 5\n"
         "      datasets:\n"
         "        - folder_path: " + _yq(train_dir) + "\n"
@@ -6031,7 +6064,7 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         + _at8g_model_yaml
         + "      sample:\n"
         "        sampler: \"flowmatch\"\n"
-        "        sample_every: 250\n"
+        "        sample_every: " + str(_sample_every) + "\n"
         "        width: " + str(reso) + "\n"
         "        height: " + str(reso) + "\n"
         "        num_frames: 1\n"

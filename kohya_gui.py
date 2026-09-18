@@ -2854,6 +2854,25 @@ class App:
             pass
         return self.mode
 
+    def _param_now(self, key, default):
+        """界面输入框里的值 → int（空/非法 → default）✓"""
+        try:
+            return int(float(str(self.param_vars[key].get() or "").strip() or default))
+        except Exception:
+            return int(default)
+
+    def _video_steps_effective(self):
+        """界面里的「训练步数」→ **实际会用于训练的值**（口径与 yaml 写入保持**一致** ✓）。
+
+        2026-09-18：摘要行原来读的是 `pre.get('video_steps')`（**预设值** ✗）——
+        用户把输入框改成 1234，摘要仍写 2000 ✗ → 看起来"这个选项不生效" ✗✓
+        （实测复现 ✓）所以这里改成读界面值，并按写入 yaml 的同款夹取口径显示 ✓
+        """
+        v = self._param_now("video_steps", 2000)
+        if self.mode == "video":
+            return max(100, min(core.H3_MAX_STEPS, v))
+        return max(100, min(6000, v))
+
     def _refresh_preset_summary(self):
         try:
             pre = core.preset_for(self.mode, self.base_type)
@@ -2863,11 +2882,23 @@ class App:
             _sv = self.style_var.get()
             stag = f" · 风格 {_sv}" if _sv != "自定义" else ""
             te = "仅UNet" if self.unet_only_var.get() else "UNet+文本编码器"
+            # 训练步数：显示**界面里实际会用的值**（不是预设值 ✗ 见 _video_steps_effective 说明）
+            _st = self._video_steps_effective()
+            _note = "（按上限夹取）" if _st != self._param_now("video_steps", 2000) else ""
             if self.mode == "video":
                 self.preset_summary.configure(
                     text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
                          f"学习率 {lr} · 训练分辨率 {pre.get('resolution')}px · "
-                         f"训练步数 {pre.get('video_steps')} · 帧数 {pre.get('video_frames')} · 视频 24fps{stag}")
+                         f"训练步数 {_st}{_note} · "
+                         f"帧数 {self._param_now('video_frames', core.H3_FRAMES)} · 视频 24fps{stag}")
+            elif self.mode in ("qwen_image", "zimage"):
+                # Qwen / Z-Image 也是**按步**训练 ✓ 而摘要以前只列 repeats/最大epoch ✗ ——
+                # 可那两个选项在这两个模式里恰恰是**隐藏**的 ✗ → 用户根本看不到自己设的步数 ✗
+                # （2026-09-18 补：改列训练步数，与它们真实的训练方式一致 ✓）
+                self.preset_summary.configure(
+                    text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
+                         f"学习率 {lr} · 训练分辨率 {pre.get('resolution')}px · "
+                         f"训练步数 {_st}{_note} · {te}{stag}")
             else:
                 self.preset_summary.configure(
                     text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
@@ -2982,6 +3013,13 @@ class App:
             if not self._applying_preset and key not in self._manual_override:
                 self._manual_override.add(key)
                 self._refresh_override_bar()
+            # 摘要行必须跟着**界面值**走：否则用户改了「训练步数」，那行还写着旧值 ✗ →
+            # 看起来"这个选项不生效" ✗✓（2026-09-18 实测复现：改 1234 摘要仍 2000 ✗）
+            if not self._applying_preset:
+                try:
+                    self._refresh_preset_summary()
+                except Exception:
+                    pass
             self._schedule_autosave()
         try:
             var.trace_add("write", _on_write)
@@ -3484,6 +3522,33 @@ class App:
                         _f.grid()
                     else:
                         _f.grid_remove()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # 量化 / 块交换 / torch.compile：按模式显隐（2026-09-18 新增）
+        #   量化、块交换：只有真用它们的 **Krea2×3 / FLUX.2×2** 显示 ✓
+        #   torch.compile：再加 **画风/人物/概念**（SD/SDXL ✓）；
+        #     视频 / Qwen / Z-Image 的配置里根本没有这一项 ✗ 所以不显示 ✓
+        # ⚠️ 只改"看不看得见" ✗ —— 不清空、不改变任何取值 ✓（项目里存的值照旧 ✓）
+        #   pack 用 `before=global_frame` 固定落点，避免反复重排把「附加全局提示词」顶上去 ✗
+        try:
+            _rows = getattr(self, "_adv_rows", None) or {}
+            _k2f2 = self.mode in ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz")
+            _compile_ok = _k2f2 or self.mode in ("style", "character", "concept")
+            _anchor = getattr(self, "global_frame", None)
+            for _name, _show in (("quant", _k2f2), ("swap", _k2f2), ("compile", _compile_ok)):
+                _r = _rows.get(_name)
+                if _r is None:
+                    continue
+                try:
+                    if _show:
+                        if _anchor is not None and _anchor.winfo_manager() == "pack":
+                            _r.pack(anchor="w", pady=(6, 0), before=_anchor)
+                        else:
+                            _r.pack(anchor="w", pady=(6, 0))
+                    else:
+                        _r.pack_forget()
                 except Exception:
                     pass
         except Exception:
@@ -4873,7 +4938,8 @@ class App:
         _se = ctk.CTkEntry(sf, width=80, height=28, justify="center", textvariable=_sv,
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _se.pack(side="left", padx=(10, 8))
-        ctk.CTkLabel(sf, text="（画风/人物=每 N 步，Krea2/FLUX.2=每 N 轮；留空=默认 200 步 / 1 轮）",
+        ctk.CTkLabel(sf, text="（画风/人物=每 N 步，Krea2/FLUX.2=每 N 轮，视频/Qwen/Z-Image=每 N 步；"
+                              "留空=默认 200 步 / 1 轮）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self._adv_entries["save_every"] = _se
         self._adv_frames["save_every"] = sf
@@ -4886,7 +4952,8 @@ class App:
         _ie = ctk.CTkEntry(sf2, width=80, height=28, justify="center", textvariable=_iv,
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _ie.pack(side="left", padx=(10, 8))
-        ctk.CTkLabel(sf2, text="（0/留空=跟随保存快照；填 N=固定每 N 步出预览；kohya/Krea2/FLUX.2 生效）",
+        ctk.CTkLabel(sf2, text="（0/留空=默认：画风/人物/Krea2/FLUX.2 跟随保存快照，视频/Qwen/Z-Image 每 250 步；"
+                               "填 N=每 N 步出预览）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self._adv_entries["sample_interval"] = _ie
         self._adv_frames["sample_interval"] = sf2
@@ -4951,6 +5018,11 @@ class App:
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         cc = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cc.pack(anchor="w", pady=(4, 0))
         self.compile_row = cc
+        # 量化 / 块交换 / torch.compile 这三行只在**真正生效的模式**显示（见 _update_mode_ui）：
+        # 它们以前直接 pack 进 adv_body、**全代码没有任何隐藏逻辑** ✗ →
+        # 画风/人物/视频/Qwen/Z-Image 都会看到「量化方式（Krea2/FLUX.2）」这类与自己无关的项 ✗
+        # （2026-09-18 实测 11 个模式确认 ✓）
+        self._adv_rows = {"quant": qw, "swap": bw, "compile": cc}
         self.compile_var = tk.BooleanVar(value=False)
         try:
             self.compile_var.trace_add("write", lambda *a: self._schedule_autosave())

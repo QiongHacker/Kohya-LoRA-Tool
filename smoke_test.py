@@ -1464,6 +1464,194 @@ def test_env_locations_ui():
     print("ENV_LOCATIONS_UI_OK")
 
 
+def test_fizgig_quant_swap_vram_table():
+    """Krea2 量化档 + 块交换：**任何量化方式都必须按显存配块交换**。
+
+    ★ 2026-09-18 事故（用户 5060 Ti 16G 实测日志，v0.17.2）：
+      「手动选 int8」那条分支把 `swap` **写死为 0** ✗（文案还写着"~18G 显存常驻，最快" ✗），
+      而 16G 卡**装不下** int8 的 ~18G 常驻 ✗ → 溢出到系统内存 / 页面文件 →
+      日志里的步速**逐 epoch 单调恶化**：
+        epoch1 末 3.80s/it ✓ → epoch2 末 7.07 → epoch3 9.46 → epoch4 11.37 → epoch5 12.73
+        → epoch6 末 13.86s/it ✗（4 倍），**且每轮起点都比上轮终点更慢** ✗
+      而同一张卡的实测基准（int8 + swap12 + pinned）= **2.5s/it** ✓✓
+      —— 用户只会以为"这卡就这水平" ✗，完全看不出是配置被写死造成的 ✗
+
+    这里锁两件事：
+      ① 手动 int8 / fp8 在**任何显存**下都要配块交换（<10G 只能 NF4 除外 ✓）
+      ② **auto 档取值表逐项不变** ✓ —— 改这里绝不能顺手动到 auto ✗（它才是绝大多数用户的路径 ✓）
+    """
+    import Kohya一键工具 as core      # noqa: E402
+
+    # ② auto 的历史取值表（锁死，改这里必须是**有实测依据**的改动 ✓）
+    #    值 = (块交换, 是否 int8)
+    _AUTO = {None: (0, True), 8: (0, False), 10: (26, True), 15.67: (20, True),
+             16: (20, True), 20: (20, True), 23.5: (12, True), 24: (12, True),
+             32: (0, True), 48: (0, True)}
+    for v, (sw, is_int8) in _AUTO.items():
+        f, s, d = core._fizgig_quant_swap(v, "auto", backend="nvidia")
+        assert s == sw, "auto 档在 %sG 下的块交换变了：%s（应为 %s）" % (v, s, sw)
+        assert ("--quant_int8" in f) == is_int8, "auto 档在 %sG 下的量化变了：%s" % (v, f)
+        assert d, "auto 档没有给出说明文案"
+
+    # ① 手动选择的量化也必须配块交换
+    for v in (10, 16, 24, 32):
+        for q in ("int8", "fp8"):
+            f, s, d = core._fizgig_quant_swap(v, q, backend="nvidia")
+            if v >= 32:
+                assert s == 0, "%sG + %s：显存足够大，应当不交换（得到 %s）" % (v, q, s)
+            else:
+                assert s > 0, ("%sG + %s：块交换为 0 ✗ —— 显存装不下常驻模型，"
+                               "会溢出到内存/页面文件、越训越慢 ✗（2026-09-18 的 bug）" % (v, q))
+        assert core._fizgig_quant_swap(v, "int8", "nvidia")[:2] == \
+               core._fizgig_quant_swap(v, "auto", "nvidia")[:2], \
+               "%sG：手动 int8 与自动档结果不一致（指定 int8 不该引入劣化 ✗）" % v
+
+    # <10G：int8 装不下 → 必须自动改用 NF4，而不是给个跑不动的组合 ✗
+    f, s, d = core._fizgig_quant_swap(8, "int8", backend="nvidia")
+    assert "--quantize_4bit" in f and s == 0 and d, "小显存手动 int8 没自动改用 NF4"
+
+    # AMD ROCm ≥18G 的实测档位（int8 + 0）必须保留 ✓ —— 它有 7900 XT 实测依据 ✓
+    f, s, d = core._fizgig_quant_swap(20, "auto", backend="amd-rocm")
+    assert "--quant_int8" in f and s == 0, "AMD ROCm ≥18G 的实测档位被改掉了：%s %s" % (f, s)
+    print("FIZGIG_QUANT_SWAP_VRAM_OK")
+
+
+def test_adv_rows_mode_gating():
+    """高级参数里「量化 / 块交换 / torch.compile」必须**按模式显隐**。
+
+    ★ 2026-09-18 用户反馈：「高级参数的选项会错误显示别的模式的选项」✗
+      实测确认：这三行是直接 pack 进 adv_body 的，**全代码没有任何隐藏逻辑** ✗ →
+      画风/人物/视频/Qwen/Z-Image 都会看到「量化方式（Krea2/FLUX.2）」这类与自己无关的项 ✗
+
+    判据（用真实控件断言，不写"看起来对"✗）：
+      · 量化 / 块交换：只在 **Krea2×3 / FLUX.2×2** 显示 ✓
+      · torch.compile：再加 **画风/人物/概念** ✓（不含 视频/Qwen/Z-Image ✗ —— 它们的配置里没这项）
+    """
+    import kohya_gui as G          # noqa: E402
+    import kohya_core.configs as C  # noqa: E402
+
+    _app = G.App()
+    try:
+        _app._build_main_cards()
+        if not _app.adv_body.winfo_children():
+            _app._build_adv_body()
+        _rows = getattr(_app, "_adv_rows", {})
+        assert _rows, "三行没有登记进 _adv_rows（无法按模式显隐）"
+        _K2F2 = ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz")
+
+        def _shown(name):
+            r = _rows.get(name)
+            return bool(r is not None and r.winfo_manager())
+
+        for m in C.MODE_KEYS:
+            _app.mode_combo.set(C.MODE_LABELS[m])
+            _app._on_mode_change()
+            _app.root.update_idletasks()
+            for name in ("quant", "swap"):
+                want = m in _K2F2
+                assert _shown(name) == want, \
+                    "%s（%s）：%s 可见性 = %s，应为 %s" % (C.MODE_LABELS[m], m, name, _shown(name), want)
+            want_c = (m in _K2F2) or (m in ("style", "character", "concept"))
+            assert _shown("compile") == want_c, \
+                "%s（%s）：compile 可见性 = %s，应为 %s" % (C.MODE_LABELS[m], m, _shown("compile"), want_c)
+        # 顺序不能被重排打乱 ⚠️：pack 会把控件移到末位 ✗ 所以显隐用 `before=global_frame` 固定落点 ✓
+        # 这里断言：量化 < 块交换 < compile < 附加全局提示词（否则界面顺序会跳 ✗）
+        _app.mode_combo.set(C.MODE_LABELS["krea2"])
+        _app._on_mode_change()
+        _app.root.update_idletasks()
+        kids = list(_app.adv_body.winfo_children())
+        idx = {n: kids.index(_rows[n]) for n in ("quant", "swap", "compile") if _rows.get(n) in kids}
+        assert len(idx) == 3, "三行没有全部挂回 adv_body：%s" % idx
+        assert idx["quant"] < idx["swap"] < idx["compile"], \
+            "三行顺序被打乱：%s" % idx
+        _gf = getattr(_app, "global_frame", None)
+        if _gf in kids:
+            assert idx["compile"] < kids.index(_gf), \
+                "compile 跑到「附加全局提示词」后面去了 ✗（重排副作用）"
+    finally:
+        try:
+            _app.root.destroy()
+        except Exception:
+            pass
+    print("ADV_ROWS_MODE_GATING_OK")
+
+
+def test_steps_summary_and_intervals():
+    """① 摘要行的「训练步数」必须跟随**界面输入框** ✗ 不是预设值；
+       ② 「模型保存间隔 / 采样预览间隔」必须真的写进 视频 / Qwen / Z-Image 的配置。
+
+    ★ 2026-09-18 用户反馈：「训练步数选项不生效」✗ 实测两件事：
+      · 摘要行读的是 `pre.get('video_steps')`（预设 2000 ✗）→ 用户改成 1234，那行仍写 2000 ✗
+        （看起来就是"没生效" ✗✓）
+      · 两个 yaml 里 `save_every: 200` / `sample_every: 250` 是**硬编码** ✗ 而它们在全部 11 个
+        模式都显示 ✓ → 填了完全没反应 ✗
+
+    判据：填了就生效 ✓、**留空时默认行为一点不变** ✓（200 / 250 ✓）
+    """
+    import shutil as _sh
+    import tempfile as _tf
+    import kohya_gui as G          # noqa: E402
+    import Kohya一键工具 as core    # noqa: E402
+
+    # ① 摘要行
+    _app = G.App()
+    try:
+        _app._build_main_cards()
+        if not _app.adv_body.winfo_children():
+            _app._build_adv_body()
+        for m, label in (("video", "视频"), ("qwen_image", "Qwen-Image"), ("zimage", "Z-Image")):
+            _app.mode_combo.set(core.MODE_LABELS[m])
+            _app._on_mode_change()
+            _app.root.update_idletasks()
+            _app.param_vars["video_steps"].set("1234")
+            _app._refresh_preset_summary()
+            _txt = _app.preset_summary.cget("text")
+            assert "1234" in _txt, "%s：摘要行没跟着输入框走 → %s" % (label, _txt)
+            assert "2000" not in _txt, "%s：摘要行还显示预设值 2000 ✗ → %s" % (label, _txt)
+    finally:
+        try:
+            _app.root.destroy()
+        except Exception:
+            pass
+
+    # ② 两个 yaml
+    td = _tf.mkdtemp(prefix="advfix_")
+    imgs = os.path.join(td, "imgs")
+    os.makedirs(imgs, exist_ok=True)
+    open(os.path.join(imgs, "a.txt"), "w", encoding="utf-8").write("x")
+    base = {"project": "p", "trigger": "t", "rank": 16, "alpha": 16, "unet_lr": 1e-4,
+            "te_lr": 1e-4, "repeats": 5, "max_epochs": 8, "resolution": 512,
+            "video_steps": 500, "video_frames": 22, "optimizer": "auto",
+            "sample_preview": False, "sample_prompt": "", "at_sub_mode": "character"}
+    try:
+        def _gen(params):
+            """生成两份配置，返回 (视频 yaml, AI 图像 yaml) 的文本。"""
+            p1 = os.path.join(td, "v.yaml")
+            core.write_h3_train_yaml(dict(params), imgs, os.path.join(td, "o"), p1,
+                                     logf=lambda s: None, vram_gb=24)
+            info = dict(core.AT_IMAGE_MODELS.get("zimage") or {})
+            info.update({"arch": "zimage", "label": "Z-Image", "model_id": "x/y",
+                         "resident_vram": 26})
+            p2 = os.path.join(td, "a.yaml")
+            core.write_at_image_yaml(dict(params), info, imgs, os.path.join(td, "o"), p2,
+                                     logf=lambda s: None, vram_gb=24)
+            return (open(p1, encoding="utf-8").read(), open(p2, encoding="utf-8").read())
+
+        # 留空 / 0 → 默认行为必须完全不变（200 / 250）✓
+        v, a = _gen(dict(base, save_every="", sample_interval=0))
+        for tag, txt in (("视频", v), ("AI 图像", a)):
+            assert "save_every: 200" in txt, "%s：留空时保存间隔不再是 200 ✗（默认行为被改了）" % tag
+            assert "sample_every: 250" in txt, "%s：留空时采样间隔不再是 250 ✗（默认行为被改了）" % tag
+        # 填了就必须生效 ✓
+        v, a = _gen(dict(base, save_every=50, sample_interval=30))
+        for tag, txt in (("视频", v), ("AI 图像", a)):
+            assert "save_every: 50" in txt, "%s：填了 50 但 yaml 里不是 50 ✗" % tag
+            assert "sample_every: 30" in txt, "%s：填了 30 但 yaml 里不是 30 ✗" % tag
+    finally:
+        _sh.rmtree(td, ignore_errors=True)
+    print("STEPS_SUMMARY_AND_INTERVALS_OK")
+
+
 def test_no_undefined_names():
     """所有发布脚本里**用到的名字都必须真的可见**（静态审计，兜住整类问题）。
 
@@ -1603,6 +1791,9 @@ def main():
     check("无「用了但看不见」的名字（防同名静默失效）", test_no_undefined_names)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
     check("自带环境入口可见且能打开", test_env_locations_ui)
+    check("Krea2 量化档必须按显存配块交换", test_fizgig_quant_swap_vram_table)
+    check("高级参数：量化/块交换/编译按模式显隐", test_adv_rows_mode_gating)
+    check("训练步数摘要跟输入 + 保存/采样间隔生效", test_steps_summary_and_intervals)
     check("标签撤销可连退多步", test_label_undo_stack)
     check("Python 环境来源校验 + 徽章如实显示", test_python_env_source_guard)
     check("训练 native 崩溃诊断", test_native_crash_diagnosis)
