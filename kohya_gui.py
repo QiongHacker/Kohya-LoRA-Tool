@@ -2498,7 +2498,9 @@ class App:
         # 训练中采样预览（所有模式显示）
         self.sample_preview_row = ctk.CTkFrame(card2, fg_color="transparent")
         self.chk_sample_preview = ctk.CTkCheckBox(
-            self.sample_preview_row, text="训练中采样预览（每 100 步用当前 LoRA 出一张预览图，低显存自动关闭）",
+            # ⚠️ 2026-09-19 更正：原来写死「每 100 步」✗ —— 实际频率由「采样预览间隔」决定，
+        #    且各引擎口径不同（Fizgig 只能按轮）。这里不再编造具体步数 ✓
+        self.sample_preview_row, text="训练中采样预览（用当前 LoRA 出预览图，频率见下方「采样预览间隔」；低显存自动关闭）",
             variable=self.sample_preview_var, fg_color=ACC, hover_color=ACC_H,
             text_color=TXT, font=ui_font(FONT_BODY))
         self.chk_sample_preview.pack(side="left")
@@ -3534,10 +3536,15 @@ class App:
         #   pack 用 `before=global_frame` 固定落点，避免反复重排把「附加全局提示词」顶上去 ✗
         try:
             _rows = getattr(self, "_adv_rows", None) or {}
-            _k2f2 = self.mode in ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz")
-            _compile_ok = _k2f2 or self.mode in ("style", "character", "concept")
+            # ⚠️ 2026-09-19：这里原先是两行**硬编码**的模式判断 ✗ 与代码实际读取不符：
+            #   · quant/swap 原来包含 `krea2_at`，但 `train_krea2_at` **根本不读** quant_mode /
+            #     blocks_to_swap ✗ → AI-Toolkit 引擎下这两行显示了却不生效 ✗
+            #   · compile 原来包含 `flux2_fz` / `krea2_at`，同样不读 ✗
+            #   改为统一查 `core.PARAM_SCOPE`（唯一事实来源 ✓ 由回归测试校验 ✓）
             _anchor = getattr(self, "global_frame", None)
-            for _name, _show in (("quant", _k2f2), ("swap", _k2f2), ("compile", _compile_ok)):
+            for _name, _show in (("quant", core.param_supports("quant_mode", self.mode)),
+                                 ("swap", core.param_supports("blocks_to_swap", self.mode)),
+                                 ("compile", core.param_supports("compile", self.mode))):
                 _r = _rows.get(_name)
                 if _r is None:
                     continue
@@ -3618,6 +3625,63 @@ class App:
                 fg_color=CARD if self.mode == "character" else CARD)
         except Exception:
             pass
+        self._apply_param_scope()
+
+    def _scope_widgets(self):
+        """（参数 key → 控件）映射：按当前模式置灰**不生效**的参数用。
+
+        只列 `core.PARAM_SCOPE` 里登记过、且在界面上**没有**按模式显隐的控件 ✓
+        （quant/swap/compile 走 `_adv_rows` 的 pack_forget，不在这里重复处理 ✓）
+        """
+        w = {}
+        for k in ("te_lr", "video_steps", "video_frames", "repeats", "max_epochs"):
+            e = getattr(self, "_adv_entries", {}).get(k)
+            if e is not None:
+                w[k] = e
+        for k, attr in (("optimizer", "optimizer_menu"),
+                        ("global_pos", "global_pos_entry"),
+                        ("global_neg", "global_neg_entry"),
+                        ("amd_mode", "amd_sw"),
+                        ("train_text_encoder", "chk_unet_only")):
+            e = getattr(self, attr, None)
+            if e is not None:
+                w[k] = e
+        return w
+
+    def _apply_param_scope(self):
+        """把**当前模式下不生效**的参数控件置灰，并把提示改成如实说明。
+
+        ★ 2026-09-19 用户反馈：「软件界面很多 UI 旁边的提示，其实跟实际都不符」✓ 核对**属实** ✗
+          根因：这些控件从不按模式隐藏，而其中好几个参数**只被第一引擎（train()）读取** ——
+          例：`global_pos` 的提示写「训练时自动加到每张图片标签最前面」，而 8 个训练入口里
+          只有 train() 会处理它，Krea2/FLUX.2/两个 Fizgig/视频/AI图像 **完全不读** ✗
+          且在那些模式下**静默失效**（不报错也不提示）✗
+        → 这里按 `core.PARAM_SCOPE`（唯一事实来源 ✓ 有回归测试兜着 ✓）如实呈现 ✓
+        ⚠️ 只改"能不能点"和"提示怎么说" ✗ —— **不清空、不改任何取值** ✓（项目存的值照旧 ✓）
+        """
+        _tips = getattr(self, "_scope_tips", None)
+        if _tips is None:
+            _tips = self._scope_tips = {}
+        _mode_label = core.MODE_LABELS.get(self.mode, self.mode)
+        for key, widget in self._scope_widgets().items():
+            _ok = core.param_supports(key, self.mode)
+            try:
+                widget.configure(state=("normal" if _ok else "disabled"))
+            except Exception:
+                pass
+            if _ok:
+                _tip = core.PARAM_TIPS.get(key) or ""
+            else:
+                _tip = ("⚠️ 本模式（%s）**不生效**：改了也不会起作用，可忽略 ✗\n%s"
+                        % (_mode_label, core.param_scope_text(key)))
+            _old = _tips.get(key)
+            if _old is not None:
+                _old.text = _tip              # Tooltip 支持直接改文本 ✓（不会叠加新气泡 ✓）
+            elif _tip:
+                try:
+                    _tips[key] = self._tip(widget, _tip)
+                except Exception:
+                    pass
 
     def _scan_base_models(self):
         """后台扫描底模目录（safetensors 只读头部秒级；.ckpt 用 torch 读取可能较慢，放后台不阻塞启动）。"""
@@ -4938,12 +5002,16 @@ class App:
         _se = ctk.CTkEntry(sf, width=80, height=28, justify="center", textvariable=_sv,
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _se.pack(side="left", padx=(10, 8))
-        ctk.CTkLabel(sf, text="（画风/人物=每 N 步，Krea2/FLUX.2=每 N 轮，视频/Qwen/Z-Image=每 N 步；"
-                              "留空=默认 200 步 / 1 轮）",
+        ctk.CTkLabel(sf, text="（画风/人物=每 N 步，Krea2/FLUX.2 及它们的 Fizgig 引擎=每 N 轮，"
+                              "视频/Qwen/Z-Image=每 N 步；留空=默认 200 步 / 1 轮）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self._adv_entries["save_every"] = _se
         self._adv_frames["save_every"] = sf
-        # 采样预览间隔：0/留空=跟随保存快照；填 N=固定每 N 步（kohya/Krea2/FLUX.2 生效）
+        # 采样预览间隔：0/留空=跟随保存快照；填 N=固定每 N 步。
+        # ⚠️ 2026-09-19 更正：两个 **Fizgig 引擎**（Krea2/FLUX.2 的 Fizgig 版）**只能按轮**出预览图 ✗
+        #    填写的步数会被换算成 round(N ÷ 每轮步数) 轮，且 **N<10 一律视为没填** ✗
+        #    （2026-09-19 用户实测：项目每轮 100 步，填 0 和填 8 结果**完全一样**，都是每 1 轮 ✗
+        #      —— 用户以为改了设置，其实引擎那边一帧没变 ✗）
         sf2 = ctk.CTkFrame(g, fg_color="transparent")
         sf2.grid(row=2, column=0, columnspan=9, sticky="w", padx=10, pady=(0, 8))
         ctk.CTkLabel(sf2, text="采样预览间隔(步)", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
@@ -4953,7 +5021,9 @@ class App:
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _ie.pack(side="left", padx=(10, 8))
         ctk.CTkLabel(sf2, text="（0/留空=默认：画风/人物/Krea2/FLUX.2 跟随保存快照，视频/Qwen/Z-Image 每 250 步；"
-                               "填 N=每 N 步出预览）",
+                               "填 N=每 N 步出预览。"
+                               "⚠ Krea2/FLUX.2 的 Fizgig 引擎只能按「轮」出图：填 N 会换算成 round(N÷每轮步数) 轮，"
+                               "且 N<10 视为没填）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self._adv_entries["sample_interval"] = _ie
         self._adv_frames["sample_interval"] = sf2
@@ -4981,7 +5051,8 @@ class App:
             text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
             dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
         self.optimizer_menu.pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(ow, text="（自动=按环境预检选 AdamW8bit 或降级；若报 bitsandbytes 崩溃，改选 AdamW/Lion）",
+        ctk.CTkLabel(ow, text="（自动=按环境预检选 AdamW8bit 或降级；若报 bitsandbytes 崩溃，改选 AdamW/Lion。"
+                              "⚠ Krea2/FLUX.2 的 Fizgig 引擎不支持此项，用引擎默认）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         qw = ctk.CTkFrame(self.adv_body, fg_color="transparent"); qw.pack(anchor="w", pady=(6, 0))
         ctk.CTkLabel(qw, text="量化方式（Krea2/FLUX.2）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
@@ -5036,7 +5107,9 @@ class App:
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         self.global_frame = ctk.CTkFrame(self.adv_body, fg_color="transparent")
         self.global_frame.pack(fill="x", pady=(10, 0))
-        ctk.CTkLabel(self.global_frame, text="附加全局提示词（可选，训练时自动加到标签最前面，不写入图片 txt）",
+        # ⚠️ 2026-09-19 更正：原来写「训练时自动加到标签最前面」✗ —— 实际上只有
+        #    **画风/人物/概念**（第一引擎）会这么做；其余引擎**完全不读**这两个参数 ✗
+        ctk.CTkLabel(self.global_frame, text="附加全局提示词（可选；仅画风/人物/概念生效：训练时加到标签最前面，不写入图片 txt）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
         gr = ctk.CTkFrame(self.global_frame, fg_color="transparent"); gr.pack(fill="x", pady=(4, 0))
         ctk.CTkLabel(gr, text="正向", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")

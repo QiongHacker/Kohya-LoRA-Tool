@@ -1537,7 +1537,11 @@ def test_adv_rows_mode_gating():
             _app._build_adv_body()
         _rows = getattr(_app, "_adv_rows", {})
         assert _rows, "三行没有登记进 _adv_rows（无法按模式显隐）"
-        _K2F2 = ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz")
+        # ⚠️ 2026-09-19 更正：这里原先硬编码成 ("krea2","krea2_at","krea2_fz","flux2","flux2_fz") ✗
+        #    但 `train_krea2_at` **根本不读** quant_mode / blocks_to_swap ✗ →
+        #    Krea2(AI-Toolkit) 下这两行**显示了却不生效** ✗（与「提示跟实际不符」同一类问题 ✓）
+        #    改为统一查 C.PARAM_SCOPE（唯一事实来源 ✓ 由 test_param_scope_matches_code 校验 ✓）
+        _K2F2 = C.PARAM_SCOPE["quant_mode"]
 
         def _shown(name):
             r = _rows.get(name)
@@ -1551,7 +1555,7 @@ def test_adv_rows_mode_gating():
                 want = m in _K2F2
                 assert _shown(name) == want, \
                     "%s（%s）：%s 可见性 = %s，应为 %s" % (C.MODE_LABELS[m], m, name, _shown(name), want)
-            want_c = (m in _K2F2) or (m in ("style", "character", "concept"))
+            want_c = C.param_supports("compile", m)
             assert _shown("compile") == want_c, \
                 "%s（%s）：compile 可见性 = %s，应为 %s" % (C.MODE_LABELS[m], m, _shown("compile"), want_c)
         # 顺序不能被重排打乱 ⚠️：pack 会把控件移到末位 ✗ 所以显隐用 `before=global_frame` 固定落点 ✓
@@ -1765,6 +1769,107 @@ def test_no_undefined_names():
     print("NO_UNDEFINED_NAMES_OK")
 
 
+def test_param_scope_matches_code():
+    """界面提示的「适用范围」必须与**代码实际读取**一致 —— 由 `core.PARAM_SCOPE` 兜住。
+
+    ★ 2026-09-19 用户反馈：「软件界面很多 UI 旁边的提示，其实跟实际都不符」✓ 核对**属实** ✗
+      根因：界面控件从不按模式隐藏，而好几个参数**只被第一引擎读取** ✗ 最典型的一条：
+        `global_pos` 的提示写「训练时自动加到每张图片标签最前面（例如 masterpiece）」，
+        而 8 个训练入口里**只有 train() 会处理它** —— Krea2 / FLUX.2 / 两个 Fizgig /
+        视频 / AI图像 **完全不读** ✗ 且在那些模式下**静默失效**（不报错、不提示）✗
+      同类还有：te_lr / 只训UNet / AMD 兼容模式 / optimizer / 采样间隔（Fizgig 按轮换算）✗
+
+    判据（避免两边各说各话）：
+      ① 表里登记的 key **必须**是界面真实存在的参数（防止登记了不存在的东西）✓
+      ② 登记的 key 必须**真的有训练入口读它**（空 = 表在撒谎 ✗）
+      ③ 代码实际读取的模式 ⊆ 表声明的模式（表声明得比实际窄 = 会误置灰 ✗）
+      ④ 公认通用的参数（rank/alpha/unet_lr/trigger）必须被绝大多数入口读到 ✓
+    """
+    import ast as _ast
+    import kohya_core.configs as C      # noqa: E402
+
+    # 训练入口 -> 它负责的模式（与 Kohya一键工具.py 的入口函数一一对应）
+    ENTRY_MODES = {
+        "train": ("style", "character", "concept"),
+        "train_krea2": ("krea2",),
+        "train_flux2": ("flux2",),
+        "train_krea2_fizgig": ("krea2_fz",),
+        "train_flux2_fizgig": ("flux2_fz",),
+        "train_video": ("video",),
+        "train_krea2_at": ("krea2_at",),
+        "train_at_image": ("qwen_image", "zimage"),
+        # ⚠️ 这些**配置生成函数**也算生效路径 ✓：有些参数不被 train_* 直接读，
+        #    而是先交给它们写进 yaml（例：`video_frames` 只被 write_h3_train_yaml 读）✗
+        #    只统计 train_* 会漏掉这类参数、把"确实生效"误判成"没人读" ✗
+        "write_h3_train_yaml": ("video",),
+        "write_at_image_yaml": ("qwen_image", "zimage"),
+        "write_krea2_at_yaml": ("krea2_at",),
+        "_fizgig_sample_epochs": ("krea2_fz", "flux2_fz"),
+    }
+
+    src = os.path.join(ROOT, "Kohya一键工具.py")
+    lines = open(src, encoding="utf-8-sig").read().splitlines()
+    tree = _ast.parse("\n".join(lines))
+    spans = [(n.name, n.lineno, n.end_lineno) for n in tree.body
+             if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))]
+
+    def owner(ln):
+        for nm, a, b in spans:
+            if a <= ln <= b:
+                return nm
+        return None
+
+    # 界面真实存在的参数（与 _collect_params 的返回字典一致）
+    gui_keys = set()
+    gtree = _ast.parse(open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8-sig").read())
+    for n in _ast.walk(gtree):
+        if isinstance(n, _ast.FunctionDef) and n.name == "_collect_params":
+            for c in _ast.walk(n):
+                if isinstance(c, _ast.Dict):
+                    for k in c.keys:
+                        if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+                            gui_keys.add(k.value)
+
+    # 每个参数：实际读取它的训练入口（统计**全部**界面参数，不只 PARAM_SCOPE 里的 ——
+    #   否则通用参数（rank/alpha…）会被当成"没人读" ✗）
+    actual = {}
+    for i, ln in enumerate(lines, start=1):
+        norm = ln.replace("'", '"')
+        for k in gui_keys:
+            if ('params.get("' + k + '"') in norm or ('params["' + k + '"]') in norm:
+                f = owner(i)
+                if f in ENTRY_MODES:
+                    actual.setdefault(k, set()).update(ENTRY_MODES[f])
+
+    bad = []
+    for k, modes in C.PARAM_SCOPE.items():
+        # ① key 必须是界面真实参数
+        if k not in gui_keys:
+            bad.append("%s：表里登记了，但界面根本没有这个参数" % k)
+            continue
+        got = actual.get(k, set())
+        # ② 必须真有入口读
+        if not got:
+            bad.append("%s：表声称「%s」，但**没有任何训练入口读它**" % (k, C.param_scope_text(k)))
+            continue
+        # ③ 实际读取 ⊆ 表声明
+        extra = got - set(modes)
+        if extra:
+            bad.append("%s：代码在 %s 下也读它，但表只声明了 %s（会**误置灰**）"
+                       % (k, sorted(extra), sorted(modes)))
+    assert not bad, "PARAM_SCOPE 与代码实际不符：" + " ｜ ".join(sorted(bad))
+
+    # ④ 公认通用的参数：必须几乎所有入口都读
+    for k in ("rank", "alpha", "unet_lr", "trigger"):
+        assert k not in C.PARAM_SCOPE, "%s 是通用参数，不该登记进 PARAM_SCOPE" % k
+        got = actual.get(k, set())
+        assert len(got) >= 7, "%s 只被 %d 个入口读取（应近乎全模式通用）" % (k, len(got))
+
+    # 文案能生成（给界面用）
+    assert "仅" in C.param_scope_text("global_pos"), "适用范围文案没生成"
+    print("PARAM_SCOPE_MATCHES_CODE_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -1789,6 +1894,7 @@ def main():
     check("打标模型能真的下载（完整正常路径）", test_wd14_download_http_path)
     check("打标模型缺失时回退到已有模型", test_wd14_model_fallback)
     check("无「用了但看不见」的名字（防同名静默失效）", test_no_undefined_names)
+    check("界面提示的适用范围与代码一致", test_param_scope_matches_code)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
     check("自带环境入口可见且能打开", test_env_locations_ui)
     check("Krea2 量化档必须按显存配块交换", test_fizgig_quant_swap_vram_table)

@@ -246,6 +246,74 @@ PARAM_TIPS = {
     "video_steps": "视频 LoRA 总训练步数：2000 左右较稳；步数过高会死记视频内容（过拟合）。上限 3000。",
 }
 
+# ---------- 参数适用范围（界面按当前模式置灰 + 提示 / 回归测试校验） ----------
+# ★ 2026-09-19 用户反馈：「软件界面很多 UI 旁边的提示，其实跟实际都不符」✓ 核对后**属实** ✗
+#
+# 根因：界面控件**从不按模式隐藏**（高级参数区固定 8 格 + 全局提示词 + AMD + 只训UNet，
+# 对 11 个模式一视同仁），但这些参数**很多只被第一引擎（train()）读取** ✗
+#   例：`global_pos` 的提示写「训练时自动加到每张图片标签最前面」—— 而 8 个训练入口里
+#       只有 train() 会处理它，Krea2 / FLUX.2 / 两个 Fizgig / 视频 / AI图像 **完全不读** ✗
+#       且在那些模式下是**静默失效**（不报错、不提示），与打标掉兜底是同一类问题 ✗
+#
+# 本表是**唯一事实来源**：
+#   · 界面按它 → 不适用的控件置灰，提示写明「本模式不支持（仅 …）」✓
+#   · 回归测试按它 → 校验「代码实际读取该参数的训练入口」是否与之相符 ✓
+#     （这样以后改引擎，提示会自动被校验，不会再漂 ✓ —— 与「用了没导入」的静态审计同思路）
+#
+# ⚠️ 只列**不是全模式通用**的参数；没列出的 = 所有模式都生效 ✓
+#    填写依据：对 Kohya一键工具.py 做的「参数 × 训练入口」读取审计（2026-09-19）✓
+PARAM_SCOPE = {
+    # 仅第一引擎 kohya（画风/人物/概念）：其余引擎不读这些参数 ✗
+    "te_lr": ("style", "character", "concept"),
+    "train_text_encoder": ("style", "character", "concept"),
+    "global_pos": ("style", "character", "concept"),
+    "global_neg": ("style", "character", "concept"),
+    "amd_mode": ("style", "character", "concept"),
+    "style_preset": ("style", "character", "concept"),
+    "noise_offset": ("style", "character", "concept"),
+    "min_snr_gamma": ("style", "character", "concept"),
+    "reg_dir": ("style", "character", "concept"),
+    "base_model": ("style", "character", "concept"),
+    # 仅视频 / AI 图像（这两个引擎按「总步数」训练，不用 epoch）
+    "video_steps": ("video", "qwen_image", "zimage"),
+    "video_frames": ("video",),
+    # 仅 Krea2 / FLUX.2 系（含 Fizgig）：量化与块交换是这两个引擎的参数
+    "quant_mode": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
+    "blocks_to_swap": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
+    # 优化器：两个 Fizgig 引擎不读（用引擎自己的默认）
+    "optimizer": ("style", "character", "concept", "krea2", "flux2",
+                  "krea2_at", "video", "qwen_image", "zimage"),
+    # compile：仅第一引擎 + Krea2 / FLUX.2 / Krea2(Fizgig)
+    "compile": ("style", "character", "concept", "krea2", "flux2", "krea2_fz"),
+    # repeats / max_epochs：视频与 AI 图像按步数训练，不用这两个
+    "repeats": ("style", "character", "concept", "krea2", "krea2_at",
+                "krea2_fz", "flux2", "flux2_fz"),
+    "max_epochs": ("style", "character", "concept", "krea2", "krea2_at",
+                   "krea2_fz", "flux2", "flux2_fz"),
+}
+
+# 模式短名（用于生成「仅 … 生效」这类人话提示）
+MODE_SHORT = {
+    "style": "画风", "character": "人物", "concept": "概念",
+    "krea2": "Krea 2", "krea2_at": "Krea2(AI-Toolkit)", "krea2_fz": "Krea2(Fizgig)",
+    "flux2": "FLUX.2", "flux2_fz": "FLUX.2(Fizgig)", "video": "视频",
+    "qwen_image": "Qwen-Image", "zimage": "Z-Image",
+}
+
+
+def param_supports(key, mode):
+    """该参数在指定模式下是否真的生效（未登记 = 所有模式都生效 ✓）。"""
+    scope = PARAM_SCOPE.get(key)
+    return True if scope is None else (mode in scope)
+
+
+def param_scope_text(key):
+    """生成「仅 … 生效」的人话文案；全模式通用的返回 ""。"""
+    scope = PARAM_SCOPE.get(key)
+    if not scope:
+        return ""
+    return "仅 " + "、".join(MODE_SHORT.get(m, m) for m in scope if m in MODE_KEYS) + " 生效"
+
 TRIGGER_HINT_CONCEPT = ("💡提示：填一个网上很少见到的英文单词（如 my_mer_01），出图时带上它，角色就会变成你训练的形态/种族（美人鱼/半人马/木偶人等）。\n"
                     "⚠ 训练集要混不同画风，否则 trigger 会把画风也绑进去。")
 
