@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.4"
+APP_VERSION = "0.17.5"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -7606,7 +7606,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
                strong_bind=True, concept_type="", clean_concept=True, concept_mode=False,
-               style_target="anime"):
+               style_target="anime", overwrite=False):
     """strong_bind：人物模式自动强绑定（trigger + 100% 一致特征 → 固定前缀，keep_tokens 覆盖整组）。"""
     # 旧调用方不传 strong_bind -> 人物模式默认开启（增量功能，不破坏旧流程）
     if strong_bind is None:
@@ -7648,6 +7648,14 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         "--output", out, "--size", str(size), "--mode", mode,
         "--repeats", str(repeats),
     ]
+    # ⚠️ 输出目录里已有同名图片时，preprocess.py 默认**整张跳过**（含打标）✗
+    #    —— 而 out 就是训练读取的目录（`dataset_train_dir`）✓ 于是：
+    #      用户在源文件夹改了 / 用外部模型重打的标签，**跑完预处理也用不上** ✗（静默 ✗）
+    #    典型场景：手动或用别的打标模型重写了 xxx.txt → 重跑预处理 → 一个字没变 ✗
+    #    这是「自定义打标模型」的前置：没有它，外面打好的标签根本进不了训练集 ✓
+    if overwrite:
+        cmd += ["--overwrite"]
+        logf("[预处理] 已勾选「重新处理已存在的图片」：覆盖输出目录里的旧结果与旧标签")
     if mode == "character":
         if keep_tokens is None:
             keep_tokens = max(1, len(split_triggers(trigger)))

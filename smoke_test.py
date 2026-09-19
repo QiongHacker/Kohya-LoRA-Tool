@@ -1870,6 +1870,72 @@ def test_param_scope_matches_code():
     print("PARAM_SCOPE_MATCHES_CODE_OK")
 
 
+def test_preprocess_overwrite_picks_up_changed_captions():
+    """改过的标签必须能真的生效 —— 否则外部/自定义打标的结果**进不了训练集** ✗
+
+    ★ 2026-09-19（为「自定义本地打标模型」做前置调研时发现）：
+      `preprocess()` 的输出目录 `out = dataset_train_dir(...)` **就是训练读取的那个目录** ✓
+      而 preprocess.py 对「输出目录里已有同名图片」的处理是**整张跳过**（含打标）✗ ——
+      偏偏 `--overwrite` **只有视频打标那条路有**，图片预处理界面从来不传 ✗
+      → 于是：手动改的标签、或用别的打标模型重写过的标签，
+        重跑一次预处理**一个字都不会变** ✗ 而且是**静默**的
+        （日志只说「跳过 N 张」，很容易被当成成功 ✓）
+
+      这直接卡死了「自定义打标模型」这条路：外面打好了标签却根本喂不进训练集 ✗
+
+    ★ 为什么用**真跑一遍**来验（不旁路）✗：
+      上次教训 —— 只测"失败路径"会恰好绕开出问题的那一行 ✓ 这里同一个道理：
+      只有真的跑完两遍预处理、真的改了源 txt，才能看出标签到底有没有被采用 ✓
+
+    判据：① 首次处理采用源标签 ✓ ② 改了源标签 + 不勾 → **不变**（复现现象）
+          ③ 同样的改动 + 勾选 → **必须变**（修复生效）
+    """
+    import shutil as _sh
+    import subprocess as _sp
+    import tempfile as _tf
+    from PIL import Image as _Img
+
+    tmp = _tf.mkdtemp(prefix="pp_ovw_")
+    try:
+        src = os.path.join(tmp, "raw")
+        out = os.path.join(tmp, "out")
+        os.makedirs(src, exist_ok=True)
+        _names = ["a.png", "b.png"]
+        for _n in _names:
+            _Img.new("RGB", (640, 640), (120, 80, 200)).save(os.path.join(src, _n))
+            with open(os.path.join(src, _n.replace(".png", ".txt")), "w", encoding="utf-8") as f:
+                f.write("moshu, first version")
+
+        def _run(extra):
+            _cmd = [sys.executable, "-u", os.path.join(ROOT, "preprocess.py"),
+                    "--input", src, "--output", out, "--size", "512",
+                    "--mode", "character", "--repeats", "1", "--trigger", "moshu"] + extra
+            _r = _sp.run(_cmd, capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=900,
+                         env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+            return (_r.stdout or "") + (_r.stderr or "")
+
+        def _cap(n="a.png"):
+            _p = os.path.join(out, n.replace(".png", ".txt"))
+            return open(_p, encoding="utf-8").read().strip() if os.path.isfile(_p) else ""
+
+        _run([])
+        assert "first version" in _cap(), "① 首次处理没有采用源标签：%r" % _cap()
+
+        with open(os.path.join(src, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("moshu, SECOND version")
+        _run([])
+        assert "first version" in _cap(), \
+            "② 不勾「重新处理」时标签却变了 —— 跳过逻辑已不是预期行为，本测试的前提需更新"
+
+        _run(["--overwrite"])
+        assert "SECOND" in _cap(), \
+            "③ 勾了「重新处理」标签仍未更新 ✗ 改过的标签照样进不了训练集：%r" % _cap()
+    finally:
+        _sh.rmtree(tmp, ignore_errors=True)
+    print("PREPROCESS_OVERWRITE_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -1895,6 +1961,7 @@ def main():
     check("打标模型缺失时回退到已有模型", test_wd14_model_fallback)
     check("无「用了但看不见」的名字（防同名静默失效）", test_no_undefined_names)
     check("界面提示的适用范围与代码一致", test_param_scope_matches_code)
+    check("改过的标签能通过「重新处理」生效", test_preprocess_overwrite_picks_up_changed_captions)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
     check("自带环境入口可见且能打开", test_env_locations_ui)
     check("Krea2 量化档必须按显存配块交换", test_fizgig_quant_swap_vram_table)

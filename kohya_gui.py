@@ -2388,6 +2388,28 @@ class App:
         self.wd14_model_menu.pack(side="left", padx=(12, 8))
         ctk.CTkLabel(self.wd14_row, text="（首次使用会下载，之后离线可用）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        # 「重新处理已存在的图片」（2026-09-19）
+        #   为什么必须给用户这个开关：输出目录里已有同名图片时，预处理**整张跳过**（含打标）✗
+        #   而那个输出目录正是训练读取的目录 → 你改过的标签（手动改 / 用别的模型重打的）
+        #   重跑一次预处理也用不上 ✗ 而且**静默**，界面还会打印「跳过 N 张」，很容易被误读成成功 ✓
+        self.overwrite_row = ctk.CTkFrame(card1, fg_color="transparent")
+        self.overwrite_row.pack(fill="x", padx=22, pady=(0, 4))
+        self.overwrite_var = tk.BooleanVar(value=False)
+        try:
+            self.overwrite_var.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        self.chk_overwrite = ctk.CTkCheckBox(
+            self.overwrite_row, text="重新处理已存在的图片（改过标签后勾上，否则不生效）",
+            variable=self.overwrite_var, fg_color=ACC, hover_color=ACC_H,
+            text_color=TXT, font=ui_font(FONT_BODY))
+        self.chk_overwrite.pack(side="left")
+        self._tip(self.chk_overwrite,
+                  "勾选后：重新生成图片并**重读你现在的标签**（源文件夹里的 .txt）✓\n"
+                  "不勾选（默认）：输出目录里已经处理过的图会整张跳过，\n"
+                  "你在源文件夹里改的标签不会被采用 ✗\n\n"
+                  "什么时候需要勾：手动改过标签、用外部/别的打标模型重写过标签、\n"
+                  "或想换裁切比例 / 分辨率重新出图时。")
         ctk.CTkLabel(card1, text="", font=ui_font(FONT_HINT),
                      text_color=HINT).pack(anchor="w", padx=22, pady=(0, 14))
 
@@ -5297,6 +5319,7 @@ class App:
             # 打标模型：老项目保存后就会带上这个键，此后以此为准（含用户选回旧模型的情况 ✓）
             "wd14_model": (_WD14_MODEL_GUI_MAP.get(self.wd14_model_var.get(), "swinv2-v3")
                            if hasattr(self, "wd14_model_var") else "swinv2-v3"),
+            "overwrite": bool(getattr(self, "overwrite_var", None) and self.overwrite_var.get()),
         }
 
     def _maybe_migrate_legacy_dataset(self, name):
@@ -5881,7 +5904,8 @@ class App:
                 concept_type=params.get("concept_type") or "",
                 clean_concept=bool(params.get("clean_concept", True)),
                 concept_mode=core.is_concept_mode(params.get("mode"), params.get("at_sub_mode")),
-                style_target=core.style_target_code(params.get("style_preset")))
+                style_target=core.style_target_code(params.get("style_preset")),
+                overwrite=bool(params.get("overwrite")))
             self._log("[OK] 预处理完成")
         except core.StopRequested:
             self._log("[停止] 预处理已手动停止")
@@ -6080,7 +6104,8 @@ class App:
                 concept_type=params.get("concept_type") or "",
                 clean_concept=bool(params.get("clean_concept", True)),
                 concept_mode=core.is_concept_mode(params.get("mode"), params.get("at_sub_mode")),
-                style_target=core.style_target_code(params.get("style_preset")))
+                style_target=core.style_target_code(params.get("style_preset")),
+                overwrite=bool(params.get("overwrite")))
             stats = {}
             if os.path.isfile(report):
                 try:
