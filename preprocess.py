@@ -906,6 +906,8 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
         logf("[WD14] 打标模型不可用，官方脚本跳过（会走内置打标或兜底 caption）")
         return False
     logf(f"[WD14] 使用官方打标脚本: {script}")
+    # ★ 明确打印本次**实际使用**的模型（回退时会与用户选的不同 —— 必须说出来 ✓）
+    logf("[WD14] 官方打标使用模型：%s" % WD14_MODEL_LABELS.get(_key, _key))
     logf(f"[WD14] 打标解释器: {py}")
     logf(f"[WD14] 打标模型: {WD14_MODEL_LABELS.get(_key, _key)}（{model_dir}）")
     cmd = [
@@ -1096,14 +1098,23 @@ def _ensure_wd14_script_deps(py, logf=print):
 
 
 def _wd14_onnx_files(key=None):
-    """定位 WD14 onnx 模型 + 标签表；缺任一返回 (None, None)。
+    """定位**指定** WD14 模型的 onnx + 标签表；缺任一返回 (None, None)。
 
-    **只看已有、不下载**（要下载请先调 `pick_wd14_model`）；指定模型不在时同样会
-    回退到机器上已有的另一个模型 ✓ 所以 `repo` 必须取 `lookup_wd14_model` 的返回值，
-    否则会去拼一个不存在的目录名 ✗
+    **只看已有、不下载** ✓ 且 **不回退** ✓ —— 「用哪个模型」由 `pick_wd14_model` 决定，
+    这里只负责按给定的 key 精确取文件 ✓
+
+    ⚠️ 2026-09-19 更正（用户反馈「明明选了新打标器，好像又用了旧的」✓ 核对属实 ✗）：
+       这里原先调 `lookup_wd14_model`（它会回退）✗ 于是只要机器上**存在另一个**模型
+       （老安装包内置的 moat-v2），本函数就会返回**那个旧模型** →
+       调用方 `_run_wd14_onnx` 看到 onnx_p 非空 → **跳过 pick** →
+       **从不尝试下载用户选的 swinv2-v3**，且**没有任何日志说明** ✗
+       → 「选了新的、实际用旧的」，而且静默 ✗ 与官方脚本那条路（走 pick，会下载）还不一致 ✗
     """
-    _, repo, model_dir = lookup_wd14_model(key)
-    if not model_dir:
+    _, repo = resolve_wd14_model(key)
+    # ⚠️ `_wd14_ready_dir` 未就绪时也会返回一个目录（下载落点 roots[-1]），
+    #    所以必须看 **ready**，不能只看 model_dir 是否为空 ✗
+    model_dir, ready = _wd14_ready_dir(key)
+    if not ready:
         return None, None
     repo_dir = os.path.join(model_dir, _wd14_repo_dirname(repo))
     onnx_p = os.path.join(repo_dir, "model.onnx")
@@ -1120,11 +1131,19 @@ def _run_wd14_onnx(output_dir, logf=print, threshold=0.35, model_key=None):
     预处理 / 阈值 / 输出格式与 kohya 官方 tag_images_by_wd14_tagger 的 default_format 一致
     （pad 白边到正方形 -> resize 448 -> 只取 general/character，>threshold 的标签，下划线转空格）。
     """
-    onnx_p, csv_p = _wd14_onnx_files(model_key)
-    if not onnx_p:
-        # 首次使用：先确保模型就绪（与官方脚本路径共用同一个选择/下载器，魔搭优先 ✓）
-        if pick_wd14_model(model_key, logf)[2]:
-            onnx_p, csv_p = _wd14_onnx_files(model_key)
+    # ⚠️ 必须先「决定用哪个模型」再取文件 —— 不能先取文件再决定 ✗
+    #   2026-09-19 修正：原先是 `_wd14_onnx_files(model_key)` 在前，而它会回退到机器上
+    #   已有的旧模型 → 返回非空 → **下面的 pick 永远不执行** → 用户选的新模型（swinv2-v3）
+    #   **从来不会被下载**，还静默用着旧模型 ✗（用户反馈「选了新的却用了旧的」✓ 属实）
+    #   现在与官方脚本那条路一致：都由 pick_wd14_model 决定（会先尝试下载指定模型 ✓，
+    #   下载失败才回退，且回退时会打印说明 ✓）
+    _used_key, _used_repo, _used_dir = pick_wd14_model(model_key, logf)
+    if not _used_dir:
+        logf("[WD14] 内置打标：未找到 model.onnx/selected_tags.csv（模型未下载成功）")
+        return False
+    # ★ 明确打印本次**实际使用**的模型：以前用户只能靠猜（"好像又用了旧的"）✗
+    logf("[WD14] 内置打标使用模型：%s" % WD14_MODEL_LABELS.get(_used_key, _used_key))
+    onnx_p, csv_p = _wd14_onnx_files(_used_key)
     if not onnx_p:
         logf("[WD14] 内置打标：未找到 model.onnx/selected_tags.csv（模型未下载成功）")
         return False

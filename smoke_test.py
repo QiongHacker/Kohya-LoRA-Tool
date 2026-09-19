@@ -1936,6 +1936,73 @@ def test_preprocess_overwrite_picks_up_changed_captions():
     print("PREPROCESS_OVERWRITE_OK")
 
 
+def test_wd14_respects_selected_model():
+    """选了哪个打标模型，就必须真的用哪个 —— 不能因为机器上有个旧模型就**悄悄**用旧的。
+
+    ★ 2026-09-19 用户反馈：「他明明选的新的打标器，好像又用了旧的打标器」✓ 核对**属实** ✗
+
+      当时 `_wd14_onnx_files()` 内部调 `lookup_wd14_model`（它会回退）✗ 于是：
+        用户选 swinv2-v3（新），机器上只有老安装包内置的 moat-v2（旧）
+        → 该函数返回**旧模型**的文件 → 调用方 `_run_wd14_onnx` 看到文件存在
+        → **跳过 pick_wd14_model** → 新模型**从来不会被下载** → 一直静默用旧的 ✗
+      而且全程**没有任何日志**说明"其实用的是旧模型"（回退提示只在 pick 里打印，
+      而 pick 根本没被执行）✗ —— 用户只能靠猜 ✓
+      另外：官方脚本那条路走的是 pick（**会**下载）→ 两条路行为还不一致 ✗
+
+    判据：
+      ① `_wd14_onnx_files(指定模型)` **不得**返回别的模型的文件（回退 = 上面的 bug）✓
+      ② 指定已有模型时能正常取到（证明①不是环境没造好）✓
+      ③ `_run_wd14_onnx` 里必须先「决定用哪个模型」再「取文件」（顺序反了就会旧病复发）✓
+    """
+    import ast as _ast
+    import shutil as _sh
+    import tempfile as _tf
+    import preprocess as P      # noqa: E402
+
+    tmp = _tf.mkdtemp(prefix="wd14_sel_")
+    _orig_roots = P._wd14_model_roots
+    try:
+        # 机器上**只有**旧模型 moat-v2（模拟老用户：老安装包内置过它）
+        _mr = os.path.join(tmp, P._wd14_repo_dirname(P.WD14_MODELS["moat-v2"]))
+        os.makedirs(_mr, exist_ok=True)
+        with open(os.path.join(_mr, "model.onnx"), "wb") as f:
+            f.write(b"0" * (11 * 1024 * 1024))
+        with open(os.path.join(_mr, "selected_tags.csv"), "w", encoding="utf-8") as f:
+            f.write("tag_id,name,category,count\n" +
+                    "".join("%d,tag_%d,0,0\n" % (i, i) for i in range(200)))
+        P._wd14_model_roots = lambda: [tmp]
+
+        # ① 选的是新模型 → 绝不能拿旧模型的顶上（否则调用方会跳过下载、永远用旧的 ✗）
+        _r = P._wd14_onnx_files(P.WD14_DEFAULT_MODEL)
+        assert _r == (None, None), \
+            "_wd14_onnx_files 回退到了机器上已有的旧模型 ✗ —— 内置打标会据此跳过下载，" \
+            "用户选的新模型永远下不来（得到 %s）" % (_r[0],)
+        # ② 指定已有模型时必须能取到（证明①不是因为环境没造好）
+        assert P._wd14_onnx_files("moat-v2")[0], "指定已有模型时反而取不到（测试环境问题）"
+
+        # ③ 顺序契约：先 pick（决定模型，含下载/回退说明），再取文件
+        _tree = _ast.parse(open(os.path.join(ROOT, "preprocess.py"),
+                                encoding="utf-8-sig").read())
+        _fn = next(n for n in _ast.walk(_tree)
+                   if isinstance(n, _ast.FunctionDef) and n.name == "_run_wd14_onnx")
+        _pick = _files = None
+        for c in _ast.walk(_fn):
+            if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name):
+                if c.func.id == "pick_wd14_model" and _pick is None:
+                    _pick = c.lineno
+                elif c.func.id == "_wd14_onnx_files" and _files is None:
+                    _files = c.lineno
+        assert _pick is not None and _files is not None, \
+            "_run_wd14_onnx 里没找到 pick_wd14_model / _wd14_onnx_files 的调用"
+        assert _pick < _files, \
+            "_run_wd14_onnx 里先取文件后决定模型（L%d < L%d？）✗ —— 先取文件会拿到旧模型" \
+            "并跳过下载，用户选的新模型就永远用不上 ✗" % (_pick, _files)
+    finally:
+        P._wd14_model_roots = _orig_roots
+        _sh.rmtree(tmp, ignore_errors=True)
+    print("WD14_RESPECTS_SELECTED_MODEL_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -1962,6 +2029,7 @@ def main():
     check("无「用了但看不见」的名字（防同名静默失效）", test_no_undefined_names)
     check("界面提示的适用范围与代码一致", test_param_scope_matches_code)
     check("改过的标签能通过「重新处理」生效", test_preprocess_overwrite_picks_up_changed_captions)
+    check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
     check("自带环境入口可见且能打开", test_env_locations_ui)
     check("Krea2 量化档必须按显存配块交换", test_fizgig_quant_swap_vram_table)
