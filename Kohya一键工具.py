@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.7"
+APP_VERSION = "0.17.8"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -11737,6 +11737,32 @@ def anima_clear_component(kind):
     return True, "已恢复默认（%s 改回自动查找/下载）" % _label
 
 
+def _read_cfg_identity(cfg_path):
+    """读 config.json 的 (model_type, architectures)。读不到返回 ("", [])。
+
+    ★ 为什么不看内容不行（2026-09-20 用户实测日志）：
+      训练时报的是
+        `ValueError: Unrecognized model in <path>. Should have a `model_type`
+         key in its config.json`
+      —— 这句**只在**「目录里有 config.json、但里面没有 model_type 键」时出现 ✓
+      说明他选的 ComfyUI models 大目录里**恰好有个缺 model_type 的 config.json**，
+      于是上一版校验（只数权重个数、没读内容）判了「就绪」✗ → 训练时才炸 ✗
+    """
+    try:
+        import json as _json
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            d = _json.load(f)
+        if not isinstance(d, dict):
+            return "", []
+        mt = str(d.get("model_type") or "").strip()
+        arch = d.get("architectures") or []
+        if isinstance(arch, str):
+            arch = [arch]
+        return mt, [str(a) for a in arch]
+    except Exception:
+        return "", []
+
+
 def _anima_component_ok(kind, path):
     """校验用户选的 Anima 组件是否可用，返回 (ok, 说明)。
 
@@ -11773,28 +11799,44 @@ def _anima_component_ok(kind, path):
     #      里面没有 Qwen3 的 config.json / tokenizer → 加载不到 → 用户看到的就是「识别不到」✗
     #      而且当时**校验还回了「就绪」**，用户完全不知道自己选错了 ✗
     #   → 改成**只看该目录本身**（不递归）✓ 并把「大目录」这种情况明确指出来 ✓
-    _has_cfg = os.path.isfile(os.path.join(path, "config.json"))
+    _cfg_p = os.path.join(path, "config.json")
+    _has_cfg = os.path.isfile(_cfg_p)
     _std_here = _qwen3_std_weight_here(path)        # 本层的标准名权重
     _sf_here = _weights_here(path)                  # 本层的 safetensors / bin
+    _deeper = _has_weights_deeper(path)             # 子目录里还有别的模型 → 容器特征
     if _has_cfg:
-        if _std_here:
-            return True, "就绪（完整模型文件夹）"
-        if len(_sf_here) == 1:
-            return True, "就绪（单文件模式）"
-        if _sf_here:
-            return False, ("这个文件夹里有 config.json，但**同时有多个权重文件**，"
-                           "无法确定哪个是 Qwen3 —— 请选 Qwen3-0.6B 模型**本身的文件夹**。")
-        return False, ("文件夹里有 config.json 但找不到标准权重文件"
-                       "（model.safetensors / pytorch_model.bin / 分片）。")
-    if not _sf_here:
-        if _has_weights_deeper(path):
-            return False, ("这个文件夹**本身没有权重**，只有子文件夹里才有 —— "
+        # ★ 有 config.json 就必须**读它的内容** —— 训练时报的错正来自这里 ✗
+        #   （2026-09-20 用户实测：models 大目录里恰有个缺 model_type 的 config.json，
+        #     上一版只数权重个数 → 判「就绪」✗ → 训练才炸）
+        _mt, _arch = _read_cfg_identity(_cfg_p)
+        if not _mt:
+            return False, ("这个文件夹里的 config.json **没有 model_type** —— "
+                           "训练时会直接报\n"
+                           "  “Unrecognized model … Should have a model_type key in its config.json” ✗\n"
+                           "请选 **Qwen3-0.6B 模型本身的文件夹**（它的 config.json 里 "
+                           "model_type 是 qwen3）；\n"
+                           "或改用「📄 选文件」只指定它的权重文件（这样训练会用内置配置加载）✓")
+        if "qwen" not in _mt.lower() and not any("qwen" in a.lower() for a in _arch):
+            return False, ("这个文件夹里的 config.json 不是 Qwen3（model_type=%s）✗\n"
+                           "请选 Qwen3-0.6B 模型本身的文件夹。" % _mt)
+        if _deeper:
+            return False, ("这个文件夹里有 config.json，但**子文件夹里还有别的模型** —— "
                            "看起来是整个 models 大目录 ✗\n"
-                           "请选 **Qwen3-0.6B 模型本身的文件夹**（里面有 config.json 或 "
-                           "model.safetensors），或改用「📄 选文件」直接指定它的 model.safetensors。")
+                           "请选 Qwen3-0.6B 模型**本身的文件夹**，或改用「📄 选文件」。")
+        if _std_here or _sf_here:
+            return True, "就绪（完整模型文件夹，已确认是 Qwen3）"
+        return False, ("文件夹里有 config.json 但找不到权重文件"
+                       "（model.safetensors / pytorch_model.bin / 分片）。")
+    # 无 config.json：靠「本层权重」+「不是容器目录」判断 ✓
+    if _deeper:
+        return False, ("这个文件夹里没有 Qwen3 的 config.json，而**子文件夹里还有别的模型** —— "
+                       "看起来是整个 models 大目录 ✗\n"
+                       "请选 **Qwen3-0.6B 模型本身的文件夹**（里面有 config.json 或 "
+                       "model.safetensors），或改用「📄 选文件」直接指定它的 model.safetensors。")
+    if not _sf_here:
         return False, "这个文件夹里没有可用的权重文件（.safetensors / .bin）"
-    if len(_sf_here) == 1:
-        return True, "就绪（按单文件模式加载）"
+    if _std_here or len(_sf_here) == 1:
+        return True, "就绪（按单文件模式加载，训练会用内置配置）"
     return False, ("这个文件夹里有 %d 个模型文件，看起来不是 Qwen3 模型本身的目录 ✗\n"
                    "请选 Qwen3-0.6B 的文件夹本身，或改用「📄 选文件」指定它的 model.safetensors。"
                    % len(_sf_here))
@@ -12038,6 +12080,14 @@ def _ensure_anima_components(logf=print):
     os.makedirs(base, exist_ok=True)
     # Qwen3 就绪判定：①完整目录（含 config.json）②单个 safetensors 权重（sd-scripts 单文件模式）
     # 兼容新旧安装目录（KohyaLoraTool\\anima 与老版 Kohya_ss），用户按提示手动放置也能识别。
+    # ★ 你指定过、但校验没过时，**必须当场说清楚**（2026-09-20 用户日志实证：
+    #   他指定了 ComfyUI 的 models 大目录，日志里只有一行「✓ 文本编码器已就绪：<大目录>」，
+    #   看不出任何异常 ✗ 直到训练才报 Unrecognized model ✗）
+    _raw_q = anima_get_component_raw("qwen3")
+    if _raw_q and not anima_get_component("qwen3"):
+        logf("[Anima] ⚠ 忽略你之前指定的文本编码器：%s" % _raw_q)
+        logf("[Anima]   原因：%s" % (_anima_stale_info("qwen3")[1] or "校验未通过"))
+        logf("[Anima]   改用自动查找 / 下载（可重新指定，或点「↩ 恢复默认」清除）")
     qwen3_path, qwen3_base = _anima_find_qwen3_any()
     if qwen3_path is None:
         qwen3_dir = os.path.join(base, "Qwen3-0.6B")

@@ -1,7 +1,7 @@
 {
-  "version": "v0.17.7",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.17.7/Setup.exe",
+  "version": "v0.17.8",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.17.8/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "54ca93cb52871000c2d922c77d32a110ddb8a636823f833b5161ec40423b1b43",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.17.7 更新（2026-09-20）\n\n· 修复：Anima 指定 Qwen3 时，如果选成了 ComfyUI 的 models 大目录，\n  以前会「校验通过」但训练时加载不到 Qwen3。现在会当场拦下并说明该怎么选。\n\n· 新增：Anima 组件可「恢复默认」（清除指定，回到自动查找/下载）\n\n· 指定过的路径一旦失效（被挪走/删除），现在会明确提示，不再默默改用别的"
+  "setup_sha256": "4ae630852ad40f487d9af20569456022e8c12cfdee01523be19b95c5173b10a2",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.17.8 更新（2026-09-20）\n\n· 修复：Anima 的 Qwen3 文本编码器，指定文件夹时以前会「校验通过」\n  但训练时报 Unrecognized model / 缺少 model_type。\n  现在会读该文件夹的 config.json 来确认它确实是 Qwen3；\n  子文件夹里还放着别的模型的（也就是整个 models 大目录）也会当场拦下。\n  被拦下时会说明原因，并自动改用自动查找 / 下载。\n\n· 新增：主界面底部常显的「🔧 Anima 配套组件」入口 ——\n  可随时查看当前用的是哪个、指定本机已有的文件、或恢复默认。\n  （以前这个入口藏得很深，指定错了就再也找不到地方改）\n\n· 提示：如果你的 ComfyUI 里确实有 Qwen3-0.6B，请选它自己那一层的文件夹\n  （里面有 config.json 的那个），或直接选它的 model.safetensors 文件"
 }

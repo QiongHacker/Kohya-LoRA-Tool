@@ -1,4 +1,66 @@
-﻿## v0.17.7（2026-09-20）
+﻿## v0.17.8（2026-09-20）
+
+### 修复★★★：v0.17.7 的 Anima 校验**仍放行同一个大目录** → 训练报 `Unrecognized model`
+
+- **用户反馈**（v0.17.7 日志实证，两轮训练都失败）：
+  ```
+  [Anima] ✓ 文本编码器已就绪：E:/comflyui/.../ComfyUI/models        ← 又被放行了 ✗
+  INFO  Loading Qwen3 text encoder from anima_utils.py:212
+  ValueError: Unrecognized model in E:/comflyui/.../ComfyUI/models.
+              Should have a `model_type` key in its config.json     ← 训练时才炸 ✗
+  ```
+- **★ 根因**：v0.17.7 的校验改成了「只看该目录**本身**有没有权重」✗ ——
+  **只数权重个数、没读 config.json 的内容** ✗ 而那个 `models` 大目录
+  **本层恰好有一个缺 `model_type` 的 config.json + 一个权重文件** ✓
+  → 判「就绪（单文件模式）」✗ → 放行 → 训练时才炸 ✗
+- **反推证据**（这次不用猜）：训练报的是
+  `Should have a model_type key in its config.json` —— 这句**只在**
+  「目录里有 config.json、但里面没有 model_type」时出现 ✓
+  （没有 config.json 时 transformers 报的是 another 一句）✓
+- **修复**：
+  1. 有 `config.json` → **必须读它**：`model_type` 缺失 → **拒绝** ✓；
+     `model_type`/`architectures` 不是 qwen → **拒绝** ✓
+     （拒绝文案直接把训练时那句错误写出来，一眼能对上 ✓）
+  2. 无 `config.json` → 用**容器特征**判断：**子文件夹里还有别的模型** → 判定为大目录、拒绝 ✓
+     （Qwen3 自己的权重只会和 config 同层，绝不会散在子目录里 ✓）
+  3. 训练前日志**明确说出被你忽略的指定 + 原因** ✓
+     （以前只有一行「✓ 已就绪：<大目录>」，看不出任何异常 ✗）
+     ```
+     [Anima] ⚠ 忽略你之前指定的文本编码器：E:/.../ComfyUI/models
+     [Anima]   原因：这个文件夹里的 config.json 没有 model_type —— …
+     [Anima]   改用自动查找 / 下载（可重新指定，或点「↩ 恢复默认」清除）
+     ```
+  4. ★ **新增「🔧 Anima 配套组件」常显入口** ✓ —— 这是本次另一半问题：
+     v0.17.7 虽然加了「↩ 恢复默认」，但**用户根本打不开那个对话框** ✗
+     · 唯一入口在 `_show_arch_download_help()` 里 ✗ —— 它只在
+       「该架构**没有**应用内下载」时才被调，而 Anima **有**应用内下载 → 基本不触发 ✗
+     · 另一条是训练前检查，只在「组件缺失」时才弹 ✗ ——
+       而他已指定（虽然指定错），检查认为「已就绪」→ **永远不弹** ✗
+     → 结论：**一旦指定错就再也进不去** ✗ 只能手改 settings.json ✗
+       （用户实测反馈：「点左侧的『Anima 组件 / 指定已有文件』，好像没有这个啊」✓ 属实）
+     → 现在**主卡片底部常显**，**任何模式**下都能进来 查看 / 重新指定 / 恢复默认 ✓
+       （含悬停说明：要选 Qwen3-0.6B **本身的文件夹**，别选 ComfyUI 的 models 大目录）
+- **兼容**（不误伤官方支持的用法 ✓）：
+  · 完整 Qwen3 文件夹（config.json 里 `model_type: qwen3`）→ 通过 ✓
+  · **只给一个 `model.safetensors`**（无 config，sd-scripts 用内置配置）→ 通过 ✓
+
+**真机验证**（复刻他日志的确切形态 + 边界 ✓）：
+
+| 场景 | 结果 |
+|---|---|
+| 大目录本层有**缺 model_type** 的 config ✓（复刻他的情况） | **拦下** ✓ 文案含 `model_type` ✓ |
+| 大目录本层无 config、子目录有权重 | 拦下 ✓ |
+| config.json 是别的模型（`model_type: clip`） | 拦下 ✓ |
+| 合法完整 Qwen3（`model_type: qwen3`） | 通过 ✓ |
+| 只有一个 `model.safetensors`（单文件模式） | 通过 ✓ |
+
+- 回归测试 `ANIMA_QWEN3_PICK_GUARD_OK` 增补上述用例 ✓
+- 同步修正旧测试 `test_anima_component_picker` 的夹具 ✗ ——
+  它原先写 `config.json = "{}"`（**缺 model_type**）✗ 那正是用户踩的坑，现在按真实 Qwen3 写法 ✓
+
+---
+
+## v0.17.7（2026-09-20）
 
 ### 修复★★：Anima 指定 Qwen3 时**选错目录也校验通过** → 训练时"识别不到 qwen3"
 

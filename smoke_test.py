@@ -836,7 +836,13 @@ def test_anima_component_picker():
     td = tempfile.mkdtemp(prefix="kk_anima_t_")
     q3 = os.path.join(td, "Qwen3-0.6B")
     os.makedirs(q3, exist_ok=True)
-    open(os.path.join(q3, "config.json"), "w", encoding="utf-8").write("{}")
+    # ⚠️ 2026-09-20：config.json 必须写成**真实的 Qwen3 配置**（含 model_type）✗
+    #    以前写 "{}" 也能过，但那正是用户踩的坑：
+    #      ComfyUI models 大目录里恰有个缺 model_type 的 config.json →
+    #      旧校验只数权重个数 → 放行 → 训练时报
+    #      「Unrecognized model … Should have a model_type key in its config.json」✗
+    with open(os.path.join(q3, "config.json"), "w", encoding="utf-8") as _f:
+        _f.write('{"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]}')
     open(os.path.join(q3, "model.safetensors"), "wb").write(b"\x00" * 16)
     bad = os.path.join(td, "model.safetensors (1).safetensors")
     open(bad, "wb").write(b"\x00" * 16)
@@ -2050,10 +2056,40 @@ def test_anima_qwen3_pick_guards():
         assert not ok, "把 models 大目录当 Qwen3 接受了 ✗（用户选错却以为成功）"
         assert core.anima_get_component("qwen3") is None, "大目录竟然还生效 ✗"
 
+        # ①b ★ 复刻用户 v0.17.7 日志里那次失败的确切形态：
+        #     大目录**本层有个缺 model_type 的 config.json** + 一个权重文件 ✗
+        #     训练时报：Unrecognized model … Should have a model_type key in its config.json
+        #     上一版只数权重个数、没读 config 内容 → 放行 ✗ → 训练才炸 ✗
+        big2 = os.path.join(tmp, "ComfyUI", "models")
+        os.makedirs(os.path.join(big2, "unet"), exist_ok=True)
+        with open(os.path.join(big2, "config.json"), "w", encoding="utf-8") as f:
+            f.write('{"architectures": ["SomethingElse"]}')      # ← 缺 model_type ✗
+        with open(os.path.join(big2, "some_model.safetensors"), "wb") as f:
+            f.write(b"0" * (2 * 1024 * 1024))
+        with open(os.path.join(big2, "unet", "sd_xl.safetensors"), "wb") as f:
+            f.write(b"0" * (3 * 1024 * 1024))
+        _clear_manual()
+        ok_b, why_b = core.anima_set_component("qwen3", big2)
+        assert not ok_b, "「本层有缺 model_type 的 config.json」的大目录仍被接受 ✗" \
+                         "（这正是用户 v0.17.7 训练时报 Unrecognized model 的原因）"
+        assert "model_type" in why_b, "拦下了但没说明是 model_type 的问题 ✗（用户不知道该改什么）"
+
+        # ①c config.json 明确是别的模型 → 拒绝
+        other = os.path.join(tmp, "other")
+        os.makedirs(other, exist_ok=True)
+        with open(os.path.join(other, "config.json"), "w", encoding="utf-8") as f:
+            f.write('{"model_type": "clip"}')
+        with open(os.path.join(other, "model.safetensors"), "wb") as f:
+            f.write(b"0" * (2 * 1024 * 1024))
+        _clear_manual()
+        assert not core.anima_set_component("qwen3", other)[0], \
+            "非 Qwen3 的 config.json 竟被接受 ✗"
+
         # ② 合法的 Qwen3 文件夹：必须通过且被使用
         okd = os.path.join(tmp, "good", "Qwen3-0.6B")
         os.makedirs(okd, exist_ok=True)
-        open(os.path.join(okd, "config.json"), "w").write("{}")
+        with open(os.path.join(okd, "config.json"), "w", encoding="utf-8") as f:
+            f.write('{"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]}')
         with open(os.path.join(okd, "model.safetensors"), "wb") as f:
             f.write(b"0" * (2 * 1024 * 1024))
         _clear_manual()
@@ -2063,8 +2099,19 @@ def test_anima_qwen3_pick_guards():
         assert os.path.normcase(_rp or "") == os.path.normcase(okd), \
             "运行时没用指定的路径（得到 %s）" % _rp
 
+        # ②b 官方支持的单文件模式：只有一个 model.safetensors（无 config）→ 必须通过
+        #     （sd-scripts 会用内置配置加载它，这条路不能误伤 ✗）
+        _only = os.path.join(tmp, "only", "qwen3_weights")
+        os.makedirs(_only, exist_ok=True)
+        with open(os.path.join(_only, "model.safetensors"), "wb") as f:
+            f.write(b"0" * (2 * 1024 * 1024))
+        _clear_manual()
+        assert core.anima_set_component("qwen3", _only)[0], \
+            "单文件模式（只有 model.safetensors）被误拒 ✗"
+
         # ③ 指定后失效 → 必须明确说明（不得静默回落）
-        _sh.rmtree(os.path.join(tmp, "good"), ignore_errors=True)
+        #    ⚠️ 要删**当前指定的那个**（②b 已把指定换成 _only）✗ 删错目录会测不出问题
+        _sh.rmtree(os.path.join(tmp, "only"), ignore_errors=True)
         _st = (core.anima_component_status().get("qwen3") or {})
         assert _st.get("stale"), "指定的路径失效了却没有任何提示 ✗（用户会不明所以）"
         assert _st.get("stale_why"), "只说失效、不说原因 ✗"
@@ -2074,6 +2121,18 @@ def test_anima_qwen3_pick_guards():
         assert ok3 and not core.anima_get_component_raw("qwen3"), "恢复默认没清掉指定 ✗"
         assert not (core.anima_component_status().get("qwen3") or {}).get("stale"), \
             "清除后仍报失效 ✗"
+
+        # ⑤ ★ 必须有**常显入口**（2026-09-20 用户实测：「好像没有这个啊」✗）
+        #    此前唯一入口在「底模下载」那条几乎走不到的分支里 ✗ 一旦指定错就再也进不去 ✗
+        #    没有入口 = 上面的「恢复默认」用户根本点不到 = 等于没做 ✓
+        _gsrc = open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8-sig").read()
+        assert "btn_anima_components" in _gsrc, "缺少 Anima 组件常显入口 ✗（用户无法自助恢复）"
+        _i_fn = _gsrc.index("def _build_main_cards")
+        _i_next = _gsrc.find("\n    def ", _i_fn + 10)
+        _body = _gsrc[_i_fn:_i_next if _i_next > 0 else len(_gsrc)]
+        assert "btn_anima_components" in _body, \
+            "入口不在 `_build_main_cards` 里 → 可能随模式隐藏 ✗（被卡住时可能不在 Anima 模式）"
+        assert "↩ 恢复默认" in _gsrc, "对话框里没有「恢复默认」按钮 ✗"
     finally:
         if _bak is not None:
             with open(_sp, "w", encoding="utf-8") as f:

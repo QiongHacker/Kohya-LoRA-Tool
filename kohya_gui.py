@@ -2596,6 +2596,32 @@ class App:
             self._main_btns[t] = b
         ctk.CTkLabel(s, text="💡 训练前可用「标签编辑器」检查/修正每张图的标签：WD14 自动打的标签偶尔不准，手动改好后 LoRA 学得更准。",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", padx=22, pady=(2, 12))
+        # ★ Anima 配套组件：**常显**入口（2026-09-20）
+        #   为什么必须有（真实用户被卡死的经过）：
+        #     · 唯一入口原先在「底模下载」那条**几乎走不到**的分支里 ✗
+        #       （`_show_arch_download_help` 只在「该架构没有应用内下载」时才调，
+        #        而 Anima 是有应用内下载的 → 基本不触发 ✗）
+        #     · 另一条是训练前检查，但只在「组件缺失」时才弹 ✗
+        #   于是用户**一旦指定错**（例如选了 ComfyUI 的 models 大目录）：
+        #     训练前检查认为「已就绪」→ 不再弹 ✗；想改 / 想恢复默认 → 界面上找不到入口 ✗
+        #     → 只能手改 settings.json ✗（用户实测反馈："好像没有这个啊" ✓）
+        #   现在放一个常显入口：**任何模式**下都能进来 查看 / 重新指定 / 恢复默认 ✓
+        _anima_row = ctk.CTkFrame(s, fg_color="transparent")
+        _anima_row.pack(fill="x", padx=22, pady=(0, 12))
+        self.btn_anima_components = ctk.CTkButton(
+            _anima_row, text="🔧 Anima 配套组件", width=142, height=30,
+            fg_color="transparent", hover_color="#252a36", border_width=1,
+            border_color=BORDER, text_color=SUB, corner_radius=6,
+            font=ui_font(FONT_HINT), command=lambda: self._show_anima_components())
+        self.btn_anima_components.pack(side="left")
+        ctk.CTkLabel(_anima_row,
+                     text="（Qwen3 文本编码器 / VAE —— 指定错了、或想恢复默认，都点这里）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
+        self._tip(self.btn_anima_components,
+                  "Anima 训练需要两个配套组件：Qwen3-0.6B 文本编码器（约 1.2GB）+ Qwen-Image VAE（约 0.3GB）。\n"
+                  "打开后可查看当前实际在用哪个、指定本机已有的文件、或「恢复默认」回到自动查找/下载。\n"
+                  "⚠ 指定请选 **Qwen3-0.6B 模型本身的文件夹**（里面有 config.json），\n"
+                  "不要选 ComfyUI 的 models 大目录（那里面并没有 Qwen3）。")
         # 卡片重建后控件是全新的，重算「已手动设定」提示条
         self._refresh_override_bar()
 
