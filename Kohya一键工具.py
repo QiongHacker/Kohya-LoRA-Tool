@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.6"
+APP_VERSION = "0.17.7"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -11689,22 +11689,52 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None, vpy=None):
 _ANIMA_COMPONENT_KEYS = {"qwen3": "anima_qwen3_path", "vae": "anima_vae_path"}
 
 
-def anima_get_component(kind):
-    """读取用户手动指定的 Anima 组件路径（kind: qwen3 / vae）。
+def anima_get_component_raw(kind):
+    """读用户设置的**原始值**（不校验存在、不校验是否合法）—— 只在界面说明"你指定过什么"时用 ✓"""
+    _k = _ANIMA_COMPONENT_KEYS.get(kind)
+    if not _k:
+        return ""
+    try:
+        return ((_load_app_settings() or {}).get(_k) or "").strip()
+    except Exception:
+        return ""
 
-    未设置、或路径已失效（文件被挪走/删除）→ 返回 None，调用方回落到自动检测。
-    **失效时回落而不是报错**：用户挪过文件后仍能正常训练，不会卡死。
+
+def anima_get_component(kind):
+    """读取用户手动指定**且当前可用**的 Anima 组件路径（kind: qwen3 / vae）。
+
+    未设置、路径已失效（被挪走/删除）、或**校验不通过** → 返回 None，调用方回落到自动检测。
+    **失效时回落而不是报错**：用户挪过文件后仍能正常训练，不会卡死 ✓
+    （界面用 `anima_component_status()` 的 stale 字段把"你指定的那个已失效"讲清楚 ✓）
+
+    ⚠️ 2026-09-20 补校验：原先只判 `os.path.exists` ✗ → 用户**早先选错**的路径
+    （例如选成了整个 models 大目录）会一直生效下去 ✗ 现在会在此处自动失效、回落 ✓
+    """
+    p = anima_get_component_raw(kind)
+    if not p or not os.path.exists(p):
+        return None
+    ok, _why = _anima_component_ok(kind, p)
+    return p if ok else None
+
+
+def anima_clear_component(kind):
+    """**清除指定、恢复默认**（回到全自动查找/下载）。
+
+    ★ 2026-09-20 用户问题：「有啥办法恢复默认路径吗」✓ —— 此前**没有任何入口** ✗
+      指定之后只能手动去改 settings.json，或者干脆把文件删掉让它失效 ✓ 都没法自助 ✓
     """
     _k = _ANIMA_COMPONENT_KEYS.get(kind)
     if not _k:
-        return None
+        return False, "未知组件：%s" % kind
     try:
-        p = ((_load_app_settings() or {}).get(_k) or "").strip()
-    except Exception:
-        return None
-    if not p or not os.path.exists(p):
-        return None
-    return p
+        _s = dict(_load_app_settings() or {})
+        _s.pop(_k, None)
+        if not _save_app_settings(_s):
+            return False, "保存设置失败"
+    except Exception as e:
+        return False, "清除失败：%s" % e
+    _label = "文本编码器" if kind == "qwen3" else "VAE"
+    return True, "已恢复默认（%s 改回自动查找/下载）" % _label
 
 
 def _anima_component_ok(kind, path):
@@ -11736,18 +11766,38 @@ def _anima_component_ok(kind, path):
         return False, ("文件名不是 transformers 认的标准名（model.safetensors / "
                        "pytorch_model.bin / model-00001-of-00002.safetensors）。\n"
                        "请把文件改名为 model.safetensors 再选，或选择整个模型文件夹。")
-    # 文件夹
-    if _qwen3_std_weight_in(path):
-        return True, "就绪（完整文件夹）"
+    # 文件夹：必须是「Qwen3 本身」的目录，不能是装着很多个模型的大目录 ✗
+    #   ⚠️ 2026-09-20 实测复现（用户反馈「选了以后识别不到 qwen3，就算那个路径有也不行」✓）：
+    #      原逻辑用 `os.walk` **递归**找任意 .safetensors，于是把 **ComfyUI 的 models 大目录**
+    #      选进去也「校验通过」✗ → 运行时就把这个大目录当 Qwen3 交给 sd-scripts →
+    #      里面没有 Qwen3 的 config.json / tokenizer → 加载不到 → 用户看到的就是「识别不到」✗
+    #      而且当时**校验还回了「就绪」**，用户完全不知道自己选错了 ✗
+    #   → 改成**只看该目录本身**（不递归）✓ 并把「大目录」这种情况明确指出来 ✓
     _has_cfg = os.path.isfile(os.path.join(path, "config.json"))
+    _std_here = _qwen3_std_weight_here(path)        # 本层的标准名权重
+    _sf_here = _weights_here(path)                  # 本层的 safetensors / bin
     if _has_cfg:
+        if _std_here:
+            return True, "就绪（完整模型文件夹）"
+        if len(_sf_here) == 1:
+            return True, "就绪（单文件模式）"
+        if _sf_here:
+            return False, ("这个文件夹里有 config.json，但**同时有多个权重文件**，"
+                           "无法确定哪个是 Qwen3 —— 请选 Qwen3-0.6B 模型**本身的文件夹**。")
         return False, ("文件夹里有 config.json 但找不到标准权重文件"
                        "（model.safetensors / pytorch_model.bin / 分片）。")
-    for _root, _dirs, _files in os.walk(path):
-        for _f in _files:
-            if _f.lower().endswith((".safetensors", ".bin")):
-                return True, "就绪（按单文件模式加载）"
-    return False, "这个文件夹里没有可用的权重文件（.safetensors / .bin）"
+    if not _sf_here:
+        if _has_weights_deeper(path):
+            return False, ("这个文件夹**本身没有权重**，只有子文件夹里才有 —— "
+                           "看起来是整个 models 大目录 ✗\n"
+                           "请选 **Qwen3-0.6B 模型本身的文件夹**（里面有 config.json 或 "
+                           "model.safetensors），或改用「📄 选文件」直接指定它的 model.safetensors。")
+        return False, "这个文件夹里没有可用的权重文件（.safetensors / .bin）"
+    if len(_sf_here) == 1:
+        return True, "就绪（按单文件模式加载）"
+    return False, ("这个文件夹里有 %d 个模型文件，看起来不是 Qwen3 模型本身的目录 ✗\n"
+                   "请选 Qwen3-0.6B 的文件夹本身，或改用「📄 选文件」指定它的 model.safetensors。"
+                   % len(_sf_here))
 
 
 def anima_set_component(kind, path, logf=print):
@@ -11771,11 +11821,34 @@ def anima_set_component(kind, path, logf=print):
     return True, "已指定%s：%s" % (_label, _path)
 
 
+def _anima_stale_info(kind):
+    """用户指定过、但当前**用不了**时，返回 (原始路径, 原因)；否则 (None, None)。
+
+    ★ 为什么要单独返回：以前指定失效后是**静默回落** ✗ —— 界面显示「自动检测」，
+      用户只会觉得"我明明指定了，怎么好像没生效" ✗（与"打标悄悄用旧模型"同一类问题 ✓）
+    """
+    _raw = anima_get_component_raw(kind)
+    if not _raw:
+        return None, None
+    if not os.path.exists(_raw):
+        return _raw, "你指定的路径已不存在（文件被移动或删除）"
+    _ok, _why = _anima_component_ok(kind, _raw)
+    if not _ok:
+        return _raw, _why
+    return None, None
+
+
 def anima_component_status():
-    """给界面用：两个组件当前"将使用什么"。返回 {qwen3: {...}, vae: {...}}。"""
+    """给界面用：两个组件当前"将使用什么"。返回 {qwen3: {...}, vae: {...}}。
+
+    每项：path（实际将用的）/ manual（是不是你指定的）/ stale + stale_path + stale_why
+    （你指定过、但当前用不了 → 界面必须说出来 ✗ 不能静默 ✓）
+    """
     out = {}
     q = anima_get_component("qwen3") or _anima_find_qwen3_any()[0]
-    out["qwen3"] = {"path": q, "manual": bool(anima_get_component("qwen3"))}
+    _sq, _swq = _anima_stale_info("qwen3")
+    out["qwen3"] = {"path": q, "manual": bool(anima_get_component("qwen3")),
+                    "stale": bool(_sq), "stale_path": _sq or "", "stale_why": _swq or ""}
     v = anima_get_component("vae")
     if not v:
         for _b in _anima_bases():
@@ -11790,7 +11863,9 @@ def anima_component_status():
                         break
             if v:
                 break
-    out["vae"] = {"path": v, "manual": bool(anima_get_component("vae"))}
+    _sv, _swv = _anima_stale_info("vae")
+    out["vae"] = {"path": v, "manual": bool(anima_get_component("vae")),
+                  "stale": bool(_sv), "stale_path": _sv or "", "stale_why": _swv or ""}
     return out
 
 
@@ -11822,6 +11897,59 @@ def _anima_find_qwen3_any():
         if p:
             return p, base
     return None, None
+
+
+def _qwen3_std_weight_here(dirpath):
+    """**该目录本身**（不递归）是否含 transformers 认的标准权重名。
+
+    与 `_qwen3_std_weight_in` 的区别：那个会递归（用于已确知是 Qwen3-0.6B 的文件夹），
+    这个只看一层 —— 校验用户选的目录时**必须**用这个 ✗
+    （递归会把"装着很多模型的大目录"也判成就绪，见 `_anima_component_ok` 的说明）
+    """
+    try:
+        for f in os.listdir(dirpath):
+            low = f.lower()
+            if low in ("model.safetensors", "pytorch_model.bin"):
+                return True
+            if re.match(r"^model-\d+-of-\d+\.(safetensors|bin)$", low):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _weights_here(dirpath):
+    """**该目录本身**（不递归）的权重文件列表（.safetensors / .bin）。"""
+    out = []
+    try:
+        for f in os.listdir(dirpath):
+            if os.path.isfile(os.path.join(dirpath, f)) and \
+                    f.lower().endswith((".safetensors", ".bin")):
+                out.append(f)
+    except Exception:
+        pass
+    return sorted(out)
+
+
+def _has_weights_deeper(dirpath, max_depth=2):
+    """子目录里（不含本层）是否有权重文件 —— 用于识别"选成了整个 models 大目录"。
+
+    限深 2 层 + 只看文件名，不做任何加载：ComfyUI 的 models 目录常有几万个文件，
+    无脑深递归会让对话框卡住 ✗
+    """
+    base = dirpath.rstrip("\\/").count(os.sep)
+    try:
+        for root, dirs, files in os.walk(dirpath):
+            if root.rstrip("\\/").count(os.sep) - base >= max_depth:
+                dirs[:] = []
+            if os.path.normcase(root) == os.path.normcase(dirpath):
+                continue
+            for f in files:
+                if f.lower().endswith((".safetensors", ".bin")):
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 def _qwen3_std_weight_in(dirpath):

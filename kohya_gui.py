@@ -7103,6 +7103,13 @@ class App:
             self._set_status(msg)
             _refresh()
 
+        def _clear(kind):
+            """恢复默认：清除手动指定，回到全自动查找/下载 ✓"""
+            ok, msg = core.anima_clear_component(kind)
+            self._set_status(msg)
+            self._log("[Anima] " + msg)
+            _refresh()
+
         def _refresh():
             try:
                 st = core.anima_component_status()
@@ -7112,11 +7119,23 @@ class App:
             for _k, _lbl in _rows.items():
                 _d = st.get(_k) or {}
                 _p = _d.get("path")
+                # ⚠️ 你指定过、但当前用不了 → 必须**说出来**（以前是静默回落 ✗，
+                #    用户只会觉得"我明明指定了，怎么没生效"✗ 与"打标悄悄用旧模型"同一类）
+                _warn = ""
+                if _d.get("stale"):
+                    _warn = ("\n⚠ 你指定的那个已失效：%s\n   原因：%s\n"
+                             "   （可重新指定，或点「↩ 恢复默认」清除）"
+                             % (_d.get("stale_path"), _d.get("stale_why")))
                 if _p:
-                    _src = "你指定" if _d.get("manual") else "自动检测"
-                    _lbl.configure(text="✓ 当前使用（%s）：\n%s" % (_src, _p), text_color="#8fd6a0")
+                    if _d.get("manual"):
+                        _src = "你指定"
+                    else:
+                        _src = "自动检测" if not _warn else "自动检测（你的指定已失效）"
+                    _lbl.configure(text="✓ 当前使用（%s）：\n%s%s" % (_src, _p, _warn),
+                                   text_color=("#e0b0b0" if _warn else "#8fd6a0"))
                 else:
-                    _lbl.configure(text="⚠ 未找到 —— 训练时会自动下载", text_color="#e0b0b0")
+                    _lbl.configure(text="⚠ 未找到 —— 训练时会自动下载%s" % _warn,
+                                   text_color="#e0b0b0")
 
         for _kind, _title, _desc in (
             ("qwen3", "① 文本编码器 Qwen3-0.6B（约 1.2GB）",
@@ -7147,6 +7166,13 @@ class App:
                           font=ui_font(FONT_HINT),
                           command=lambda k=_kind: _pick(k, False)).pack(
                 side="left", padx=(8, 0) if _kind == "qwen3" else (0, 0))
+            # ★「恢复默认」（2026-09-20 用户明确提出：「有啥办法恢复默认路径吗」✗）
+            #   此前**没有任何入口** ✗ 指定之后只能手改 settings.json，或把文件删掉让它失效 ✗
+            ctk.CTkButton(_brow, text="↩ 恢复默认", width=104, height=28,
+                          fg_color="transparent", hover_color="#252a36", border_width=1,
+                          border_color=BORDER, text_color=SUB, corner_radius=6,
+                          font=ui_font(FONT_HINT),
+                          command=lambda k=_kind: _clear(k)).pack(side="left", padx=(8, 0))
             _rows[_kind] = _st
 
         ctk.CTkLabel(w, text="底模（Anima DiT .safetensors ≈5GB）放 models/base 后点「选择底模文件」即可。\n"

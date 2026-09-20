@@ -1,7 +1,7 @@
 {
-  "version": "v0.17.6",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.17.6/Setup.exe",
+  "version": "v0.17.7",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.17.7/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "3c8b7144b15153ec8dc4887792988355477fcf4f5c1417a611f522c4ffaf1a18",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.17.6 更新（2026-09-19）\n\n· 修复：选了新打标模型，实际却在用旧模型打标（且不提示）\n  现在会先下载您选的模型；确实下不到才改用旧模型，并写明实际用的是哪个\n\n· 新增：「重新处理已存在的图片」开关（在「① 准备图片数据」里）\n  改过标签（手动改的 / 用别的打标模型重写过的）后重跑预处理，勾上才会生效\n\n· 界面提示已核实修正：当前模式下无效的选项会自动置灰并说明理由"
+  "setup_sha256": "54ca93cb52871000c2d922c77d32a110ddb8a636823f833b5161ec40423b1b43",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.17.7 更新（2026-09-20）\n\n· 修复：Anima 指定 Qwen3 时，如果选成了 ComfyUI 的 models 大目录，\n  以前会「校验通过」但训练时加载不到 Qwen3。现在会当场拦下并说明该怎么选。\n\n· 新增：Anima 组件可「恢复默认」（清除指定，回到自动查找/下载）\n\n· 指定过的路径一旦失效（被挪走/删除），现在会明确提示，不再默默改用别的"
 }

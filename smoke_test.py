@@ -2003,6 +2003,90 @@ def test_wd14_respects_selected_model():
     print("WD14_RESPECTS_SELECTED_MODEL_OK")
 
 
+def test_anima_qwen3_pick_guards():
+    """Anima「指定 Qwen3 路径」：选错目录必须拦下、能恢复默认、失效必须说出来。
+
+    ★ 2026-09-20 用户反馈（群内转述，后经用户确认属实 ✓）：
+      「训练器第一次用让选 qwen3 的路径位置或者下载，选了以后就识别不到 qwen3 了，
+        就算那个路径有也不行，还问有啥办法恢复默认路径」
+
+      复现后确认：他选的是 **ComfyUI 的 models 大目录** ✗
+      原因：`_anima_component_ok()` 用 `os.walk` **递归**找任意 `model.safetensors`，
+      于是「models 大目录」（下面全是别的模型）也**校验通过** ✗
+      → 运行时把这个大目录当 Qwen3 交给 sd-scripts → 里面没有 Qwen3 的
+        config.json/tokenizer → 加载不到 → 用户看到的就是「识别不到，路径明明有」✗
+      而且校验当时还回了「就绪」→ 用户完全不知道自己选错了 ✗
+
+    判据：
+      ① 选「大目录」（本层无权重、只有子目录里有）→ **必须被拒** ✓
+      ② 选合法 Qwen3 文件夹 → 必须通过，且运行时确实用它 ✓
+      ③ 指定后路径失效 → status 必须 `stale=True` 并给出原因（不得静默回落 ✗）
+      ④ `anima_clear_component` 能清除指定（用户要的「恢复默认」✗ 以前完全没有入口）
+    """
+    import shutil as _sh
+    import tempfile as _tf
+    import Kohya一键工具 as core        # noqa: E402
+
+    # 会写真实 settings.json → 先备份，结束恢复（不能弄丢用户设置）
+    _sp = core._settings_path()
+    _bak = open(_sp, encoding="utf-8").read() if os.path.isfile(_sp) else None
+    tmp = _tf.mkdtemp(prefix="anima_guard_")
+
+    def _clear_manual():
+        _s = dict(core._load_app_settings() or {})
+        _s.pop("anima_qwen3_path", None)
+        core._save_app_settings(_s)
+
+    try:
+        # ① 像 ComfyUI 的 models 大目录：本层没权重，全在子目录里
+        big = os.path.join(tmp, "models")
+        for sub in ("unet", "checkpoints", "loras"):
+            d = os.path.join(big, sub)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "sd_xl_base.safetensors"), "wb") as f:
+                f.write(b"0" * (3 * 1024 * 1024))
+        _clear_manual()
+        ok, why = core.anima_set_component("qwen3", big)
+        assert not ok, "把 models 大目录当 Qwen3 接受了 ✗（用户选错却以为成功）"
+        assert core.anima_get_component("qwen3") is None, "大目录竟然还生效 ✗"
+
+        # ② 合法的 Qwen3 文件夹：必须通过且被使用
+        okd = os.path.join(tmp, "good", "Qwen3-0.6B")
+        os.makedirs(okd, exist_ok=True)
+        open(os.path.join(okd, "config.json"), "w").write("{}")
+        with open(os.path.join(okd, "model.safetensors"), "wb") as f:
+            f.write(b"0" * (2 * 1024 * 1024))
+        _clear_manual()
+        ok2, why2 = core.anima_set_component("qwen3", okd)
+        assert ok2, "合法的 Qwen3 文件夹反被拒 ✗（会误伤正常用户）：%s" % why2
+        _rp, _rb = core._anima_find_qwen3_any()
+        assert os.path.normcase(_rp or "") == os.path.normcase(okd), \
+            "运行时没用指定的路径（得到 %s）" % _rp
+
+        # ③ 指定后失效 → 必须明确说明（不得静默回落）
+        _sh.rmtree(os.path.join(tmp, "good"), ignore_errors=True)
+        _st = (core.anima_component_status().get("qwen3") or {})
+        assert _st.get("stale"), "指定的路径失效了却没有任何提示 ✗（用户会不明所以）"
+        assert _st.get("stale_why"), "只说失效、不说原因 ✗"
+
+        # ④ 恢复默认
+        ok3, _msg = core.anima_clear_component("qwen3")
+        assert ok3 and not core.anima_get_component_raw("qwen3"), "恢复默认没清掉指定 ✗"
+        assert not (core.anima_component_status().get("qwen3") or {}).get("stale"), \
+            "清除后仍报失效 ✗"
+    finally:
+        if _bak is not None:
+            with open(_sp, "w", encoding="utf-8") as f:
+                f.write(_bak)
+        else:
+            try:
+                os.remove(_sp)
+            except Exception:
+                pass
+        _sh.rmtree(tmp, ignore_errors=True)
+    print("ANIMA_QWEN3_PICK_GUARD_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -2030,6 +2114,7 @@ def main():
     check("界面提示的适用范围与代码一致", test_param_scope_matches_code)
     check("改过的标签能通过「重新处理」生效", test_preprocess_overwrite_picks_up_changed_captions)
     check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
+    check("Anima 指定 Qwen3：选错要拦、能恢复默认、失效要说", test_anima_qwen3_pick_guards)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
     check("自带环境入口可见且能打开", test_env_locations_ui)
     check("Krea2 量化档必须按显存配块交换", test_fizgig_quant_swap_vram_table)
