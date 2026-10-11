@@ -2,23 +2,28 @@
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import type { CaptionServiceSettings, PromptReverseReport } from '../bridge'
 import UiIcon from './UiIcon.vue'
+import PixaiTagOptions from './PixaiTagOptions.vue'
 
 const props = defineProps<{ open: boolean; desktop: boolean }>()
 const emit = defineEmits<{ close: []; notify: [message: string] }>()
 const dialogRef = ref<HTMLElement | null>(null)
 let previousFocus: HTMLElement | null = null
 const path = ref('')
-const method = ref<'natural' | 'wd14'>('wd14')
+const method = ref<'natural' | 'wd14' | 'ram' | 'qwen_vl' | 'pixai'>('wd14')
 const language = ref<'zh' | 'en'>('zh')
 const length = ref<'brief' | 'detailed'>('brief')
+const device = ref<'auto' | 'cpu'>('auto')
 const wd14Model = ref('swinv2-v3')
 const threshold = ref(.35)
+const ramThreshold = ref(.68)
+const pixaiOptions = reactive({ pixai_character: false, pixai_copyright: false, pixai_style: false, pixai_threshold: '.17' })
 const settings = reactive<CaptionServiceSettings>({ provider:'compatible', base_url:'http://127.0.0.1:1234/v1', model:'', unload_after:true })
 const apiKey = ref('')
 const dirty = ref(false)
 const saving = ref(false)
 const allowRemote = ref(false)
 const taskId = ref('')
+const resultTaskId = ref('')
 const busy = ref(false)
 const starting = ref(false)
 const exporting = ref(false)
@@ -30,6 +35,11 @@ const edits = ref<Record<string,string>>({})
 const thumbnails = ref<Record<string,string>>({})
 const page = ref(0)
 const outputPath = ref('')
+const localModel = ref<{ ready?: boolean; name?: string; directory?: string; size_bytes?: number }>({})
+const isLocal = computed(() => method.value === 'ram' || method.value === 'qwen_vl' || method.value === 'pixai')
+const localMethod = computed(() => method.value === 'qwen_vl' ? 'qwen_vl' : method.value === 'pixai' ? 'pixai' : 'ram')
+let modelRevision = 0
+const downloadingModel = ref(false)
 let timer: ReturnType<typeof setTimeout> | undefined
 let revision = 0
 const pageSize = 12
@@ -59,8 +69,13 @@ async function poll() {
   try {
     const result = await api.get_prompt_reverse(taskId.value)
     if (current !== revision || !props.open) return
+    if (result.task?.kind === 'prompt_reverse_model' && result.task.model_key) {
+      method.value = result.task.model_key
+      downloadingModel.value = result.task.status === 'running'
+    }
     if (result.report) {
       report.value = result.report
+      resultTaskId.value = result.report.task_id
       for (const item of result.report.items) if (item.caption !== undefined && edits.value[item.name] === undefined) edits.value[item.name] = item.caption
       if (page.value >= pageCount.value) page.value = pageCount.value - 1
     }
@@ -68,19 +83,43 @@ async function poll() {
     detail.value = result.task?.detail || ''
     progress.value = result.task?.progress ?? null
     message.value = result.task?.message || result.report?.error || ''
-    if (!busy.value) { void loadThumbnails(); return }
+    if (!busy.value) { downloadingModel.value = false; void loadLocalModel(); void loadThumbnails(); return }
   } catch { message.value = '进度暂时无法读取，关闭后重新打开工具可继续查看。' }
   if (props.open && current === revision) timer = setTimeout(() => { void poll() }, 1000)
 }
+async function loadLocalModel() {
+  if (!props.desktop || !window.pywebview?.api || !props.open) return
+  const current = ++modelRevision
+  const selected = localMethod.value
+  try {
+    const result = await window.pywebview.api.get_prompt_reverse_model(selected)
+    if (current !== modelRevision || selected !== localMethod.value || !props.open) return
+    if (result.ok) localModel.value = result
+    else message.value = result.error || '本地反推模型状态读取失败。'
+  } catch { message.value = '本地反推接口不可用，请重启更新后的软件。' }
+}
+async function downloadModel() {
+  const api = window.pywebview?.api
+  if (!api || busy.value || starting.value || !props.desktop) return
+  starting.value = true
+  try {
+    const result = await api.download_prompt_reverse_model(localMethod.value)
+    if (!result.ok || !result.task_id) { message.value = result.error || '模型下载未启动。'; return }
+    revision++; stopPolling(); taskId.value = result.task_id
+    busy.value = true; downloadingModel.value = true; message.value = '正在下载本地反推模型…'
+    detail.value = ''; progress.value = null; void poll()
+  } catch { message.value = '模型下载未启动，请重启更新后的软件后重试。' }
+  finally { starting.value = false }
+}
 async function loadThumbnails() {
   const api = window.pywebview?.api
-  if (!api || !taskId.value || !props.open) return
-  const id = taskId.value
+  if (!api || !resultTaskId.value || !props.open) return
+  const id = resultTaskId.value
   for (const item of visible.value) {
     if (thumbnails.value[item.name]) continue
     try {
       const result = await api.get_prompt_reverse_image(id, item.name)
-      if (id !== taskId.value || !props.open) return
+      if (id !== resultTaskId.value || !props.open) return
       if (result.data_url) thumbnails.value[item.name] = result.data_url
     } catch { /* A missing thumbnail does not hide the generated text. */ }
   }
@@ -111,22 +150,23 @@ async function start() {
   if (!props.desktop || !api) { message.value = '浏览器预览不会调用模型或写文件。'; return }
   if (starting.value || busy.value) return
   if (!path.value.trim()) { message.value = '请选择一张图片或图片文件夹。'; return }
+  if (isLocal.value && !localModel.value.ready) { message.value = '请先下载本地反推模型。'; return }
   if (method.value === 'natural' && (dirty.value || apiKey.value)) { message.value = '请先保存视觉服务设置。'; return }
   if (method.value === 'natural' && remote.value && !allowRemote.value) { message.value = '请确认允许发送图片到所选在线视觉服务。'; return }
   starting.value = true
   try {
     const result = await api.start_prompt_reverse({ path:path.value, method:method.value, language:language.value, length:length.value,
-      wd14_model:wd14Model.value, threshold:threshold.value, allow_remote:allowRemote.value })
+      wd14_model:wd14Model.value, threshold:method.value === 'ram' ? ramThreshold.value : threshold.value, allow_remote:allowRemote.value, device:device.value, ...pixaiOptions })
     if (!result.ok || !result.task_id) { message.value = result.error || '反推未启动。'; return }
-    revision++; stopPolling(); taskId.value = result.task_id; report.value = null; edits.value = {}; thumbnails.value = {}; page.value = 0
-    busy.value = true; message.value = '正在准备反推…'; detail.value = ''; progress.value = null; void poll()
+    revision++; stopPolling(); taskId.value = result.task_id; resultTaskId.value = result.task_id; report.value = null; edits.value = {}; thumbnails.value = {}; page.value = 0
+    busy.value = true; downloadingModel.value = false; message.value = '正在准备反推…'; detail.value = ''; progress.value = null; void poll()
   } catch { message.value = '无法启动反推，请重新打开本地新版界面。' }
   finally { starting.value = false }
 }
 async function stop() {
   if (!window.pywebview?.api || !taskId.value) return
   const result = await window.pywebview.api.cancel_task(taskId.value)
-  message.value = result.ok ? '正在停止…' : result.error || '停止失败。'
+  message.value = result.ok ? '正在停止任务…' : result.error || '停止失败。'
 }
 async function copy(text: string) {
   try { await navigator.clipboard.writeText(text); emit('notify','提示词已复制。') }
@@ -139,7 +179,7 @@ async function exportText() {
   try {
     const chosen = await api.choose_path('folder', outputPath.value, 'prompt_reverse_output')
     if (!chosen.ok || !chosen.path) { if (chosen.error) message.value = chosen.error; return }
-    const result = await api.export_prompt_reverse(taskId.value, generated.value.map(item => ({ name:item.name, caption:edits.value[item.name] ?? item.caption ?? '' })), chosen.path)
+    const result = await api.export_prompt_reverse(resultTaskId.value, generated.value.map(item => ({ name:item.name, caption:edits.value[item.name] ?? item.caption ?? '' })), chosen.path)
     if (!result.ok) { message.value = result.error || '导出失败。'; return }
     outputPath.value = result.directory || chosen.path
     message.value = `已导出 ${result.written} 个 TXT：${outputPath.value}`
@@ -154,6 +194,7 @@ watch(() => props.open, async open => {
   await nextTick(); dialogRef.value?.focus()
   if (!props.desktop || !window.pywebview?.api) return
   const current = revision
+  void loadLocalModel()
   try {
     const service = await window.pywebview.api.get_caption_service()
     if (current !== revision || !props.open) return
@@ -163,8 +204,13 @@ watch(() => props.open, async open => {
     if (result.task_id) { taskId.value = result.task_id; void poll() }
   } catch { message.value = '反推接口暂时不可用，请重启本地新版界面。' }
 })
+watch(method, selected => {
+  modelRevision++; localModel.value = {}
+  if (selected === 'ram' || selected === 'pixai') language.value = 'en'
+  if (isLocal.value) void loadLocalModel()
+})
 watch(page, () => { void loadThumbnails() })
-onUnmounted(() => { revision++; stopPolling() })
+onUnmounted(() => { revision++; modelRevision++; stopPolling() })
 </script>
 
 <template>
@@ -177,11 +223,36 @@ onUnmounted(() => { revision++; stopPolling() })
             <label>图片或文件夹<input v-model="path" :disabled="busy || starting" placeholder="选择一张图片，或粘贴图片文件夹路径" /></label>
             <div class="actions"><button type="button" :disabled="busy || starting" @click="choose('image')">选择图片</button><button type="button" :disabled="busy || starting" @click="choose('folder')">选择文件夹</button></div>
             <p>文件夹包含子文件夹，一次最多 500 张。原图和旁边已有的标签文件均保留。</p>
-            <label>生成方式<select v-model="method" :disabled="busy || starting"><option value="wd14">英文关键词 · 本地 WD14</option><option value="natural">中文 / 英文描述 · 视觉模型</option></select></label>
+            <label>生成方式<select v-model="method" :disabled="busy || starting"><option value="wd14">二次元关键词 · 本地 WD14</option><option value="pixai">二次元关键词 · 本地 PixAI v1.0</option><option value="ram">真实照片关键词 · 本地 RAM++</option><option value="qwen_vl">详细画面描述 · 本地 Qwen3-VL 社区版</option><option value="natural">中文 / 英文描述 · 视觉服务</option></select></label>
             <template v-if="method === 'wd14'">
               <label>打标模型<select v-model="wd14Model" :disabled="busy"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2</option></select></label>
               <label>关键词阈值<input v-model.number="threshold" type="number" min="0.01" max="0.99" step="0.05" :disabled="busy" /></label>
-              <p>适合提取标签式提示词。阈值越低，关键词越多；首次使用可能下载 WD14 模型并补齐本地依赖。</p>
+              <p>适合二次元图片的英文标签提取。真实照片建议选择 RAM++ 或画面描述模型。阈值越低，关键词越多；首次使用可能下载 WD14 模型并补齐本地依赖。</p>
+            </template>
+            <template v-else-if="isLocal">
+              <strong class="model-title">{{ localModel.name || (method === 'ram' ? 'RAM++ · 真实照片关键词' : method === 'pixai' ? 'PixAI Tagger v1.0 · 二次元关键词' : 'Huihui Qwen3-VL 4B · 社区去拒答版 Q4') }} <small>{{ localModel.ready ? '已下载' : '未下载' }}</small></strong>
+              <p v-if="method === 'ram'">提取人物、物品、动作和场景关键词，使用逗号分隔。</p>
+              <p v-else-if="method === 'pixai'">二次元英文关键词，可分别开启角色、作品和画风标签。</p>
+              <p v-else>社区去拒答版本，支持照片与插画的中英文描述；不保证所有图片均能准确描述。</p>
+              <template v-if="method === 'pixai'">
+                <PixaiTagOptions :options="pixaiOptions" :disabled="busy || starting" :download="false" @change="(key, value) => Object.assign(pixaiOptions, { [key]: value })" />
+                <label>运行方式<select v-model="device" :disabled="busy"><option value="auto">自动（NVIDIA GPU / CPU）</option><option value="cpu">CPU（较慢）</option></select></label>
+              </template>
+              <template v-if="method === 'ram'">
+                <label>标签语言<select v-model="language" :disabled="busy"><option value="en">英文</option><option value="zh">中文</option></select></label>
+                <label>关键词阈值<input v-model.number="ramThreshold" type="number" min="0.01" max="0.99" step="0.05" :disabled="busy" /></label>
+                <p>默认 0.68，保留官方各标签阈值；调低增加关键词，调高减少关键词。</p>
+                <label>运行方式<select v-model="device" :disabled="busy"><option value="auto">自动（NVIDIA GPU / CPU）</option><option value="cpu">CPU（较慢）</option></select></label>
+              </template>
+              <template v-if="method === 'qwen_vl'">
+                <div class="fields"><label>语言<select v-model="language" :disabled="busy"><option value="zh">中文</option><option value="en">英文</option></select></label><label>描述长度<select v-model="length" :disabled="busy"><option value="brief">简短</option><option value="detailed">详细</option></select></label></div>
+                <label>运行方式<select v-model="device" :disabled="busy"><option value="auto">自动加速（失败时使用 CPU）</option><option value="cpu">CPU（较慢）</option></select></label>
+              </template>
+              <button type="button" :disabled="busy || starting || !desktop" @click="downloadModel">{{ localModel.ready ? '检查 / 修复模型' : method === 'ram' ? '下载 RAM++（模型约 3 GB）' : method === 'pixai' ? '下载 PixAI v1.0（约 1.95 GB）' : '下载 Qwen3-VL 社区版（约 3.4 GB）' }}</button>
+              <p v-if="localModel.directory">保存位置：{{ localModel.directory }}</p>
+              <p v-if="method === 'ram' || method === 'pixai'">首次使用准备独立推理环境。NVIDIA 优先使用 GPU，其他设备使用 CPU。</p>
+              <p v-else>Windows x64 · 内置本地推理组件，无需配置服务。自动加速使用 Vulkan，效果与速度取决于显卡及驱动。</p>
+              <p>下载优先使用国内镜像。图片在本机处理，任务结束后释放模型。</p>
             </template>
             <template v-else>
               <div class="fields"><label>语言<select v-model="language" :disabled="busy"><option value="zh">中文</option><option value="en">英文</option></select></label><label>描述长度<select v-model="length" :disabled="busy"><option value="brief">简短</option><option value="detailed">详细</option></select></label></div>
@@ -197,8 +268,8 @@ onUnmounted(() => { revision++; stopPolling() })
               <label v-if="remote" class="check"><input v-model="allowRemote" type="checkbox" :disabled="busy" />允许将所选图片发送到上述在线视觉服务，可能产生 API 费用</label>
               <p v-else>图片发送到本机视觉服务。此入口不会自动下载视觉模型；训练前请在服务中检查显存释放。</p>
             </template>
-            <button class="primary" type="button" :disabled="busy || starting || saving || !path.trim()" @click="start">{{ busy ? '正在反推…' : starting ? '正在启动…' : '开始反推' }}</button>
-            <div v-if="busy" class="running" role="status"><p>{{ detail || '正在准备模型或等待视觉服务…' }}</p><progress v-if="progress !== null" :value="progress" max="1"></progress><button type="button" @click="stop">停止反推</button><small>关闭窗口后，已启动的任务会继续执行。</small></div>
+            <button class="primary" type="button" :disabled="busy || starting || saving || !path.trim() || (isLocal && !localModel.ready)" @click="start">{{ busy ? (downloadingModel ? '正在下载模型…' : '正在反推…') : starting ? '正在启动…' : '开始反推' }}</button>
+            <div v-if="busy" class="running" role="status"><p>{{ detail || '正在准备模型或等待视觉服务…' }}</p><progress v-if="progress !== null" :value="progress" max="1"></progress><button type="button" @click="stop">{{ downloadingModel ? '停止下载' : '停止反推' }}</button><small>关闭窗口后，已启动的任务会继续执行。</small></div>
           </section>
           <section class="reverse-results" aria-label="反推结果">
             <div class="result-heading"><strong>反推结果 <small v-if="report">{{ report.generated }} / {{ report.total }} 张{{ report.failed ? ` · ${report.failed} 张失败` : '' }}</small></strong><div class="actions"><button type="button" :disabled="!generated.length" @click="copy(generated.map(item => edits[item.name] || item.caption || '').join('\n\n'))">复制全部</button><button type="button" :disabled="busy || exporting || !generated.length" @click="exportText">{{ exporting ? '导出中…' : '导出 TXT' }}</button></div></div>
@@ -213,5 +284,5 @@ onUnmounted(() => { revision++; stopPolling() })
   </Transition>
 </template>
 <style scoped>
-.reverse-dialog{width:min(1120px,calc(100vw - 36px));max-height:92vh;display:flex;flex-direction:column;color:var(--text);background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 20px 80px #0005;overflow:hidden}.reverse-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid var(--border)}h2{margin:0;font-size:21px}p{margin:0;color:var(--hint);font-size:12px;line-height:1.7;overflow-wrap:anywhere}.reverse-dialog>header p{margin-top:5px}.reverse-layout{display:grid;grid-template-columns:320px minmax(0,1fr);min-height:0;overflow:auto}.reverse-options{display:flex;flex-direction:column;gap:13px;padding:20px;border-right:1px solid var(--border);background:var(--bg)}label{display:grid;gap:7px;font-size:12px}input:not([type=checkbox]),select,textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);padding:9px;font:inherit}textarea{resize:vertical;line-height:1.65}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}button{border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);padding:8px 11px;font:inherit;font-size:12px;cursor:pointer}button:hover:enabled{border-color:var(--hint)}button:disabled{opacity:.5;cursor:default}.primary{background:var(--accent);color:var(--tone-f0f1f3)}.actions{display:flex;gap:8px;flex-wrap:wrap}.check{display:flex;align-items:flex-start;gap:8px;line-height:1.6}.check input{flex:none;accent-color:var(--accent);margin-top:3px}summary{cursor:pointer;font-size:12px;padding:7px 0}details[open]{display:grid;gap:12px}small{font-size:11px;color:var(--hint)}.running{display:grid;gap:9px}progress{width:100%;accent-color:var(--accent)}.reverse-results{min-width:0;padding:20px;display:flex;flex-direction:column;gap:14px}.result-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px}.result-heading small{display:block;margin-top:5px}.empty{min-height:280px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center}.empty svg{width:36px;height:36px;color:var(--hint)}.empty h3{margin:0;font-size:16px}.empty p{max-width:340px}.result-card{display:flex;align-items:start;gap:14px;padding:12px;border:1px solid var(--border);border-radius:8px}.result-card>img{width:110px;height:140px;object-fit:contain;border-radius:5px;background:var(--bg)}.result-card>div{min-width:0;flex:1}.result-card header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.result-card strong{font-size:12px;overflow-wrap:anywhere}.pagination{display:flex;align-items:center;justify-content:center;gap:14px;font-size:12px}.reverse-dialog>footer{padding:12px 20px;border-top:1px solid var(--border)}.feedback{color:var(--text);margin-bottom:6px}.error{color:var(--tone-d4b06a)}.icon-button{padding:7px;display:grid;place-items:center}.icon-button svg{width:18px;height:18px}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:760px){.reverse-layout{grid-template-columns:1fr}.reverse-options{border-right:0;border-bottom:1px solid var(--border)}.result-card>img{width:80px;height:100px}.reverse-dialog>header{padding:15px}}
+.reverse-dialog{width:min(1120px,calc(100vw - 36px));max-height:92vh;display:flex;flex-direction:column;color:var(--text);background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 20px 80px #0005;overflow:hidden}.reverse-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid var(--border)}h2{margin:0;font-size:21px}p{margin:0;color:var(--hint);font-size:12px;line-height:1.7;overflow-wrap:anywhere}.reverse-dialog>header p{margin-top:5px}.reverse-layout{display:grid;grid-template-columns:320px minmax(0,1fr);min-height:0;overflow:auto}.reverse-options{display:flex;flex-direction:column;gap:13px;padding:20px;border-right:1px solid var(--border);background:var(--bg)}label{display:grid;gap:7px;font-size:12px}input:not([type=checkbox]),select,textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);padding:9px;font:inherit}textarea{resize:vertical;line-height:1.65}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}button{border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);padding:8px 11px;font:inherit;font-size:12px;cursor:pointer}button:hover:enabled{border-color:var(--hint)}button:disabled{opacity:.5;cursor:default}.primary{background:var(--accent);color:var(--tone-f0f1f3)}.actions{display:flex;gap:8px;flex-wrap:wrap}.check{display:flex;align-items:flex-start;gap:8px;line-height:1.6}.check input{flex:none;accent-color:var(--accent);margin-top:3px}summary{cursor:pointer;font-size:12px;padding:7px 0}details[open]{display:grid;gap:12px}small{font-size:11px;color:var(--hint)}.model-title{font-size:13px;display:flex;align-items:center;justify-content:space-between}.running{display:grid;gap:9px}progress{width:100%;accent-color:var(--accent)}.reverse-results{min-width:0;padding:20px;display:flex;flex-direction:column;gap:14px}.result-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px}.result-heading small{display:block;margin-top:5px}.empty{min-height:280px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center}.empty svg{width:36px;height:36px;color:var(--hint)}.empty h3{margin:0;font-size:16px}.empty p{max-width:340px}.result-card{display:flex;align-items:start;gap:14px;padding:12px;border:1px solid var(--border);border-radius:8px}.result-card>img{width:110px;height:140px;object-fit:contain;border-radius:5px;background:var(--bg)}.result-card>div{min-width:0;flex:1}.result-card header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.result-card strong{font-size:12px;overflow-wrap:anywhere}.pagination{display:flex;align-items:center;justify-content:center;gap:14px;font-size:12px}.reverse-dialog>footer{padding:12px 20px;border-top:1px solid var(--border)}.feedback{color:var(--text);margin-bottom:6px}.error{color:var(--tone-d4b06a)}.icon-button{padding:7px;display:grid;place-items:center}.icon-button svg{width:18px;height:18px}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:760px){.reverse-layout{grid-template-columns:1fr}.reverse-options{border-right:0;border-bottom:1px solid var(--border)}.result-card>img{width:80px;height:100px}.reverse-dialog>header{padding:15px}}
 </style>

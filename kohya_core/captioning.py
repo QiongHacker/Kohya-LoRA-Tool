@@ -221,14 +221,14 @@ def _image_data(image):
     return base64.b64encode(buffer.getvalue()).decode('ascii')
 
 
-def describe_image(config, image, language, length, stop, prompt=None):
+def describe_image(config, image, language, length, stop, prompt=None, timeout=90):
     image_data = _image_data(image)
     prompt = prompt or _prompt(language, length)
     if config['provider'] == 'ollama':
         payload = {'model': config['model'], 'stream': False, 'keep_alive': '5m',
                    'messages': [{'role': 'user', 'content': prompt, 'images': [image_data]}],
                    'options': {'temperature': 0.1, 'num_predict': 180 if length == 'brief' else 420}}
-        response = _post(config['base_url'] + '/api/chat', payload, '', stop)
+        response = _post(config['base_url'] + '/api/chat', payload, '', stop, timeout=timeout)
         if not isinstance(response, dict):
             raise CaptionServiceError('描述服务返回格式无效。')
         message = response.get('message') or {}
@@ -243,7 +243,7 @@ def describe_image(config, image, language, length, stop, prompt=None):
                    'messages': [{'role': 'user', 'content': [
                        {'type': 'text', 'text': prompt},
                        {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + image_data}}]}]}
-        response = _post(config['base_url'] + '/chat/completions', payload, config['api_key'], stop)
+        response = _post(config['base_url'] + '/chat/completions', payload, config['api_key'], stop, timeout=timeout)
         if not isinstance(response, dict):
             raise CaptionServiceError('描述服务返回格式无效。')
         choices = response.get('choices') or []

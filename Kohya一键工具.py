@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.6"
+APP_VERSION = "0.19.7"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -474,7 +474,7 @@ class PreprocessMonitor:
     # 行首标签：[WD14] / [预处理] / [训练] …
     _TAG_RE = re.compile(r"^\s*\[([^\]]+)\]")
     # 只认这几个标签：打标阶段之外的行（训练/安装/下载）不许驱动预处理进度
-    _TAGS = ("WD14",)
+    _TAGS = ("WD14", "PIXAI")
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -523,7 +523,7 @@ class PreprocessMonitor:
                     self.running = True
                     self.started_at = now
                 if not self.stage:
-                    self.stage = "WD14 打标"
+                    self.stage = "PixAI 打标" if m.group(1).upper() == "PIXAI" else "WD14 打标"
                 self.last_activity = now
                 pm = self._PROG_RE.search(line)
                 if pm:
@@ -2100,12 +2100,10 @@ def krea2_model_files():
     return out
 
 
-def krea2_fz_model_files():
-    """Expose both encoders; the v7 adapter prefers FP8, legacy paths still use BF16."""
-    files = krea2_model_files()
-    fp8 = os.path.join(krea2_models_dir(), "qwen3vl_4b_fp8_scaled.safetensors")
-    files["te_fp8"] = fp8 if os.path.isfile(fp8) else None
-    return files
+def krea2_fz_model_files(model_settings=None):
+    """Resolve project paths without copying weights; expose both v7 encoders."""
+    from kohya_core.krea2_models import files
+    return files(sys.modules[__name__], model_settings)
 
 
 def krea2_missing_models():
@@ -6767,11 +6765,16 @@ def _train_krea2_fizgig_legacy(logf=print, mode="krea2_fz", params=None, vram_gb
         _pf_ok, _pf_detail = _fizgig_amd_preflight(vpy, fz_dir, _fz_env, logf, "Krea2(Fizgig)")
         if not _pf_ok:
             raise RuntimeError(_pf_detail)
-    files = krea2_model_files()
-    missing = krea2_missing_models()
+    from kohya_core.krea2_models import files as local_files, missing as local_missing, settings as local_settings, validate_selected
+    selection = params.get("krea2_models")
+    if selection is None:
+        selection = local_settings(load_project(params.get("project")) if params.get("project") else None)
+    validate_selected(sys.modules[__name__], selection, allow_fp8=False)
+    files = local_files(sys.modules[__name__], selection, allow_fp8=False)
+    missing = local_missing(sys.modules[__name__], selection, allow_fp8=False)
     if missing:
         raise RuntimeError(
-            "Krea2 训练缺少模型文件，请下载放入 models/krea2/ 文件夹：\n\n" + "\n".join(missing) +
+            "Krea2 训练缺少模型文件，请在模型管理中选择本地组件，或下载放入 models/krea2/ 文件夹：\n\n" + "\n".join(missing) +
             "\n\n（在软件里点「打开 Krea2 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
     # 完整性 + 预量化拦截（与第二引擎 Krea2 一致）
     for _k, _desc in (("raw", "RAW 底模"), ("vae", "VAE"), ("te", "文本编码器")):
@@ -9775,6 +9778,9 @@ def train_fizgig_lora(logf=print, mode="krea2_fz", params=None, vram_gb=None, re
     from kohya_core.fizgig_engine import use_runtime, VERSION
     from kohya_core.fizgig_adapter import train_lora
     params = dict(params or {})
+    if mode == "krea2_fz" and "krea2_models" not in params:
+        from kohya_core.krea2_models import settings
+        params["krea2_models"] = settings(load_project(params.get("project")) if params.get("project") else None)
     if mode == "h3_fz" and "h3_models" not in params:
         from kohya_core.h3_models import settings
         params["h3_models"] = settings(load_project(params.get("project")) if params.get("project") else None)
@@ -10121,8 +10127,8 @@ def gpu_status_text():
 # ---------- 配置导出 / 导入（可分享；不含本机路径与提示词，提示词可选） ----------
 _CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps", "video_frames", "batch_size", "sample_interval", "sample_seed")
 _CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
-_CFG_PARAM_BOOL_KEYS = ("strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode")
-_CFG_PARAM_STR_KEYS = ("fizgig_version", "optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma", "caption_method", "caption_language", "caption_length")
+_CFG_PARAM_BOOL_KEYS = ("pixai_character", "pixai_copyright", "pixai_style", "strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode")
+_CFG_PARAM_STR_KEYS = ("pixai_threshold", "fizgig_version", "optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma", "caption_method", "caption_language", "caption_length")
 _CFG_PROMPT_KEYS = ("trigger", "style_caption", "sample_prompt", "global_pos", "global_neg")
 _CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
 _CFG_AT_LABEL_TO_KEY.update({"画风": "style", "人物": "character", "风格": "style"})  # 兼容手写短标签
@@ -10393,7 +10399,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
                strong_bind=True, concept_type="", clean_concept=True, concept_mode=False,
-               style_target="anime", overwrite=False, keep_user_captions=False, caption_method=None, multi_character=None):
+               style_target="anime", overwrite=False, keep_user_captions=False, caption_method=None, multi_character=None, pixai_options=None):
     """keep_user_captions：图片自带同名 .txt 时，原样保留、全程不改写 ✓
 
     ★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口 ✓）：
@@ -10521,8 +10527,6 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             cmd.append("--no-wd14")
         # 打标模型（留空 = preprocess 侧用默认模型；未知值也会被静默回退成默认 ✓
         # —— 老用户升级后设置里没这个键，传的就是空串）
-        if wd14_model:
-            cmd += ["--wd14-model", str(wd14_model)]
         # 概念标签清洗只在概念模式执行（2026-09-12 修）：界面「概念类型」默认 form 且无条件传入，
         # 此前只按 concept_type 判断，人物模式也会跑 form 词表清洗，
         # 导致人物 LoRA 里的 horns / animal ears / wings 被静默删掉。
@@ -10545,6 +10549,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             cmd += ["--caption", style_caption.strip()]
         if dedup:
             cmd.append("--dedup")
+    if wd14_model:
+        cmd += ["--wd14-model", str(wd14_model)]
     # 裁切比例：crop_ratio 优先；旧调用 square_crop=True 等价 --crop-ratio 1:1
     _cr = normalize_crop_ratio(crop_ratio) or ("1:1" if square_crop else "")
     if _cr:
@@ -10555,9 +10561,20 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         cmd += ["--blur-threshold", str(blur_threshold)]
     if report:
         cmd += ["--report", report]
+    _use_pixai = caption_method == "wd14" and wd14_model == "pixai-v1" and wd14 and not keep_user_captions and not (mode == "style" and (style_caption or "").strip())
+    if _use_pixai:
+        from kohya_core.pixai_caption import training_job
+        if pixai_options is None:
+            pixai_options = ((load_project(project) or {}).get("params") or {}) if project else {}
+        logf("[预处理] 自动打标模型：PixAI Tagger v1.0；默认只输出内容标签。")
+    def _run_preprocess_command(collect):
+        if not _use_pixai:
+            return run_stream(cmd, logf=logf, collect=collect)
+        with training_job(sys.modules[__name__], pixai_options, logf) as (job_path, env):
+            return run_stream(cmd + ["--pixai-job", job_path], env=env, logf=logf, collect=collect)
     # 收集实际错误；数据/标签问题不应触发依赖重装或“无输出”诊断。
     _preprocess_lines = []
-    rc = run_stream(cmd, logf=logf, collect=_preprocess_lines)
+    rc = _run_preprocess_command(_preprocess_lines)
     _output = "\n".join(line for line in _preprocess_lines if not line.startswith("$ "))
     _dependency_error = any(marker in _output.lower() for marker in (
         "import pillow 失败", "import numpy 失败", "no module named 'pil'",
@@ -10580,7 +10597,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             raise RuntimeError("预处理依赖修复失败，请查看上方导入错误与环境检查结果。")
         logf("[预处理] 已修复预处理依赖，自动重试一次…")
         _preprocess_lines = []
-        rc = run_stream(cmd, logf=logf, collect=_preprocess_lines)
+        rc = _run_preprocess_command(_preprocess_lines)
     if rc != 0:
         _errors = [line.strip() for line in _preprocess_lines
                    if line.strip() and not line.startswith("$ ")]

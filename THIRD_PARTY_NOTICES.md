@@ -1,4 +1,4 @@
-﻿# 第三方组件声明 / Third-Party Notices
+# 第三方组件声明 / Third-Party Notices
 
 本项目基于以下开源项目二次封装：
 
@@ -6,6 +6,10 @@
 |---|---|---|
 | [kohya_ss](https://github.com/bmaltais/kohya_ss) | Kohya-SS GUI（启动 Web UI / 环境安装） | Apache-2.0 |
 | [sd-scripts](https://github.com/kohya-ss/sd-scripts) | 底层训练脚本（sdxl_train_network.py 等） | Apache-2.0 |
+| [Huihui Qwen3-VL 4B](https://huggingface.co/huihui-ai/Huihui-Qwen3-VL-4B-Instruct-abliterated) / [noctrex GGUF](https://huggingface.co/noctrex/Huihui-Qwen3-VL-4B-Instruct-abliterated-GGUF) | 可选下载的本地详细图片描述模型（Huihui 社区去拒答版本，noctrex Q4_K_M 与配套 FP16 视觉组件；固定提交与 SHA256）。原模型基于 Qwen3-VL-4B-Instruct；作者说明仅处理文本部分。去拒答不保证输出质量或所有输入均能生成描述。 | Apache-2.0（继承原模型许可） |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | Qwen3-VL 本地推理组件（固定 b11553 的 Windows x64 CPU / Vulkan 官方归档，独立进程） | MIT |
+| [RAM++](https://github.com/xinyu1205/recognize-anything) / [官方权重](https://huggingface.co/xinyu1205/recognize-anything-plus-model) | 可选下载的本地真实照片关键词模型（固定模型权重、推理源码、标签列表和 BERT 词表，逐文件 SHA256 校验；独立环境运行） | Apache-2.0；内含 Salesforce BERT/ViT 代码 BSD-3-Clause、Microsoft Swin 代码 MIT；原版权头与许可随源码保留 |
+| [PixAI Tagger v1.0](https://huggingface.co/pixai-labs/pixai-tagger-v1.0) | 可选二次元打标模型；训练与独立图片反推共用固定提交权重、配置及官方 tagger_pipeline.py，逐文件 SHA256 校验，独立环境运行。官方推理源码包含 SAM3 / ViTDet 与旋转位置编码来源说明，原文件保留这些说明。 | Apache-2.0（按模型仓库声明）；所含第三方实现遵循各自许可 |
 | [WD14 tagger](https://huggingface.co/SmilingWolf) | 人物模式自动打标（tag_images_by_wd14_tagger.py + wd-v1-4-moat-tagger-v2 模型） | 模型遵循其各自许可 |
 | [Fizgig](https://github.com/shootthesound/Fizgig) | 第四引擎（固定 v7.0.1；Krea2、Klein 9B、Qwen-Image-2.1、H3、实验性 Anima / SDXL 普通 LoRA 与概念滑块）| Apache-2.0 |
 | [comfyui-rocm](https://github.com/patientx/comfyui-rocm) | Fizgig 随包的 detect_gpu.py（AMD GPU 架构探测）| GPL-3.0 |

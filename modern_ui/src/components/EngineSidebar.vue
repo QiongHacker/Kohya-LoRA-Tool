@@ -93,10 +93,10 @@ const modeTips: Record<string, string> = {
         <span>{{ guideLabel }}</span>
       </header>
       <button
-        v-for="step in guideSteps.filter(step => !step.done)"
+        v-for="step in guideSteps.filter(step => !step.done || step.persistent)"
         :key="step.id"
         class="guide-step"
-        :class="{ done: step.done, pending: !step.done }"
+        :class="{ done: step.done, pending: !step.done, persistent: step.persistent }"
         type="button"
         :title="step.tip"
         @click="emit('guideAction', step)"
@@ -106,7 +106,7 @@ const modeTips: Record<string, string> = {
         <span class="guide-step-check" :aria-label="step.done ? '已完成' : '未完成'">{{ step.done ? '✓' : '·' }}</span>
         <span class="guide-step-button">{{ step.button }}</span>
       </button>
-      <details v-if="guideSteps.some(step => step.done)" class="completed-guide"><summary>已完成 {{ guideSteps.filter(step => step.done).length }} 项准备</summary><button v-for="step in guideSteps.filter(step => step.done)" :key="step.id" class="guide-step done" type="button" :title="step.tip" @click="emit('guideAction',step)"><span class="guide-step-label">{{ step.label }}</span><span>✓</span></button></details>
+      <details v-if="guideSteps.some(step => step.done && !step.persistent)" class="completed-guide"><summary>已完成 {{ guideSteps.filter(step => step.done && !step.persistent).length }} 项准备</summary><button v-for="step in guideSteps.filter(step => step.done && !step.persistent)" :key="step.id" class="guide-step done" type="button" :title="step.tip" @click="emit('guideAction',step)"><span class="guide-step-label">{{ step.label }}</span><span>✓</span></button></details>
     </section>
     <p v-else class="sidebar-guide">新建项目并选择模型后，这里会显示对应的四步引导。</p>
     <button class="sidebar-action secondary" type="button" title="Python / Git 不想装在系统盘？这里可以自己选文件夹，工具会识别并校验；放在别的盘或整合包文件夹里，重装系统后也能继续用。" @click="emit('action', 'env_locations')">
@@ -126,6 +126,7 @@ const modeTips: Record<string, string> = {
 
 <style scoped>
 .sidebar { overflow:hidden; }
+.guide-step.persistent .guide-step-label { white-space:normal; line-height:1.4; overflow:visible; }
 .completed-guide{font-size:11px;color:var(--hint);margin:8px 0}.completed-guide summary{cursor:pointer;line-height:1.6}.completed-guide .guide-step{width:100%}
 .sidebar-top { flex:none; min-width:0; padding-bottom:15px; }
 .sidebar-top .brand-row { padding-bottom:10px; }

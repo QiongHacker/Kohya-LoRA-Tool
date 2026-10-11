@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import UiIcon from './UiIcon.vue'
-import type { ModelDownloadItem, ModelDownloadList, ModernTaskStatus } from '../bridge'
+import Krea2EncoderSelect from './Krea2EncoderSelect.vue'
+import type { Krea2EncoderChoice, ModelDownloadItem, ModelDownloadList, ModernTaskStatus } from '../bridge'
 
 const props = defineProps<{ open: boolean; mode: string; projectName?: string }>()
 const emit = defineEmits<{
@@ -28,6 +29,12 @@ const logs = computed(() => task.value?.logs ?? [])
 const busy = computed(() => running.value || loading.value || selecting.value || starting.value || queue.value.length > 0)
 const canClose = computed(() => !busy.value)
 const missingRequired = computed(() => (list.value?.items ?? []).filter(item => item.required && !item.present))
+const visibleItems = computed(() => {
+  const items = list.value?.items ?? []
+  if (props.mode !== 'krea2_fz') return items
+  const priority = (item: ModelDownloadItem) => item.required ? 0 : item.key === 'turbo' ? 2 : 1
+  return [...items].sort((a, b) => priority(a) - priority(b))
+})
 
 function stopPolling() {
   if (timer) window.clearInterval(timer)
@@ -123,7 +130,9 @@ async function selectLocal(item: ModelDownloadItem, action: 'select' | 'default'
   selecting.value = true
   error.value = ''
   try {
-    const result = await api.select_h3_component(props.projectName, item.key, action)
+    const result = props.mode === 'krea2_fz'
+      ? await api.select_krea2_component(props.projectName, item.key, action)
+      : await api.select_h3_component(props.projectName, item.key, action)
     if (!result.ok) { error.value = result.error || '组件设置失败。'; return }
     if (result.cancelled) return
     await loadList()
@@ -134,6 +143,22 @@ async function selectLocal(item: ModelDownloadItem, action: 'select' | 'default'
   } finally {
     selecting.value = false
   }
+}
+
+async function selectEncoder(choice: Krea2EncoderChoice) {
+  const api = window.pywebview?.api
+  if (busy.value || !api || !props.projectName) return
+  selecting.value = true
+  error.value = ''
+  try {
+    const result = await api.select_krea2_encoder(props.projectName, choice)
+    if (!result.ok) { error.value = result.error || '文本编码器选择保存失败。'; return }
+    await loadList()
+    emit('changed')
+    emit('notify', result.message || '文本编码器选择已保存。')
+  } catch (exception) {
+    error.value = exception instanceof Error ? exception.message : '文本编码器选择保存失败。'
+  } finally { selecting.value = false }
 }
 
 async function cancel() {
@@ -182,20 +207,21 @@ onUnmounted(stopPolling)
           <button class="assets-close" type="button" aria-label="关闭" :disabled="!canClose" @click="close">×</button>
         </header>
         <p class="assets-description">{{ list?.description || (error ? '模型文件清单读取失败。' : '正在读取当前模式的模型文件清单…') }}</p>
-        <div v-if="list?.asset_dir" class="assets-location"><UiIcon name="folder" /><span :title="list.asset_dir">保存位置：{{ list.asset_dir }}</span><button type="button" @click="openFolder">打开文件夹</button></div>
+        <div v-if="list?.asset_dir" class="assets-location"><UiIcon name="folder" /><span :title="list.asset_dir">{{ mode === 'krea2_fz' ? '默认下载目录' : '保存位置' }}：{{ list.asset_dir }}</span><button type="button" @click="openFolder">打开文件夹</button></div>
         <div v-if="list?.note" class="assets-note">{{ list.note }}</div>
+        <Krea2EncoderSelect v-if="mode === 'krea2_fz' && list?.encoder" class="assets-encoder" :encoder="list.encoder" :disabled="busy || !projectName" @select="selectEncoder" />
         <div v-if="loading" class="assets-loading"><span class="assets-spinner"></span>正在检查本机模型文件…</div>
         <div v-else-if="list" class="assets-list">
-          <article v-for="item in list.items" :key="item.key" class="asset-row" :class="{ present: item.present, active: taskKey === item.key && running }">
+          <article v-for="item in visibleItems" :key="item.key" class="asset-row" :class="{ present: item.present, active: taskKey === item.key && running }">
             <span class="asset-state" :class="{ ready: item.present }">{{ item.present ? '✓' : '·' }}</span>
             <div class="asset-copy">
-              <strong>{{ item.label }}</strong>
+              <strong>{{ item.label }}<em v-if="mode === 'krea2_fz' && item.selected"> · {{ item.in_use ? '当前使用' : '待准备' }}</em><em v-else-if="mode === 'krea2_fz' && item.key.startsWith('te')"> · 备用</em></strong>
               <span :title="item.path">{{ item.manual && item.path ? item.path.split(/[\\/]/).pop() : item.filename }}<template v-if="item.required_group"> · {{ item.required_group }}</template><template v-else-if="item.optional"> · 可选</template></span>
               <small v-if="item.local_select && !item.validation_error" class="asset-validation">{{ item.disabled ? '已停用' : item.present ? item.detail : '未准备' }}<template v-if="item.manual && item.path"> · 本地文件</template></small>
               <small v-if="item.validation_error" class="asset-invalid">{{ item.validation_error }}</small>
               <div v-if="item.local_select" class="asset-links">
-                <button v-if="item.manual" type="button" :disabled="busy" @click="selectLocal(item, 'default')">恢复默认</button>
-                <button v-if="item.optional && item.present" type="button" :disabled="busy" @click="selectLocal(item, 'disable')">不使用</button>
+                <button v-if="item.manual" type="button" :disabled="busy" @click="selectLocal(item, 'default')">{{ mode === 'krea2_fz' ? '恢复默认文件' : '恢复默认' }}</button>
+                <button v-if="item.optional && item.present && (mode !== 'krea2_fz' || item.key === 'turbo')" type="button" :disabled="busy" @click="selectLocal(item, 'disable')">不使用</button>
               </div>
               <small v-if="item.part_size">发现未完成的下载（{{ (item.part_size / 1048576).toFixed(1) }} MB），继续时会尝试续传。</small>
             </div>
@@ -218,7 +244,7 @@ onUnmounted(stopPolling)
           <pre v-if="logs.length" class="download-log">{{ logs.join('\n') }}</pre>
         </template>
         <footer class="assets-footer">
-          <button v-if="mode === 'h3_fz' && missingRequired.length && !running" class="asset-secondary" type="button" :disabled="busy || loading" @click="downloadRequired">下载缺失必需组件（{{ missingRequired.length }}）</button>
+          <button v-if="['h3_fz','krea2_fz'].includes(mode) && missingRequired.length && !running" class="asset-secondary" type="button" :disabled="busy || loading" @click="downloadRequired">下载缺失训练组件（{{ missingRequired.length }}）</button>
           <button v-if="running" class="asset-secondary" type="button" @click="cancel">取消下载</button>
           <button class="asset-primary" type="button" :disabled="!canClose" @click="close">{{ running ? '下载进行中…' : '关闭' }}</button>
         </footer>
@@ -248,6 +274,8 @@ onUnmounted(stopPolling)
 .assets-location span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assets-location button { padding: 4px 7px; border: 1px solid var(--tone-3a3f48); border-radius: 4px; color: var(--tone-b9bec7); background: transparent; font-size: 10px; cursor: pointer; }
 .assets-note { margin-bottom: 9px; padding: 7px 9px; border-radius: 4px; color: var(--tone-9da4ae); background: var(--tone-22252c); font-size: 10px; line-height: 1.45; }
+.assets-encoder { margin-bottom:9px; flex-shrink:0; }
+.asset-copy em { color:var(--tone-aab8ad); font-style:normal; }
 .assets-list { display: grid; gap: 5px; min-height: 0; overflow-y: auto; padding-right: 3px; }
 .asset-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 8px; border: 1px solid var(--tone-363b44); border-radius: 5px; background: var(--tone-23262d); }
 .asset-row.present { border-color: var(--tone-343d38); }

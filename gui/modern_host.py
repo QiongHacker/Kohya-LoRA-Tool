@@ -25,6 +25,7 @@ from kohya_core.model_catalog import catalog as model_catalog, resolve_choice
 from kohya_core.fizgig_engine import runtime as fizgig_runtime, source_version as fizgig_source_version, VERSION as FIZGIG_TARGET
 from kohya_core.fizgig_adapter import FAMILIES as FIZGIG_FAMILIES, models as fizgig_models, missing as fizgig_missing, _validate as validate_fizgig_models
 from kohya_core.h3_models import settings as h3_settings, rows as h3_rows, validate as validate_h3_component, validate_selected as validate_h3_selected, training_precision as h3_training_precision
+from kohya_core.krea2_models import encoder_state as krea2_encoder_state, CHOICES as KREA2_ENCODER_CHOICES, settings as krea2_settings, rows as krea2_rows, files as krea2_files, missing as krea2_missing, encoder_key as krea2_encoder_key, change as change_krea2_selection, validate as validate_krea2_component, validate_selected as validate_krea2_selected
 from kohya_core.zimage_models import settings as zimage_settings, discover as zimage_components, validate_selection as validate_zimage_selection, missing as zimage_missing
 from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary, dataset_images, read_caption
 
@@ -399,6 +400,12 @@ class ModernUIBridge:
             task = self._task
             if task and task.get("id") == task_id:
                 task["logs"].append(message)
+                if task.get("kind") in ("preprocess", "training") and task.get("status") == "running" and message.startswith("[PixAI]"):
+                    task["detail"] = message[:240]
+                    match = re.search(r"内置打标进度[：:]\s*(\d+)\s*/\s*(\d+)", message)
+                    if match:
+                        done, total = map(int, match.groups())
+                        task.update(progress=min(done / max(total, 1), 1), message="正在使用 PixAI 打标…")
                 if task.get("kind") == "training":
                     task.setdefault("effective_params", {}).update(getattr(self.core, "get_effective", lambda: {})())
                 if task.get("kind") == "training" and re.search(r"preview failed|sampling failed|disabling previews|采样(?:预览)?(?:生成)?失败|停用后续预览|(?:采样|预览).*(?:Error:|Exception:)|No prompt file", message, re.I):
@@ -599,12 +606,16 @@ class ModernUIBridge:
         links = getattr(self.core, links_name, {})
         asset_dir = str(getattr(self.core, dir_name)())
         config = self.core.load_project(str(project_name or "")) if project_name else {}
-        selection = h3_settings(config) if mode == "h3_fz" else None
-        state = h3_rows(self.core, selection) if mode == "h3_fz" else {}
-        existing = self.core.h3_fz_model_files(selection) if mode == "h3_fz" else getattr(self.core, files_name)()
+        selection = h3_settings(config) if mode == "h3_fz" else krea2_settings(config) if mode == "krea2_fz" else None
+        if mode == "krea2_fz":
+            state = krea2_rows(self.core, selection, allow_fp8=links_name == "KREA2_FZ_MODEL_LINKS")
+        else:
+            state = h3_rows(self.core, selection) if mode == "h3_fz" else {}
+        existing = ({key: row["path"] if row["present"] else None for key, row in state.items()}
+                    if state else getattr(self.core, files_name)())
         required = set(required)
         if links_name == "KREA2_FZ_MODEL_LINKS":
-            required.add("te_fp8" if existing.get("te_fp8") or not existing.get("te") else "te")
+            required.add(krea2_encoder_key(existing, selection))
         if mode == "h3_fz" and config and config.get("raw_dir"):
             try:
                 if self.core.scan_fizgig_h3_dataset(config["raw_dir"]).get("audio", 0):
@@ -632,15 +643,18 @@ class ModernUIBridge:
                 "required_group": "主模型（二选一）" if main_choice else "文本编码器（二选一）" if encoder_choice else "",
                 "optional": key not in required and not main_choice and not encoder_choice,
                 "part_size": part_size,
-                "local_select": mode == "h3_fz" and bool(project_name),
+                "local_select": mode in ("h3_fz", "krea2_fz") and bool(project_name),
                 "manual": bool(row.get("manual")), "disabled": bool(row.get("disabled")),
                 "validation_error": row.get("error", ""), "detail": row.get("detail", ""),
+                "selected": bool(row.get("selected")), "in_use": bool(row.get("in_use")),
             })
         note = ""
         if mode == "krea2_at":
             note = "AI Toolkit 的文本编码器会在首次训练时按需准备；RAW 底模和 VAE 可在此提前下载。"
         elif mode == "krea2_fz" and links_name == "KREA2_FZ_MODEL_LINKS":
-            note = "文本编码器可用 BF16 或 FP8 scaled；Fizgig v7 优先使用已准备的 FP8 文件，8GB 显卡推荐 FP8。"
+            note = "所有组件均可选择已有本地文件，无需复制或改名。先选择编码器类型，再指定对应文件。自动推荐优先使用已就绪的 FP8 scaled；明确选 BF16 / FP8 后不会被下载覆盖。RAW 底模不支持推理用预量化文件。"
+        elif mode == "krea2_fz":
+            note = "可选择已有本地文件，无需复制或改名。旧版 Fizgig 需要浮点 BF16 文本编码器，不支持 FP8 scaled；Turbo 可选。"
         elif mode == "video":
             note = "主模型可选 int8 或 nvfp4 其中一个；文本编码器和视频 VAE 需要准备，音频 VAE 可选。"
         elif mode == "qwen21_fz":
@@ -653,6 +667,8 @@ class ModernUIBridge:
             "ok": True, "mode": mode, "title": title, "description": description,
             "asset_dir": asset_dir, "note": note, "items": items,
         }
+        if mode == "krea2_fz":
+            params["encoder"] = krea2_encoder_state(state, selection, allow_fp8=links_name == "KREA2_FZ_MODEL_LINKS")
         return params
 
     def select_h3_component(self, project_name, key, action="select"):
@@ -703,6 +719,78 @@ class ModernUIBridge:
         self.core.clear_status_cache()
         return {"ok": True, "message": "组件设置已保存。", "path": path}
 
+    def select_krea2_component(self, project_name, key, action="select"):
+        """Store a Krea 2 Fizgig project's original local path without copying it."""
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        project_name = str(project_name or "").strip()
+        config = self.core.load_project(project_name) if project_name else None
+        if not config or config.get("mode") != "krea2_fz":
+            return {"ok": False, "error": "请在 Krea 2 Fizgig 项目内选择组件。"}
+        spec = self._model_download_spec("krea2_fz", project_name)
+        links = getattr(self.core, spec[2], {})
+        if key not in links or action not in ("select", "default", "disable"):
+            return {"ok": False, "error": "组件或操作无效。"}
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "请等当前任务结束后再修改模型组件。"}
+        if action == "disable" and key != "turbo":
+            return {"ok": False, "error": "训练必需组件不能停用；文本编码器请通过类型选项切换。"}
+        path = ""
+        if action == "select":
+            state = krea2_rows(self.core, krea2_settings(config), allow_fp8=spec[2] == "KREA2_FZ_MODEL_LINKS")[key]
+            chosen = self.choose_path("model", state["path"], "krea2_component_" + key)
+            if not chosen.get("ok") or chosen.get("cancelled"):
+                return chosen
+            path = os.path.abspath(os.path.expanduser(str(chosen.get("path") or "").strip().strip('"')))
+            try:
+                validate_krea2_component(path, key)
+            except (ValueError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "任务已经启动，请结束后再修改组件。"}
+            # Re-read after the picker and preserve unrelated project/parameter edits.
+            config = self.core.load_project(project_name)
+            current_spec = self._model_download_spec("krea2_fz", project_name)
+            if (not config or config.get("mode") != "krea2_fz" or not current_spec
+                    or key not in getattr(self.core, current_spec[2], {})):
+                return {"ok": False, "error": "项目或引擎版本已变化，请重新打开模型设置。"}
+            config["krea2_models"] = change_krea2_selection(krea2_settings(config), key, action, path)
+            if not self.core.save_project(project_name, config):
+                return {"ok": False, "error": "组件设置保存失败，请重试。"}
+            self.core.clear_status_cache()
+        return {"ok": True, "message": "Krea 2 组件设置已保存，无需复制模型文件。", "path": path}
+
+    def select_krea2_encoder(self, project_name, choice):
+        """Persist the encoding strategy independently of component paths/downloads."""
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        if choice not in KREA2_ENCODER_CHOICES:
+            return {"ok": False, "error": "请选择自动推荐、FP8 scaled 或 BF16。"}
+        project_name = str(project_name or "").strip()
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "请等当前任务结束后再修改文本编码器。"}
+            config = self.core.load_project(project_name) if project_name else None
+            if not config or config.get("mode") != "krea2_fz":
+                return {"ok": False, "error": "请在 Krea 2 Fizgig 项目内选择文本编码器。"}
+            spec = self._model_download_spec("krea2_fz", project_name)
+            if choice == "te_fp8" and spec[2] != "KREA2_FZ_MODEL_LINKS":
+                return {"ok": False, "error": "旧版 Fizgig 不支持 FP8 scaled 文本编码器。"}
+            values = krea2_settings(config)
+            values["text_encoder"] = choice
+            config["krea2_models"] = values
+            if not self.core.save_project(project_name, config):
+                return {"ok": False, "error": "文本编码器选择保存失败，请重试。"}
+            self.core.clear_status_cache()
+        return {"ok": True, "message": "文本编码器选择已保存。"}
+
     def start_model_download(self, mode, key, project_name=""):
         spec = self._model_download_spec(mode, project_name)
         if not spec:
@@ -723,8 +811,11 @@ class ModernUIBridge:
         os.makedirs(asset_dir, exist_ok=True)
         dest = os.path.join(asset_dir, os.path.basename(filename))
         config = self.core.load_project(str(project_name or "")) if project_name else {}
-        selected_before = h3_settings(config) if mode == "h3_fz" else {}
-        existing = self.core.h3_fz_model_files(selected_before) if mode == "h3_fz" else getattr(self.core, files_name)()
+        selected_before = h3_settings(config) if mode == "h3_fz" else krea2_settings(config) if mode == "krea2_fz" else {}
+        if mode == "krea2_fz":
+            existing = krea2_files(self.core, selected_before, allow_fp8=links_name == "KREA2_FZ_MODEL_LINKS")
+        else:
+            existing = self.core.h3_fz_model_files(selected_before) if mode == "h3_fz" else getattr(self.core, files_name)()
         if existing.get(key) and os.path.isfile(existing[key]):
             return {"ok": False, "error": "该模型文件已存在，无需重复下载。"}
         task_id = self._begin_task("下载模型文件", "download", mode=mode, key=key)
@@ -752,6 +843,20 @@ class ModernUIBridge:
                             values = h3_settings(current)
                             values.pop(key, None)
                             current["h3_models"] = values
+                            if not self.core.save_project(project_name, current):
+                                raise OSError("模型已下载，但项目路径保存失败；请重新选择这个文件。")
+                except (ValueError, OSError) as exc:
+                    ok, failure = False, str(exc)
+            if ok and mode == "krea2_fz":
+                try:
+                    validate_krea2_component(path, key)
+                    if project_name and key in selected_before:
+                        current = self.core.load_project(project_name)
+                        if current and current.get("mode") == mode and krea2_settings(current).get(key) == selected_before[key]:
+                            values = krea2_settings(current)
+                            # Repair this path only; never replace an explicit encoder choice.
+                            values[key] = str(path)
+                            current["krea2_models"] = values
                             if not self.core.save_project(project_name, current):
                                 raise OSError("模型已下载，但项目路径保存失败；请重新选择这个文件。")
                 except (ValueError, OSError) as exc:
@@ -798,7 +903,7 @@ class ModernUIBridge:
             cancel_event.set()
         elif downloader is not None:
             downloader.cancel()
-        elif kind in ("setup", "training", "preprocess", "caption", "prompt_reverse"):
+        elif kind in ("setup", "training", "preprocess", "caption", "prompt_reverse", "prompt_reverse_model"):
             self.core.stop_active_process()
         return {"ok": True}
 
@@ -849,17 +954,73 @@ class ModernUIBridge:
 
     def get_prompt_reverse(self, task_id=""):
         with self._task_lock:
-            key = str(task_id or "") or next(reversed(self._prompt_reports), "")
+            active = self._task if self._task and self._task.get("kind") in ("prompt_reverse", "prompt_reverse_model") else None
+            key = str(task_id or "") or (active["id"] if active else next(reversed(self._prompt_reports), ""))
             report = self._prompt_reports.get(key)
-            task = self._task if self._task and self._task.get("kind") == "prompt_reverse" and self._task.get("id") == key else None
+            task = active if active and active.get("id") == key else None
             return {"ok": True, "task_id": key, "report": copy.deepcopy(report),
-                    "task": {field: task.get(field) for field in ("id", "status", "message", "detail", "progress")} if task else None}
+                    "task": {field: task.get(field) for field in ("id", "kind", "model_key", "status", "message", "detail", "progress")} if task else None}
+
+    def get_prompt_reverse_model(self, model="ram"):
+        from kohya_core.prompt_reverse_models import status
+        from kohya_core.captioning import CaptionError
+        try:
+            return status(self.core, model)
+        except (CaptionError, OSError, ValueError):
+            return {"ok": False, "error": "无法读取本地打标模型状态。"}
+
+    def download_prompt_reverse_model(self, model="ram"):
+        from kohya_core.prompt_reverse_models import download, status as model_status
+        from kohya_core.captioning import CaptionError
+        try:
+            info = model_status(self.core, model)
+        except (CaptionError, OSError, ValueError):
+            return {"ok": False, "error": "本地反推模型选项或文件清单无效。"}
+        task_id = self._begin_task("下载反推模型 · " + info["name"], "prompt_reverse_model")
+        if not task_id:
+            return {"ok": False, "error": "已有训练或准备任务正在运行，请先完成或停止。"}
+        self.core.reset_stop()
+        with self._task_lock:
+            self._task["model_key"] = model
+
+        def progress(done, total, item):
+            with self._task_lock:
+                if self._task and self._task.get("id") == task_id:
+                    self._task.update(progress=done / max(total, 1), detail=item["name"], message="正在下载并校验 %s…" % info["name"])
+
+        def worker():
+            status, message = "completed", "%s 已下载，可用于打标与反推。" % info["name"]
+            try:
+                download(self.core, lambda line: self._task_log(task_id, line), progress, model)
+            except self.core.StopRequested:
+                status, message = "cancelled", "下载已停止，已下载文件保留，可重试继续。"
+            except Exception as exc:
+                status = "failed"
+                message = str(exc) if isinstance(exc, CaptionError) else "本地打标模型下载失败，请查看运行日志后重试。"
+                self._task_log(task_id, "[反推模型] " + message)
+            finally:
+                with self._task_lock:
+                    if self._task and self._task.get("id") == task_id:
+                        self._task.update(status=status, message=message, progress=1.0 if status == "completed" else None)
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="prompt-reverse-model").start()
+        except RuntimeError:
+            with self._task_lock:
+                if self._task and self._task.get("id") == task_id:
+                    self._task.update(status="failed", message="下载任务未能启动，请重试。")
+            return {"ok": False, "error": "下载任务未能启动，请重试。"}
+        return {"ok": True, "task_id": task_id}
 
     def start_prompt_reverse(self, options):
         from kohya_core.captioning import CaptionError, _atomic_bytes
         from kohya_core.prompt_reverse import prepare, generate
         try:
             selection = prepare(options)
+            if selection["method"] in ("ram", "qwen_vl", "pixai"):
+                from kohya_core.prompt_reverse_models import status
+                if not status(self.core, selection["method"])["ready"]:
+                    raise CaptionError("请先下载当前选择的反推模型，再开始反推。")
             service = self._caption_settings.connection() if selection["method"] == "natural" else None
             if service and not service["local"] and options.get("allow_remote") is not True:
                 raise CaptionError("请确认允许将所选图片发送到在线视觉服务。")
@@ -873,8 +1034,9 @@ class ModernUIBridge:
         self.core.reset_stop()
         report = {"task_id": task_id, "directory": str(selection["root"]), "path": selection["path"],
                   "method": selection["method"], "language": selection["language"], "length": selection["length"],
-                  "status": "running", "total": len(selection["images"]), "generated": 0, "failed": 0, "items": []}
-        report_path = self.core.data_sub("logs", "prompt_reverse_%s.json" % task_id)
+                  "pixai_options": selection.get("pixai_options"), "device": selection.get("device", "auto"), "status": "running", "total": len(selection["images"]), "generated": 0, "failed": 0, "items": []}
+        # data_sub creates directories; append the filename only after resolving logs.
+        report_path = Path(self.core.data_sub("logs")) / ("prompt_reverse_%s.json" % task_id)
 
         def publish(value):
             with self._task_lock:
@@ -1119,6 +1281,7 @@ class ModernUIBridge:
                         "dedup": True, "wd14": True, "square_crop": False,
                         "crop_ratio": str(stored.get("crop_ratio") or "不裁切（保比例）"),
                         "wd14_model": str(stored.get("wd14_model") or "swinv2-v3"),
+                        "pixai_options": stored,
                         "min_size": 256, "blur_threshold": 30.0, "report": report_path,
                         "keep_tokens": None, "project": project_name,
                         "style_caption": str(config.get("style_caption") or ""),
@@ -1457,6 +1620,11 @@ class ModernUIBridge:
             return {"ok": False, "error": "当前模式的必需模型文件尚未齐全：\n%s\n\n模型目录：%s" % (
                 "\n".join(str(item) for item in missing), details.get("asset_dir") or "未指定")}
 
+        if mode == "krea2_fz" and params.get("krea2_models"):
+            try:
+                validate_krea2_selected(self.core, params.get("krea2_models"), allow_fp8=params.get("fizgig_version") == FIZGIG_TARGET)
+            except (ValueError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
         if mode == "h3_fz":
             try:
                 validate_h3_selected(self.core, params.get("h3_models"))
@@ -1571,13 +1739,17 @@ class ModernUIBridge:
             plan_rank, plan_alpha, plan_learning_rate = qwen_plan.get(qwen_preset, qwen_plan["fast"])
             model_label = "Qwen-Image-2.1（Fizgig %s 预设）" % qwen_preset.title()
         resume_path = self._resume_path(project_name, mode, params)
+        model_path = str(params.get("base_model") or details.get("asset_dir") or "由引擎管理")
+        if mode == "krea2_fz" and params.get("krea2_models"):
+            model_path = str(krea2_files(self.core, params.get("krea2_models"),
+                                         allow_fp8=params.get("fizgig_version") == FIZGIG_TARGET).get("raw") or model_path)
         plan = {
             "project_name": project_name, "mode": mode,
             "mode_label": self.core.MODE_LABELS.get(mode, mode),
             "training_engine": self._engine_kind_for_mode(mode),
             "engine_label": ("Fizgig · " + params.get("fizgig_version", "")) if mode in FIZGIG_FAMILIES else self._engine_label_for_mode(mode),
             "model_label": model_label,
-            "model_path": str(params.get("base_model") or details.get("asset_dir") or "由引擎管理"),
+            "model_path": model_path,
             "model_download_required": False, "model_size": "",
             "raw_dir": raw_dir, "image_count": image_count, "min_images": min_count,
             "data_count": image_count,
@@ -1992,7 +2164,7 @@ class ModernUIBridge:
             # are reused without silently selecting another dataset or engine.
             if patch.get("mode") != current.get("mode") or patch.get("base_type") != current.get("base_type"):
                 return {"ok": False, "error": "当前模式或底模类型已变化，不能直接恢复这条记录。"}
-            for key in ("raw_dir", "reg_dir", "base_model", "train_env", "h3_models", "at_model"):
+            for key in ("raw_dir", "reg_dir", "base_model", "train_env", "h3_models", "krea2_models", "at_model"):
                 patch.pop(key, None)
             if current.get("training_kind") == "slider":
                 if patch.get("training_kind") != "slider":
@@ -2044,7 +2216,7 @@ class ModernUIBridge:
         getattr(self.core, "reset_effective", lambda: None)()
         root_keys = ("mode", "base_type", "at_sub_mode", "concept_type", "fast_tier", "trigger",
                      "raw_dir", "reg_dir", "base_model", "style_preset", "style_caption",
-                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "training_kind", "multi_character")
+                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "krea2_models", "training_kind", "multi_character")
         record_config = {key: config[key] for key in root_keys if key in config}
         stored_params = config.get("params") if isinstance(config.get("params"), dict) else {}
         record_config["params"] = {key: value for key, value in stored_params.items() if key in WORKSPACE_PARAM_KEYS}
@@ -2102,7 +2274,7 @@ class ModernUIBridge:
                         "mode": preprocess_mode, "trigger": params["trigger"],
                         "reg_dir": params["reg_dir"], "repeats": params["repeats"],
                         "dedup": True, "wd14": True, "square_crop": False,
-                        "crop_ratio": params["crop_ratio"], "wd14_model": params["wd14_model"],
+                        "crop_ratio": params["crop_ratio"], "wd14_model": params["wd14_model"], "pixai_options": params,
                         "min_size": 256, "blur_threshold": 30.0, "report": report_path,
                         "keep_tokens": None, "project": project_name,
                         "style_caption": params["style_caption"],
@@ -2726,6 +2898,14 @@ class ModernUIBridge:
                                "caption_language": ("zh", "en"), "caption_length": ("brief", "detailed")}
             if key in caption_choices and value not in caption_choices[key]:
                 return {"ok": False, "error": "图片描述选项无效。"}
+            if key == "wd14_model" and value not in ("swinv2-v3", "moat-v2", "pixai-v1"):
+                return {"ok": False, "error": "自动打标模型选项无效。"}
+            if key == "pixai_threshold":
+                try:
+                    if not math.isfinite(float(value)) or not .01 <= float(value) <= .99:
+                        raise ValueError()
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "PixAI 内容标签阈值需要为 0.01 到 0.99。"}
             if key == "fizgig_qwen_preset" and value not in ("auto", "fast", "standard", "style"):
                 return {"ok": False, "error": "Qwen-Image-2.1 训练预设无效。"}
             if key in BOOL_PARAM_KEYS:
@@ -3432,7 +3612,10 @@ class ModernUIBridge:
             elif mode == "krea2_fz" and (project_config.get("params") or {}).get("fizgig_version") == FIZGIG_TARGET:
                 missing = fizgig_missing(core, "krea2", project_config)
                 asset_dir = core.krea2_models_dir()
-            elif mode in ("krea2", "krea2_fz"):
+            elif mode == "krea2_fz":
+                missing = krea2_missing(core, krea2_settings(project_config), allow_fp8=not project_name)
+                asset_dir = core.krea2_models_dir()
+            elif mode == "krea2":
                 missing = list(core.krea2_missing_models())
                 asset_dir = core.krea2_models_dir()
             elif mode == "krea2_at":
@@ -3551,6 +3734,18 @@ class ModernUIBridge:
             }
             for step in getattr(core, "GUIDE_STEPS", {}).get(mode, ())
         ]
+        krea2_components = self.get_model_downloads(mode, project_name) if mode == "krea2_fz" else None
+        if mode == "krea2_fz":
+            for step in guide_steps:
+                if step["check"] in model_checks:
+                    step.update(label="③ 模型与配套组件", button="查看配置", persistent=True,
+                                tip="选择编码器类型，指定已有文件，或下载缺少的组件。准备完成后仍可修改。")
+                elif step["check"] == "env":
+                    step.update(label="① Python / Git 环境")
+                elif step["check"] == "fizgig":
+                    step.update(label="② Fizgig 训练引擎")
+                elif step["check"] == "raw":
+                    step.update(label="④ 图集与标签")
         if project_config.get("training_kind") == "multi_character":
             for step in guide_steps:
                 if step["check"] == "raw":
@@ -3580,6 +3775,7 @@ class ModernUIBridge:
             "fizgig_versions": version_info.get("versions", []),
             "fizgig_target_version": FIZGIG_TARGET,
             "model_choice": project_config.get("model_choice"),
+            "krea2_components": krea2_components,
             "interval_units": interval_units,
             "interval_hints": interval_hints,
             "defaults": preset,

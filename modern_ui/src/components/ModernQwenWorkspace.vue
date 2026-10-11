@@ -7,6 +7,7 @@ import { useMultiCharacter } from '../useMultiCharacter'
 import CropRatioField from './CropRatioField.vue'
 import DatasetInspection from './DatasetInspection.vue'
 import CaptionControls from './CaptionControls.vue'
+import PixaiTagOptions from './PixaiTagOptions.vue'
 import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
@@ -79,7 +80,7 @@ const trainingDraft = reactive({
   optimizer: 'auto',
   sample_prompt: '',
   caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
-  wd14_model: 'swinv2-v3',
+  pixai_character: false, pixai_copyright: false, pixai_style: false, pixai_threshold: '.17', wd14_model: 'swinv2-v3',
   strong_bind: true,
   clean_concept: true,
   sample_preview_mode: 'auto',
@@ -192,6 +193,8 @@ function hydrateConfig(config?: ProjectConfig | null) {
     const value = text(params[key]) || defaultValue || (demo ? demoValues[key] ?? (key === 'optimizer' ? 'auto' : '') : key === 'optimizer' ? 'auto' : '')
     trainingDraft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'sample_seed' ? value || '1234' : value
   }
+  trainingDraft.pixai_threshold = String(params.pixai_threshold ?? '.17')
+  for (const key of ['pixai_character', 'pixai_copyright', 'pixai_style'] as const) trainingDraft[key] = Boolean(params[key])
   trainingDraft.caption_method = String(params.caption_method || 'wd14')
   trainingDraft.caption_language = String(params.caption_language || 'zh')
   trainingDraft.caption_length = String(params.caption_length || 'brief')
@@ -241,6 +244,9 @@ function makePatch(): ProjectConfig {
     if (dirty.has(key)) patch[key] = trainingDraft[key]
   }
   const params: Record<string, unknown> = {}
+  for (const key of ['pixai_character', 'pixai_copyright', 'pixai_style', 'pixai_threshold'] as const) {
+    if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
+  }
   for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
   }
@@ -474,10 +480,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               <button class="qwen-button compact" type="button" :title="legacyTooltips.chooseRawDir" @click="browseDataset">浏览…</button>
             </div>
             <div class="desktop-dataset-options">
-              <label v-if="trainingDraft.caption_method === 'wd14'" class="qwen-field" :title="legacyTooltips.wd14Model"><span class="field-caption">自动打标模型</span><select v-model="trainingDraft.wd14_model" class="qwen-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
+              <label v-if="trainingDraft.caption_method === 'wd14'" class="qwen-field" :title="legacyTooltips.wd14Model"><span class="field-caption">自动打标模型</span><select v-model="trainingDraft.wd14_model" class="qwen-select" @change="markParam('wd14_model')"><option value="swinv2-v3">WD14 swinv2-v3（默认）</option><option value="moat-v2">WD14 moat-v2（旧版）</option><option value="pixai-v1">PixAI v1.0（内容 / 角色 / 画风）</option></select></label>
               <button v-if="trainingDraft.caption_method === 'wd14'" class="check-toggle" :class="{ checked: trainingDraft.keep_user_captions }" type="button" role="checkbox" :aria-checked="trainingDraft.keep_user_captions" @click="trainingDraft.keep_user_captions = !trainingDraft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
               <button class="check-toggle" :title="legacyTooltips.overwrite" :class="{ checked: trainingDraft.overwrite }" type="button" role="checkbox" :aria-checked="trainingDraft.overwrite" @click="trainingDraft.overwrite = !trainingDraft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
             </div>
+              <PixaiTagOptions v-if="trainingDraft.caption_method === 'wd14' && trainingDraft.wd14_model === 'pixai-v1'" :options="trainingDraft" :desktop="desktop" @change="(key, value) => { Object.assign(trainingDraft, { [key]: value }); markParam(key) }" />
               <CaptionControls :project-name="project.name" :directory="trainingDraft.raw_dir" :desktop="desktop" :method="trainingDraft.caption_method" :language="trainingDraft.caption_language" :length="trainingDraft.caption_length" @update:method="trainingDraft.caption_method = $event; markParam('caption_method')" @update:language="trainingDraft.caption_language = $event; markParam('caption_language')" @update:length="trainingDraft.caption_length = $event; markParam('caption_length')" />
               <DatasetInspection :directory="trainingDraft.raw_dir" :desktop="desktop" :natural="trainingDraft.caption_method === 'natural'" :keep-captions="trainingDraft.keep_user_captions || trainingDraft.caption_method !== 'wd14'" @preserve="trainingDraft.keep_user_captions = true; markParam('keep_user_captions')" />
             <p class="card-footnote">修改过标签、裁切比例或打标模型时，勾选重新处理已有图片后再执行数据预处理。</p>

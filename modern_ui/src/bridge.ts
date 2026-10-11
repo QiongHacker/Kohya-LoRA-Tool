@@ -144,7 +144,7 @@ export interface CaptionReport {
 
 export interface PromptReverseItem { name: string; status: string; caption?: string; error?: string }
 export interface PromptReverseReport {
-  task_id: string; directory: string; path: string; method: 'natural' | 'wd14'; language: 'zh' | 'en'; length: 'brief' | 'detailed';
+  task_id: string; directory: string; path: string; method: 'natural' | 'wd14' | 'ram' | 'qwen_vl' | 'pixai'; language: 'zh' | 'en'; length: 'brief' | 'detailed';
   status: string; total: number; generated: number; failed: number; items: PromptReverseItem[]; error?: string;
 }
 
@@ -186,8 +186,10 @@ export interface DesktopApi {
   control_agent(id: string, action: 'pause' | 'resume' | 'takeover'): Promise<{ ok: boolean; error?: string }>
   pick_agent_path(id: string, kind: 'folder' | 'model', path?: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
   stop_agent(id: string, stop_task: boolean): Promise<{ ok: boolean; error?: string }>
-  start_prompt_reverse(options: { path: string; method: 'natural' | 'wd14'; language: 'zh' | 'en'; length: 'brief' | 'detailed'; wd14_model: string; threshold: number; allow_remote: boolean }): Promise<{ ok: boolean; task_id?: string; error?: string }>
-  get_prompt_reverse(task_id?: string): Promise<{ ok: boolean; task_id: string; report?: PromptReverseReport | null; task?: { id: string; status: string; message: string; detail: string; progress: number | null } | null }>
+  start_prompt_reverse(options: { path: string; method: 'natural' | 'wd14' | 'ram' | 'qwen_vl' | 'pixai'; language: 'zh' | 'en'; length: 'brief' | 'detailed'; wd14_model: string; threshold: number; allow_remote: boolean; device?: 'auto' | 'cpu'; pixai_character?: boolean; pixai_copyright?: boolean; pixai_style?: boolean; pixai_threshold?: string | number }): Promise<{ ok: boolean; task_id?: string; error?: string }>
+  get_prompt_reverse(task_id?: string): Promise<{ ok: boolean; task_id: string; report?: PromptReverseReport | null; task?: { id: string; kind?: string; model_key?: 'ram' | 'qwen_vl' | 'pixai'; status: string; message: string; detail: string; progress: number | null } | null }>
+  get_prompt_reverse_model(model?: 'ram' | 'qwen_vl' | 'pixai'): Promise<{ ok: boolean; ready?: boolean; name?: string; directory?: string; size_bytes?: number; language?: string; error?: string }>
+  download_prompt_reverse_model(model?: 'ram' | 'qwen_vl' | 'pixai'): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_prompt_reverse_image(task_id: string, name: string): Promise<{ ok: boolean; data_url?: string; error?: string }>
   export_prompt_reverse(task_id: string, items: Array<{ name: string; caption: string }>, directory: string): Promise<{ ok: boolean; directory?: string; written?: number; error?: string }>
   get_caption_service(): Promise<{ ok: boolean; settings?: CaptionServiceSettings; task?: { id: string; status: string; project_name: string }; error?: string }>
@@ -254,6 +256,8 @@ export interface DesktopApi {
   list_task_samples(task_id: string, offset?: number): Promise<{ ok: boolean; samples?: TrainingSampleEntry[]; total?: number; next_offset?: number | null; error?: string }>
   get_task_sample(task_id: string, after?: string, full?: boolean, name?: string): Promise<ModernTaskSample>
   cancel_task(task_id: string): Promise<{ ok: boolean; error?: string }>
+  select_krea2_encoder(project_name: string, choice: Krea2EncoderChoice): Promise<{ ok: boolean; message?: string; error?: string }>
+  select_krea2_component(project_name: string, key: string, action?: "select" | "default" | "disable"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
   select_h3_component(project_name: string, key: string, action?: "select" | "default" | "disable"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
   get_model_downloads(mode: string, project_name?: string): Promise<ModelDownloadList>
   start_model_download(mode: string, key: string, project_name?: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
@@ -304,6 +308,7 @@ export interface AppearanceBackgroundHistoryEntry {
 }
 
 export interface GuideStep {
+  persistent?: boolean
   id: string
   label: string
   button: string
@@ -395,6 +400,8 @@ export interface ModelDownloadItem {
   required_group: string
   optional: boolean
   part_size: number
+  selected?: boolean
+  in_use?: boolean
   local_select?: boolean
   manual?: boolean
   disabled?: boolean
@@ -402,7 +409,19 @@ export interface ModelDownloadItem {
   detail?: string
 }
 
+export type Krea2EncoderChoice = 'auto' | 'te' | 'te_fp8'
+export interface Krea2EncoderSelection {
+  choice: Krea2EncoderChoice
+  active_key: 'te' | 'te_fp8'
+  path: string
+  label: string
+  ready: boolean
+  supports_fp8: boolean
+  reason: string
+}
+
 export interface ModelDownloadList {
+  encoder?: Krea2EncoderSelection
   ok: boolean
   error?: string
   mode?: string
@@ -437,6 +456,7 @@ export interface ModeWorkspaceData {
   fizgig_versions?: string[]
   fizgig_target_version?: string
   model_choice?: ModelChoice
+  krea2_components?: ModelDownloadList | null
   engine_key: string
   gpu: string
   gpu_vendor: string

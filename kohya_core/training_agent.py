@@ -834,7 +834,7 @@ class TrainingAgent:
         data_label = source_plan.get('data_label', '样本')
         data_unit = source_plan.get('data_unit', '个')
         fields.append({'key': 'dataset', 'label': '训练数据', 'value': '%s %s%s' % (data_count, data_unit, data_label) if data_count is not None else ('已设置' if config.get('raw_dir') else '未设置')})
-        fields.append({'key': 'captions', 'label': '训练依据' if config.get('training_kind') == 'slider' else '描述文件', 'value': ('文字指导' if (config.get('slider') or {}).get('source') == 'text' else '整对对照图片') if config.get('training_kind') == 'slider' else 'WD14' if details.get('caption_method') == 'wd14' else str(details.get('caption_method') or '未配置')})
+        fields.append({'key': 'captions', 'label': '训练依据' if config.get('training_kind') == 'slider' else '描述文件', 'value': ('文字指导' if (config.get('slider') or {}).get('source') == 'text' else '整对对照图片') if config.get('training_kind') == 'slider' else ('PixAI v1.0' if (config.get('params') or {}).get('wd14_model') == 'pixai-v1' else 'WD14') if details.get('caption_method') == 'wd14' else str(details.get('caption_method') or '未配置')})
         if mode in ('character', 'style', 'concept'):
             fields.append({'key': 'base_model', 'label': '底模', 'value': source_plan.get('model_label') or ('已设置' if config.get('base_model') else '未设置')})
         elif source_plan.get('model_label'):
@@ -1101,7 +1101,7 @@ class TrainingAgent:
         if name == 'check_training':
             return public_data(bridge.prepare_training(project_name))
         if name == 'prepare_data':
-            if config.get('training_kind') != 'slider' and (config.get('params') or {}).get('caption_method', 'wd14') == 'wd14' and not (config.get('params') or {}).get('keep_user_captions') and not self._permission('allow_download', 'WD14 阶段可能下载打标模型。本次是否允许下载？'):
+            if config.get('training_kind') != 'slider' and (config.get('params') or {}).get('caption_method', 'wd14') == 'wd14' and not (config.get('params') or {}).get('keep_user_captions') and not self._permission('allow_download', '本地打标阶段可能下载所选模型。本次是否允许下载？'):
                 return {'ok': False, 'error': 'WD14 可能下载打标模型，需开启允许下载；或使用已有文本／自然语言描述。'}
             return self._wait_task(bridge.start_preprocess_task(project_name))
         if name == 'describe_images':
@@ -1138,8 +1138,8 @@ class TrainingAgent:
                                         ['开始训练', '修改方案', '暂不训练'], kind='plan')
                 if answer != '开始训练':
                     return {'ok': False, 'status': 'not_started', 'message': '训练尚未启动。'}
-            if (config.get('params') or {}).get('caption_method', 'wd14') == 'wd14' and not (config.get('params') or {}).get('keep_user_captions') and not self._permission('allow_download', '训练预处理将使用 WD14，可能下载打标模型。允许本次下载吗？'):
-                return {'ok': False, 'error': '用户未允许 WD14 模型下载，训练尚未启动。'}
+            if (config.get('params') or {}).get('caption_method', 'wd14') == 'wd14' and not (config.get('params') or {}).get('keep_user_captions') and not self._permission('allow_download', '训练预处理将使用所选本地打标模型，可能需要下载。允许本次下载吗？'):
+                return {'ok': False, 'error': '用户未允许打标模型下载，训练尚未启动。'}
             attempts = int(self.state.get('training_attempts', 0))
             if attempts >= 3:
                 return {'ok': False, 'error': '本轮训练启动次数已达到三次上限；请检查证据后重新开始。'}

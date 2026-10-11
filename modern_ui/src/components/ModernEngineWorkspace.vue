@@ -5,8 +5,10 @@ import UiIcon from './UiIcon.vue'
 import MultiCharacterPanel from './MultiCharacterPanel.vue'
 import { useMultiCharacter } from '../useMultiCharacter'
 import CropRatioField from './CropRatioField.vue'
+import Krea2ComponentsPanel from './Krea2ComponentsPanel.vue'
 import DatasetInspection from './DatasetInspection.vue'
 import CaptionControls from './CaptionControls.vue'
+import PixaiTagOptions from './PixaiTagOptions.vue'
 import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
@@ -20,6 +22,7 @@ const props = defineProps<{
   config?: ProjectConfig | null
   details: ModeWorkspaceData
   desktop: boolean
+  componentBusy?: boolean
   choosePath: (kind: BrowseKind, currentPath?: string, memoryKey?: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
@@ -37,13 +40,15 @@ const draft = reactive({
   rank: '', alpha: '', unet_lr: '', te_lr: '', repeats: '', max_epochs: '', resolution: '',
   video_steps: '', video_frames: '', save_every: '', sample_interval: '', sample_seed: '1234', optimizer: 'auto',
   crop_ratio: '', sample_prompt: '', noise_offset: '', min_snr_gamma: '', quant_mode: 'auto',
-  blocks_to_swap: '', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto', fizgig_qwen_preset: 'auto',
+  blocks_to_swap: '', pixai_character: false, pixai_copyright: false, pixai_style: false, pixai_threshold: '.17', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto', fizgig_qwen_preset: 'auto',
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
   caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
   batch_size: '', gc: 'auto',
   strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
 })
 
+const isKrea2 = computed(() => props.mode === 'krea2_fz')
+const componentVersionPending = computed(() => draft.fizgig_version !== props.details.fizgig_version)
 const isFizgig = computed(() => props.mode.endsWith('_fz'))
 const isV7 = computed(() => isFizgig.value && draft.fizgig_version === 'v7.0.1')
 const supported = (key: string) => isFizgig.value && ['optimizer','compile','global_pos','global_neg'].includes(key) ? isV7.value : Boolean(props.details.supports?.[key])
@@ -58,7 +63,7 @@ const officialQwenPreset = computed(() => props.mode === 'qwen21_fz')
 const isH3Fizgig = computed(() => props.mode === 'h3_fz')
 const engineUpdateAction = computed(() => String(props.details.engine_key || '').includes('fizgig') ? 'fizgig_engine_update' : 'at_engine_update')
 const assetReady = computed(() => props.details.missing_models.length === 0)
-const modelAction = computed(() => `open_models:${props.mode}`)
+const modelAction = computed(() => isKrea2.value ? 'cmd_dl_krea2_models' : `open_models:${props.mode}`)
 const intervalUnit = (key: 'save_every' | 'sample_interval') => props.details.interval_units?.[key] === 'epochs' ? '轮' : '步'
 const intervalTooltip = (key: 'save_every' | 'sample_interval') => props.details.interval_hints?.[key] || (key === 'save_every'
   ? props.details.interval_units?.[key] === 'epochs' ? legacyTooltips.saveEveryEpochs : legacyTooltips.saveEverySteps
@@ -77,6 +82,7 @@ function styledPresetValue(key: string, style = draft.style_preset): string {
 const currentDatasetHint = computed(() => {
   if (!props.details.has_training_submode) return props.details.dataset_hint
   const semanticHint = props.details.dataset_hints?.[draft.at_sub_mode]
+  if (isKrea2.value) return semanticHint || '选择原始图集，检查自动生成或已有的标签；预处理完成后确认再开始训练。'
   return semanticHint ? `${semanticHint}\n${props.details.dataset_hint}` : props.details.dataset_hint
 })
 const currentTriggerHint = computed(() => {
@@ -114,6 +120,8 @@ function hydrate(config?: ProjectConfig | null) {
     const hydratedValue = value(params[key], styledDefault === undefined ? (key === 'optimizer' || key === 'quant_mode' || key === 'gc' ? 'auto' : '') : String(styledDefault))
     draft[key] = (key === 'wd14_model' ? normalizeWd14Model(hydratedValue) : key === 'sample_seed' ? hydratedValue || '1234' : hydratedValue) as never
   }
+  draft.pixai_threshold = String(params.pixai_threshold ?? '.17')
+  for (const key of ['pixai_character', 'pixai_copyright', 'pixai_style'] as const) draft[key] = Boolean(params[key])
   draft.caption_method = String(params.caption_method || 'wd14')
   draft.caption_language = String(params.caption_language || 'zh')
   draft.caption_length = String(params.caption_length || 'brief')
@@ -171,6 +179,9 @@ function makePatch(): ProjectConfig {
     if (dirty.has(key)) patch[key] = draft[key]
   }
   const params: Record<string, unknown> = {}
+  for (const key of ['pixai_character', 'pixai_copyright', 'pixai_style', 'pixai_threshold'] as const) {
+    if (dirty.has(`params.${key}`)) params[key] = draft[key]
+  }
   if (dirty.has('params.fizgig_version')) params.fizgig_version = draft.fizgig_version
   for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
@@ -187,12 +198,14 @@ function makePatch(): ProjectConfig {
 }
 
 function save() {
+  if (props.componentBusy) return
   const patch = makePatch()
   if (Object.keys(patch).length === 1 && patch.mode === props.mode) return emit('notify', '当前没有修改项目配置。')
   emit('save', patch)
 }
 
 function startTraining() {
+  if (props.componentBusy) return
   if (!props.desktop) return emit('notify', '浏览器预览不会启动训练。')
   emit('train', makePatch())
 }
@@ -228,6 +241,7 @@ async function guideAction(action: string): Promise<ProjectConfig | null> {
     await browseModel()
     return makePatch()
   }
+  if (isKrea2.value && action === 'cmd_dl_krea2_models') return makePatch()
   if (action !== 'cmd_pick_raw') return null
   await browseDataset()
   return dirty.has('raw_dir') ? makePatch() : null
@@ -247,12 +261,12 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
   <section class="engine-workspace" :aria-label="`${details.label} 新版训练页`">
     <header class="engine-toolbar">
       <div class="engine-heading">
-        <button class="engine-back" type="button" @click="emit('back', makePatch())"><UiIcon name="back" /> 返回项目</button>
+        <button class="engine-back" type="button" :disabled="componentBusy" @click="emit('back', makePatch())"><UiIcon name="back" /> 返回项目</button>
       <div class="engine-heading-copy"><h1>{{ isMulti ? '多角色 LoRA · ' + details.label : details.label + '训练' }}</h1><span>项目：{{ project.name }}</span></div>
       </div>
       <div class="engine-actions">
         <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction(engineUpdateAction)"><span class="update-arrow">↗</span> 引擎更新可用</button>
-        <button v-if="desktop" class="engine-button" type="button" @click="save">{{ dirty.size ? '保存修改 · 未保存' : '设置已保存' }}</button>
+        <button v-if="desktop" class="engine-button" type="button" :disabled="componentBusy" @click="save">{{ dirty.size ? '保存修改 · 未保存' : '设置已保存' }}</button>
         <!-- ★ 2026-10-02：与左侧栏重复的「一键开始训练」已移除 ✗（同一动作，只保留侧栏那个）-->
 
         <button v-else class="engine-button primary" type="button" @click="save">保存预览设置</button>
@@ -263,7 +277,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
       <span class="engine-status" :class="{ ready: details.engine_ready }">{{ details.engine_ready ? '训练引擎就绪' : '训练引擎未就绪' }}</span>
       <span class="engine-status" :class="{ ready: assetReady }">{{ assetReady ? '模型文件齐全' : `模型文件缺少 ${details.missing_models.length} 项` }}</span>
       <span class="engine-status">{{ details.gpu }}</span>
-          <button class="engine-link" type="button" title="打开当前训练模式的模型文件夹。" @click="requestAction(modelAction)">打开模型目录</button>
+          <button class="engine-link" type="button" :disabled="componentBusy" :title="isKrea2 ? '配置项目实际使用的模型和编码器' : '打开当前训练模式的模型文件夹。'" @click="requestAction(modelAction)">{{ isKrea2 ? '配置模型与组件' : '打开模型目录' }}</button>
     </div>
     <AmdCompatibilityBar
       v-if="isAmdGpu && supported('amd_mode')"
@@ -273,35 +287,38 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
     />
 
     <div class="engine-scroll-area">
-      <div class="engine-scroll-content">
+      <div class="engine-scroll-content" :inert="componentBusy">
+        <p v-if="isKrea2" class="krea2-workflow">环境准备 <span>→</span> 模型与组件 <span>→</span> 图集与标签 <span>→</span> 开始训练</p>
         <MultiCharacterPanel v-if="isMulti" :model-value="multiSettings" :project-name="project.name" :desktop="desktop" :choose-path="choosePath" @update:model-value="updateMulti" @notify="emit('notify',$event)" />
-        <section v-if="isFizgig" class="engine-card runtime-card">
+        <component :is="isKrea2 ? 'details' : 'section'" v-if="isFizgig" class="engine-card runtime-card">
+          <summary v-if="isKrea2" class="runtime-summary">环境与引擎 · {{ details.fizgig_version }}<span>{{ componentVersionPending ? '版本修改待保存' : details.engine_ready ? '已就绪 · 可展开调整' : '未就绪 · 展开安装' }}</span></summary>
           <div class="runtime-choice"><label class="engine-field"><span>此项目的训练引擎版本</span><select v-model="draft.fizgig_version" class="engine-select" @change="onVersionChange"><option v-for="v in versions" :key="v" :value="v">{{ v }}{{ details.fizgig_versions?.includes(v) ? ' · 已安装' : ' · 需安装 / 更新' }}</option></select></label><button v-if="desktop && !details.fizgig_versions?.includes('v7.0.1')" class="engine-button compact" type="button" @click="requestAction('fizgig_engine_update')">安装新版 Fizgig</button></div>
           <p class="engine-hint">{{ isV7 ? '普通 LoRA · 文本编码器冻结 · 新版独立缓存。预览按轮数触发，开始时不额外采样，最后一轮只有满足间隔才采样。' : '旧版本项目继续使用原训练入口；升级软件不会自动迁移训练参数和续训快照。' }}</p>
           <p v-if="['anima_fz','sdxl_fz'].includes(mode)" class="engine-hint">上游实验性入口。{{ mode==='anima_fz' ? '仅支持标准 28 层 Anima；2.9B / 40 层请选 Kohya。' : '支持完整 SDXL 同架构底模；不训练文本编码器。' }}</p>
-        </section>
+        </component>
+        <Krea2ComponentsPanel v-if="isKrea2" :setup="details.krea2_components" :disabled="componentBusy || !desktop" :version-pending="componentVersionPending" @configure="requestAction(modelAction)" @select-encoder="requestAction('krea2_encoder:' + $event)" @component="(key, action) => requestAction('krea2_component:' + key + ':' + action)" />
         <section v-if="supported('base_model')" class="engine-card">
           <header class="engine-card-heading"><div><h2>训练底模</h2><small>可选择已有第三方底模；缺少组件再下载</small></div></header>
           <div class="runtime-choice"><input v-model="draft.base_model" class="engine-input" placeholder="选择已有完整 safetensors 底模；留空使用模型目录的标准底模" @input="markRoot('base_model')" /><button class="engine-button compact" type="button" @click="browseModel">选择底模</button><button class="engine-button compact" type="button" @click="requestAction(mode==='anima_fz'?'cmd_dl_anima_fz_models':'cmd_dl_sdxl_fz_models')">下载模型 / 组件</button></div>
         </section>
-        <section v-if="!isMulti" class="engine-summary">
+        <section v-if="!isMulti" class="engine-summary" :class="{ 'dataset-only': isKrea2 }">
           <div class="summary-main">
             <span class="summary-label">{{ isH3Fizgig ? '混合媒体原始目录' : isVideo ? '视频数据目录' : '训练图片目录' }}</span>
             <strong :title="draft.raw_dir || undefined">{{ draft.raw_dir || (desktop ? '尚未选择数据目录' : '预览中：桌面模式会显示项目数据目录') }}</strong>
             <small v-if="currentDatasetHint" :title="currentDatasetHint">{{ currentDatasetHint }}</small>
           </div>
           <button class="engine-button compact" type="button" @click="browseDataset">选择文件夹</button>
-          <div class="asset-copy">
+          <div v-if="!isKrea2" class="asset-copy">
             <span class="summary-label">模型文件位置</span>
             <strong :title="details.asset_dir || undefined">{{ details.asset_dir || '由引擎按配置管理' }}</strong>
             <small v-if="details.missing_models.length">缺少：{{ details.missing_models.join('、') }}</small>
           </div>
-          <button class="engine-button compact" type="button" @click="requestAction(modelAction)">打开模型目录</button>
+          <button v-if="!isKrea2" class="engine-button compact" type="button" @click="requestAction(modelAction)">打开模型目录</button>
         </section>
 
         <div class="engine-card-grid" :class="{multi:isMulti}">
           <section v-if="!isMulti" class="engine-card">
-            <header class="engine-card-heading"><span>01</span><div><h2>数据与训练方式</h2><small>按当前模式显示适用项目</small></div></header>
+            <header class="engine-card-heading"><span>{{ isKrea2 ? '02' : '01' }}</span><div><h2>{{ isKrea2 ? '图集、标签与训练方式' : '数据与训练方式' }}</h2><small>按当前模式显示适用项目</small></div></header>
             <div v-if="details.has_training_submode" class="engine-fields two-columns">
               <label class="engine-field" :title="legacyTooltips.atSubMode"><span>训练类型</span><select v-model="draft.at_sub_mode" class="engine-select" @change="markRoot('at_sub_mode')"><option value="character">人物（保留全部标签）</option><option value="style">画风（过滤人物标签）</option><option value="concept">概念</option></select></label>
               <label v-if="isConcept" class="engine-field" :title="details.concept_type_hints?.[draft.concept_type] || legacyTooltips.conceptType"><span>概念类型</span><select v-model="draft.concept_type" class="engine-select" @change="markRoot('concept_type')"><option value="form">形态/种族（美人鱼·半人马）</option><option value="outfit">服装（同款衣服）</option><option value="object">物品（道具/武器）</option><option value="bodypart">身体部位（异色瞳/翅膀）</option></select></label>
@@ -317,8 +334,9 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             <p v-else-if="!isVideo" class="engine-hint">选择后从当前模式预设重算学习率：动漫降低 15%，写实提高 15%；不保证更清晰或更自然。</p>
             <button v-if="details.has_training_submode && !isStyle" class="engine-switch" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.strongBind" :class="{ active: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')"><i></i><span><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
             <button v-if="isConcept" class="engine-check" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
-            <label v-if="supported('wd14_model') && !isVideo && draft.caption_method === 'wd14'" class="engine-field spaced" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="engine-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
+            <label v-if="supported('wd14_model') && !isVideo && draft.caption_method === 'wd14'" class="engine-field spaced" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="engine-select" @change="markParam('wd14_model')"><option value="swinv2-v3">WD14 swinv2-v3（默认）</option><option value="moat-v2">WD14 moat-v2（旧版）</option><option value="pixai-v1">PixAI v1.0（内容 / 角色 / 画风）</option></select></label>
             <button v-if="!isVideo && draft.caption_method === 'wd14'" class="engine-check" :class="{ checked: draft.keep_user_captions }" type="button" role="checkbox" :aria-checked="draft.keep_user_captions" @click="draft.keep_user_captions = !draft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
+              <PixaiTagOptions v-if="draft.caption_method === 'wd14' && draft.wd14_model === 'pixai-v1'" :options="draft" :desktop="desktop" @change="(key, value) => { Object.assign(draft, { [key]: value }); markParam(key) }" />
               <CaptionControls v-if="!isVideo" :project-name="project.name" :directory="draft.raw_dir" :desktop="desktop" :method="draft.caption_method" :language="draft.caption_language" :length="draft.caption_length" @update:method="draft.caption_method = $event; markParam('caption_method')" @update:language="draft.caption_language = $event; markParam('caption_language')" @update:length="draft.caption_length = $event; markParam('caption_length')" />
               <DatasetInspection v-if="!isVideo" :directory="draft.raw_dir" :desktop="desktop" :natural="draft.caption_method === 'natural'" :keep-captions="draft.keep_user_captions || draft.caption_method !== 'wd14'" @preserve="draft.keep_user_captions = true; markParam('keep_user_captions')" />
               <button v-if="supported('overwrite') && !isVideo" class="engine-check" :title="legacyTooltips.overwrite" :class="{ checked: draft.overwrite }" type="button" role="checkbox" :aria-checked="draft.overwrite" @click="draft.overwrite = !draft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
@@ -326,7 +344,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           </section>
 
           <section class="engine-card">
-            <header class="engine-card-heading"><span>02</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div></header>
+            <header class="engine-card-heading"><span>{{ isKrea2 ? '03' : '02' }}</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div></header>
             <label v-if="isMulti" class="engine-field"><span>训练中采样预览</span><select v-model="draft.sample_preview_mode" class="engine-select" @change="markParam('sample_preview')"><option value="auto">按显存使用默认设置</option><option value="on">开启</option><option value="off">关闭</option></select></label>
             <TrainingProfileControl :draft="draft" :mode="mode" :defaults="profileDefaults" :supported="profileSupported" :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="engine-param-grid">
@@ -335,7 +353,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
               <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.unet_lr"><span>学习率</span><input v-model="draft.unet_lr" :disabled="officialQwenPreset" class="engine-input" placeholder="按模式预设" @input="markParam('unet_lr')" /></label>
               <label v-if="supported('te_lr')" class="engine-field" :title="legacyTooltips.te_lr"><span>文本编码器学习率</span><input v-model="draft.te_lr" class="engine-input" placeholder="按模式预设" @input="markParam('te_lr')" /></label>
               <label class="engine-field" :title="legacyTooltips.resolution"><span>训练分辨率</span><input v-model="draft.resolution" class="engine-input" type="number" min="64" step="64" placeholder="按模式预设" @input="markParam('resolution')" /></label>
-              <label v-if="supported('quant_mode')" class="engine-field" :title="legacyTooltips.quantMode"><span>底模量化精度（可手动选 NF4）</span><select v-model="draft.quant_mode" class="engine-select" @change="markParam('quant_mode')"><option v-for="modeOption in quantModes" :key="modeOption" :value="modeOption">{{ modeOption === 'auto' ? '自动（由引擎选择）' : modeOption.toUpperCase() }}</option></select></label>
+              <label v-if="supported('quant_mode')" class="engine-field" :title="legacyTooltips.quantMode"><span>{{ isKrea2 ? 'RAW 底模训练量化（与编码器无关）' : '底模量化精度（可手动选 NF4）' }}</span><select v-model="draft.quant_mode" class="engine-select" @change="markParam('quant_mode')"><option v-for="modeOption in quantModes" :key="modeOption" :value="modeOption">{{ modeOption === 'auto' ? '自动（由引擎选择）' : modeOption.toUpperCase() }}</option></select></label>
               <label v-if="supported('repeats')" class="engine-field" :title="legacyTooltips.repeats"><span>{{ isH3Fizgig ? '素材循环次数' : '图片循环次数' }}</span><input v-model="draft.repeats" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('repeats')" /></label>
               <label v-if="supported('max_epochs')" class="engine-field" :title="legacyTooltips.maxEpochs"><span>最大 epoch</span><input v-model="draft.max_epochs" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('max_epochs')" /></label>
               <label v-if="supported('video_steps')" class="engine-field" :title="legacyTooltips.videoSteps"><span>训练步数</span><input v-model="draft.video_steps" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('video_steps')" /></label>
@@ -349,7 +367,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
         </div>
 
         <section class="engine-card advanced-card">
-          <header class="engine-card-heading advanced-heading"><span>03</span><div><h2>采样与高级参数</h2><small>显示此模式确实支持的选项</small></div></header>
+          <header class="engine-card-heading advanced-heading"><span>{{ isKrea2 ? '04' : '03' }}</span><div><h2>采样与高级参数</h2><small>显示此模式确实支持的选项</small></div></header>
           <div class="engine-advanced-grid">
             <label class="engine-field" :title="legacyTooltips.samplePreview"><span>训练中采样预览</span><select v-model="draft.sample_preview_mode" class="engine-select" @change="markParam('sample_preview')"><option value="auto">按显存使用默认设置</option><option value="on">开启</option><option value="off">关闭（减少额外耗时）</option></select></label>
             <label class="engine-field" :title="intervalTooltip('save_every')"><span>模型保存间隔（{{ intervalUnit('save_every') }}）</span><input v-model="draft.save_every" class="engine-input" type="number" min="0" placeholder="使用默认" @input="markParam('save_every')" /></label>
@@ -379,7 +397,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <button v-if="mode === 'krea2' || mode === 'krea2_fz'" class="engine-utility" type="button" :title="legacyTooltips.krea2Guide" @click="requestAction('krea2_guide')">Krea2 使用引导</button>
           <button v-if="mode === 'flux2' || mode === 'flux2_fz'" class="engine-utility" type="button" :title="legacyTooltips.flux2Guide" @click="requestAction('flux2_guide')">FLUX.2 使用引导</button>
           <button v-if="isVideo && !isH3Fizgig" class="engine-utility" type="button" :title="legacyTooltips.h3Guide" @click="requestAction('h3_guide')">H3 视频引导</button>
-          <button class="engine-utility" type="button" title="打开当前训练模式的模型文件夹。" @click="requestAction('open_models:' + mode)">打开模型目录</button>
+          <button v-if="!isKrea2" class="engine-utility" type="button" title="打开当前训练模式的模型文件夹。" @click="requestAction('open_models:' + mode)">打开模型目录</button>
           <template v-if="isVideo && !isH3Fizgig">
             <button class="engine-utility" type="button" title="为没有字幕的视频生成占位 txt（内容=触发词），避免训练缺字幕报错；建议之后手动改成具体描述。" @click="requestAction('video_caption_stub')">一键生成占位字幕</button>
             <button class="engine-utility" type="button" title="用 Qwen2.5-VL 自动给视频生成英文描述（首次下载模型约 6~7GB，已有 txt 的会跳过）。" @click="requestAction('video_caption')">AI 自动描述</button>
@@ -401,6 +419,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
 .engine-scroll-area{flex:1;min-height:0;overflow:auto;scrollbar-color:var(--tone-4a4e56) transparent;scrollbar-width:thin}.engine-scroll-content{display:flex;flex-direction:column;gap:10px;padding:5px 25px 13px 24px}.engine-summary,.engine-card{min-width:0;border:1px solid var(--outline-subtle);border-radius:7px;background:var(--card)}.engine-summary{display:grid;grid-template-columns:minmax(0,1.2fr) auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 12px}.summary-main,.asset-copy{display:grid;min-width:0;gap:4px}.summary-label,.engine-field>span{color:var(--hint);font-size:10px}.summary-main strong,.asset-copy strong{overflow:hidden;color:var(--tone-c5cad1);font-size:11px;font-weight:350;text-overflow:ellipsis;white-space:nowrap}.summary-main small,.asset-copy small{overflow:hidden;color:var(--tone-888e97);font-size:9px;line-height:1.4;text-overflow:ellipsis}.engine-card-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.engine-card{padding:12px 13px 11px}.engine-card-heading{display:flex;align-items:center;gap:9px;min-height:25px;margin-bottom:10px}.engine-card-heading>span{color:var(--tone-8993a0);font-size:10px;letter-spacing:.04em}.engine-card-heading>div{display:grid;gap:2px}.engine-card-heading h2{margin:0;color:var(--tone-cbd0d7);font-size:13px;font-weight:400}.engine-card-heading small{color:var(--hint);font-size:9px}
 .engine-fields{display:grid;gap:9px}.engine-fields.two-columns{grid-template-columns:repeat(2,minmax(0,1fr))}.engine-fields.spaced{margin-top:9px}.engine-field{display:grid;min-width:0;gap:5px}.engine-input,.engine-select{width:100%;min-width:0;height:30px;padding:0 9px;border:1px solid var(--tone-3d414a);border-radius:5px;color:var(--tone-c6cbd3);background:var(--tone-22252c);font-size:11px;font-weight:350}.engine-select{padding-right:24px;cursor:pointer}.engine-select option{color:var(--tone-cbd0d7);background:var(--tone-252830)}.engine-input::placeholder{color:var(--tone-707680)}.engine-param-grid{display:grid;grid-template-columns:repeat(4,minmax(82px,1fr));gap:8px}.engine-hint{margin:8px 0 0;color:var(--tone-898f99);font-size:10px;line-height:1.45;white-space:pre-line}
 .engine-switch{display:flex;align-items:center;gap:8px;width:100%;margin-top:8px;padding:4px 0;border:0;color:inherit;background:transparent;text-align:left;cursor:pointer}.engine-switch>i{position:relative;width:27px;height:15px;flex:0 0 auto;border-radius:9px;background:var(--tone-454951);transition:background-color 150ms ease}.engine-switch>i:after{position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:var(--tone-adb3bc);transition:transform 160ms var(--ease-out);content:''}.engine-switch.active>i{background:var(--tone-626f81)}.engine-switch.active>i:after{transform:translateX(12px)}.engine-switch>span{display:grid;gap:2px}.engine-switch strong{color:var(--tone-bfc4cc);font-size:11px;font-weight:400}.engine-switch small{color:var(--hint);font-size:9px}.engine-check{display:inline-flex;align-items:center;gap:7px;min-height:28px;padding:2px 3px;border:0;color:var(--tone-a7adb7);background:transparent;font-size:10px;text-align:left;cursor:pointer}.engine-check>i{display:grid;width:14px;height:14px;flex:0 0 auto;place-items:center;border:1px solid var(--tone-646a75);border-radius:3px;background:var(--tone-22252c);transition:border-color 130ms ease,background-color 130ms ease}.engine-check.checked>i{border-color:var(--tone-687689);background:var(--tone-626f81)}.engine-check.checked>i:after{width:6px;height:3px;border-bottom:1.4px solid var(--tone-e2e5e9);border-left:1.4px solid var(--tone-e2e5e9);transform:translateY(-1px) rotate(-45deg);content:''}.engine-check:hover{color:var(--tone-d0d4da)}
+.krea2-workflow{margin:0 0 2px;color:var(--hint);font-size:10px;line-height:1.6}.krea2-workflow span{margin:0 9px;color:var(--tone-8993a0)}.runtime-summary{cursor:pointer;color:var(--tone-c5cad1);font-size:11px}.runtime-summary span{margin-left:14px;color:var(--hint);font-size:10px}.runtime-card[open] .runtime-choice{margin-top:12px}.engine-summary.dataset-only{grid-template-columns:minmax(0,1fr) auto}.engine-button:disabled,.engine-back:disabled{opacity:.5;cursor:wait}
 .runtime-choice{display:flex;align-items:end;gap:10px;flex-wrap:wrap}.runtime-choice .engine-field,.runtime-choice .engine-input{flex:1;min-width:180px}.runtime-card .engine-hint{margin-top:10px}
 .advanced-heading{margin-bottom:9px}.engine-advanced-grid{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));align-items:end;gap:9px}.wide-field{grid-column:span 2}.engine-utility-row{display:flex;flex-wrap:wrap;gap:7px}.engine-utility{min-height:29px;padding:0 10px;border:1px solid var(--border);border-radius:5px;color:var(--tone-afb5bf);background:var(--tone-252830);font-size:10px;cursor:pointer;transition:border-color 130ms ease,color 130ms ease,background-color 130ms ease,transform 110ms ease-out}.engine-utility:hover{border-color:var(--tone-505660);color:var(--tone-d0d4da);background:var(--tone-2b2e36)}.engine-utility:active{transform:scale(.985)}.engine-footer-note{display:flex;align-items:center;gap:7px;margin:-2px 1px 0;color:var(--tone-818792);font-size:10px}.engine-footer-note i{width:5px;height:5px;border-radius:50%;background:var(--tone-929baa)}
 @media(max-width:1180px){.engine-toolbar{align-items:flex-start;flex-direction:column}.engine-actions{flex-wrap:wrap}.engine-card-grid{grid-template-columns:1fr}.engine-param-grid{grid-template-columns:repeat(3,minmax(100px,1fr))}.engine-advanced-grid{grid-template-columns:repeat(3,minmax(100px,1fr))}.engine-summary{grid-template-columns:minmax(0,1fr) auto}.asset-copy{grid-column:1}}

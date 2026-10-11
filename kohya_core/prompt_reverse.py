@@ -25,14 +25,23 @@ def prepare(options):
         raise CaptionError('请选择有效的图片或图片文件夹。')
     path = path.resolve()
     method = options.get('method', 'natural')
-    if method not in ('natural', 'wd14'):
-        raise CaptionError('请选择自然语言描述或 WD14 关键词。')
+    if method not in ('natural', 'wd14', 'ram', 'qwen_vl', 'pixai'):
+        raise CaptionError('请选择关键词模型或画面描述方式。')
     language, length = caption_options(options.get('language', 'zh'), options.get('length', 'brief'))
+    if method in ('ram', 'pixai'):
+        length = 'brief'
+    if method == 'pixai':
+        language = 'en'
+    from .pixai_caption import options as pixai_options
+    pixai = pixai_options(options) if method == 'pixai' else None
+    device = options.get('device', 'auto')
+    if device not in ('auto', 'cpu'):
+        raise CaptionError('请选择自动加速或 CPU。')
     model = options.get('wd14_model', 'swinv2-v3')
     if model not in ('swinv2-v3', 'moat-v2'):
         raise CaptionError('WD14 模型选项无效。')
     try:
-        threshold = float(options.get('threshold', .35))
+        threshold = float(options.get('threshold', .68 if method == 'ram' else .35))
     except (TypeError, ValueError):
         raise CaptionError('关键词阈值需要为 0.01 到 0.99。') from None
     if not .01 <= threshold <= .99:
@@ -56,7 +65,7 @@ def prepare(options):
         raise CaptionError('这个文件夹没有支持的图片。')
     images.sort(key=lambda image: image.relative_to(root).as_posix().casefold())
     return {'path': str(path), 'root': root, 'images': images, 'method': method, 'language': language,
-            'length': length, 'wd14_model': model, 'threshold': threshold}
+            'length': length, 'wd14_model': model, 'threshold': threshold, 'device': device, 'pixai_options': pixai}
 
 
 def reverse_prompt(language, length):
@@ -150,6 +159,15 @@ def _keywords(core, selection, log, progress):
 
 
 def generate(core, selection, service, report, log, progress, publish):
+    if selection['method'] == 'pixai':
+        from .pixai_caption import generate as pixai_generate
+        return pixai_generate(core, selection, report, log, progress, publish)
+    if selection['method'] == 'qwen_vl':
+        from .qwen_vl_caption import generate as qwen_generate
+        return qwen_generate(core, selection, report, log, progress, publish)
+    if selection['method'] == 'ram':
+        from .ram_caption import generate as local_generate
+        return local_generate(core, selection, report, log, progress, publish)
     consecutive_failures = 0
     try:
         keywords = _keywords(core, selection, log, progress) if selection['method'] == 'wd14' else None

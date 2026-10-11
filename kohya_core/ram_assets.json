@@ -1,0 +1,137 @@
+{
+  "name": "RAM++ · 真实照片关键词",
+  "directory": "ram-plus-swin-large-384",
+  "repo": "xinyu1205/recognize-anything-plus-model",
+  "commit": "84d4aee3a0265c4e0df1f714f0572011d1bf2ec3",
+  "source_commit": "7cb804a8609e9f4b1a50b7f31436d2df40bb9481",
+  "tokenizer_commit": "86b5e0934494bd15c9632b12f734a8a67f723594",
+  "checkpoint": "ram_plus_swin_large_14m.pth",
+  "image_size": 384,
+  "license": "Apache-2.0",
+  "files": {
+    "ram_plus_swin_large_14m.pth": {
+      "size": 3010210801,
+      "sha256": "497c178836ba66698ca226c7895317e6e800034be986452dbd2593298d50e87d"
+    },
+    "source/ram/models/ram_plus.py": {
+      "size": 17166,
+      "sha256": "2c108fbf9f25e46fc9f6515176e7ab1e7b7356381240bc84f78da623645c6f94",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/ram_plus.py",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/ram_plus.py"
+      ]
+    },
+    "source/ram/models/bert.py": {
+      "size": 45130,
+      "sha256": "6f242cd972d48c2722e8ffe62990945ba0ecaf1b2672ab458a742890e5a03a9e",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/bert.py",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/bert.py"
+      ]
+    },
+    "source/ram/models/swin_transformer.py": {
+      "size": 26827,
+      "sha256": "6ad728f9eb9276b292cbdabe6f3f77bfea3c8603b8b672ec02331c9d467c386c",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/swin_transformer.py",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/swin_transformer.py"
+      ]
+    },
+    "source/ram/models/utils.py": {
+      "size": 13013,
+      "sha256": "1013022590dd04a1be0852eb416f75c687f225c37424a189d833e0fc597506eb",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/utils.py",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/utils.py"
+      ]
+    },
+    "source/ram/models/vit.py": {
+      "size": 14240,
+      "sha256": "c16ef04bd471dc4d6ea1cae57982891670949bd9117ad209750bc88622539454",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/vit.py",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/models/vit.py"
+      ]
+    },
+    "source/ram/configs/med_config.json": {
+      "size": 524,
+      "sha256": "8ff4c73e6781e9597714670d13551129a712cecb8effa71ad1968e93ba2f8a2d",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/configs/med_config.json",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/configs/med_config.json"
+      ]
+    },
+    "source/ram/configs/q2l_config.json": {
+      "size": 557,
+      "sha256": "e3bbbefc4011d577b58b67e155f7d67f38554f2797ddb7a29a6516a423ab578b",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/configs/q2l_config.json",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/configs/q2l_config.json"
+      ]
+    },
+    "source/ram/configs/swin/config_swinL_384.json": {
+      "size": 233,
+      "sha256": "f07de971155ff50dfe13e5e34b0211133f602934e7fe230febe60b5a93700f9a",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/configs/swin/config_swinL_384.json",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/configs/swin/config_swinL_384.json"
+      ]
+    },
+    "source/ram/data/ram_tag_list.txt": {
+      "size": 41904,
+      "sha256": "5d96d2f7225527480ad773aaac76b6e5c08a18adf6eae9ca7d2ab923d5e7bd8b",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/data/ram_tag_list.txt",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/data/ram_tag_list.txt"
+      ]
+    },
+    "source/ram/data/ram_tag_list_chinese.txt": {
+      "size": 44181,
+      "sha256": "c912657a0f30be7b2f5df6ccffa17e1d84561d0bea508528e38b6d0d711bcfbe",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/data/ram_tag_list_chinese.txt",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/data/ram_tag_list_chinese.txt"
+      ]
+    },
+    "source/ram/data/ram_tag_list_threshold.txt": {
+      "size": 22016,
+      "sha256": "b6f81d0de1bc7f9c251af512c413eae976c77dbfbadf700d4e3d90510f4c6447",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/data/ram_tag_list_threshold.txt",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/ram/data/ram_tag_list_threshold.txt"
+      ]
+    },
+    "source/LICENSE": {
+      "size": 11306,
+      "sha256": "d38f4edcfb09332fa497fd3ce52bd6c13dd73fa5acb8418a47aece5a2d311f26",
+      "urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/LICENSE",
+        "https://raw.githubusercontent.com/xinyu1205/recognize-anything/7cb804a8609e9f4b1a50b7f31436d2df40bb9481/LICENSE"
+      ]
+    },
+    "tokenizer/vocab.txt": {
+      "size": 231508,
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+      "urls": [
+        "https://hf-mirror.com/google-bert/bert-base-uncased/resolve/86b5e0934494bd15c9632b12f734a8a67f723594/vocab.txt",
+        "https://huggingface.co/google-bert/bert-base-uncased/resolve/86b5e0934494bd15c9632b12f734a8a67f723594/vocab.txt"
+      ]
+    },
+    "tokenizer/tokenizer_config.json": {
+      "size": 48,
+      "sha256": "a025160ef0431f1a392f6f050c1310f4c5d9fb6f275932dbccba73c4d214bf10",
+      "urls": [
+        "https://hf-mirror.com/google-bert/bert-base-uncased/resolve/86b5e0934494bd15c9632b12f734a8a67f723594/tokenizer_config.json",
+        "https://huggingface.co/google-bert/bert-base-uncased/resolve/86b5e0934494bd15c9632b12f734a8a67f723594/tokenizer_config.json"
+      ]
+    },
+    "tokenizer/LICENSE": {
+      "size": 11356,
+      "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1",
+      "urls": [
+        "https://hf-mirror.com/google-bert/bert-base-uncased/resolve/86b5e0934494bd15c9632b12f734a8a67f723594/LICENSE",
+        "https://huggingface.co/google-bert/bert-base-uncased/resolve/86b5e0934494bd15c9632b12f734a8a67f723594/LICENSE"
+      ]
+    }
+  }
+}

@@ -115,9 +115,9 @@ onUnmounted(() => { disposed = true; if (timer) clearTimeout(timer) })
 
 <template>
   <section class="caption-controls" aria-label="图片标签与描述">
-    <label class="caption-field"><span>图片标签与描述</span><select :value="method" :disabled="busy" @change="emit('update:method', ($event.target as HTMLSelectElement).value)"><option value="wd14">关键词标签（WD14）</option><option value="natural">自然语言描述</option><option value="existing">使用已有文本（不自动生成）</option></select></label>
-    <p v-if="method === 'wd14'">使用下方 WD14 模型生成关键词。中文与英文自然语言描述可切换到另一种生成方式。</p>
-    <p v-else-if="method === 'existing'">不调用描述服务或 WD14。请准备同名 .txt；自然语言文本请选择“自然语言描述”，以跳过关键词处理。</p>
+    <label class="caption-field"><span>图片标签与描述</span><select :value="method" :disabled="busy" @change="emit('update:method', ($event.target as HTMLSelectElement).value)"><option value="wd14">关键词标签（本地打标）</option><option value="natural">自然语言描述</option><option value="existing">使用已有文本（不自动生成）</option></select></label>
+    <p v-if="method === 'wd14'">使用所选本地模型生成英文关键词。</p>
+    <p v-else-if="method === 'existing'">不调用描述服务或打标模型。请准备同名 .txt；自然语言文本请选择“自然语言描述”，以跳过关键词处理。</p>
     <template v-else>
       <div class="caption-fields"><label class="caption-field"><span>描述语言</span><select :value="language" :disabled="busy" @change="emit('update:language', ($event.target as HTMLSelectElement).value)"><option value="zh">中文</option><option value="en">英文</option></select></label><label class="caption-field"><span>描述长度</span><select :value="length" :disabled="busy" @change="emit('update:length', ($event.target as HTMLSelectElement).value)"><option value="brief">简短（1–2句）</option><option value="detailed">详细（3–5句）</option></select></label></div>
       <p>先预览最多 3 张，不写文件；同一次运行中，图片、模型与选项未变时，批量会复用预览描述；批量生成写入原图旁的同名 .txt。训练只读取这些文本，不自动调用服务。自然语言不执行关键词清洗或强绑定，触发词独立添加到首行。</p>

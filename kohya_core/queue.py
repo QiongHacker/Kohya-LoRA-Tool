@@ -66,7 +66,7 @@ def run_queue_item(name, logf=print):
                      repeats=int(p.get("repeats") or 5),
                      dedup=True, wd14=True, square_crop=False,
                      crop_ratio=p.get("crop_ratio") or "",
-                     wd14_model=p.get("wd14_model") or "swinv2-v3",
+                     wd14_model=p.get("wd14_model") or "swinv2-v3", pixai_options=p,
                      overwrite=bool(p.get("overwrite")),
                      keep_user_captions=bool(p.get("keep_user_captions")),
                      caption_method=p.get("caption_method", "wd14"),

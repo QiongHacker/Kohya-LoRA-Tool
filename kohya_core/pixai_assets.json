@@ -1,0 +1,45 @@
+{
+  "name": "PixAI Tagger v1.0 · 二次元关键词",
+  "directory": "pixai-tagger-v1.0",
+  "repo": "pixai-labs/pixai-tagger-v1.0",
+  "commit": "9fe10addf9326e292da8a85a98ea74cd91b41771",
+  "license": "Apache-2.0",
+  "files": {
+    "model.safetensors": {
+      "size": 1945425796,
+      "sha256": "f29e475205cbcbc25b52a075840c7809d6215be15f45375113ba09c49bf90292",
+      "urls": [
+        "https://modelscope.cn/models/pixai-labs/pixai-tagger-v1.0/resolve/a9ac8b1de69da7fcb7cf9e8e9ac74cbf6c6324b9/model.safetensors",
+        "https://hf-mirror.com/pixai-labs/pixai-tagger-v1.0/resolve/9fe10addf9326e292da8a85a98ea74cd91b41771/model.safetensors",
+        "https://huggingface.co/pixai-labs/pixai-tagger-v1.0/resolve/9fe10addf9326e292da8a85a98ea74cd91b41771/model.safetensors"
+      ]
+    },
+    "config.json": {
+      "size": 693918,
+      "sha256": "f8a19b38661c37dc5fd519f2137be70f6f897972021b4ebc17b7d35a0e27b9dd",
+      "urls": [
+        "https://modelscope.cn/models/pixai-labs/pixai-tagger-v1.0/resolve/a9ac8b1de69da7fcb7cf9e8e9ac74cbf6c6324b9/config.json",
+        "https://hf-mirror.com/pixai-labs/pixai-tagger-v1.0/resolve/9fe10addf9326e292da8a85a98ea74cd91b41771/config.json",
+        "https://huggingface.co/pixai-labs/pixai-tagger-v1.0/resolve/9fe10addf9326e292da8a85a98ea74cd91b41771/config.json"
+      ]
+    },
+    "preprocessor_config.json": {
+      "size": 600,
+      "sha256": "20451575e627950993de7b00641d5b263eceb3e7436e4ad518fea2411b60e49d",
+      "urls": [
+        "https://modelscope.cn/models/pixai-labs/pixai-tagger-v1.0/resolve/a9ac8b1de69da7fcb7cf9e8e9ac74cbf6c6324b9/preprocessor_config.json",
+        "https://hf-mirror.com/pixai-labs/pixai-tagger-v1.0/resolve/9fe10addf9326e292da8a85a98ea74cd91b41771/preprocessor_config.json",
+        "https://huggingface.co/pixai-labs/pixai-tagger-v1.0/resolve/9fe10addf9326e292da8a85a98ea74cd91b41771/preprocessor_config.json"
+      ]
+    },
+    "tagger_pipeline.py": {
+      "size": 43696,
+      "sha256": "3431279fdfff234f62664999fc1fe6bb20f1e8756f7435d0e165ebd4456f7fcd",
+      "urls": [
+        "https://modelscope.cn/models/pixai-labs/pixai-tagger-v1.0/resolve/a9ac8b1de69da7fcb7cf9e8e9ac74cbf6c6324b9/tagger_pipeline.py",
+        "https://hf-mirror.com/pixai-labs/pixai-tagger-v1.0/resolve/9fe10addf9326e292da8a85a98ea74cd91b41771/tagger_pipeline.py",
+        "https://huggingface.co/pixai-labs/pixai-tagger-v1.0/resolve/9fe10addf9326e292da8a85a98ea74cd91b41771/tagger_pipeline.py"
+      ]
+    }
+  }
+}

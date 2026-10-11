@@ -1447,13 +1447,67 @@ def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35, model_key=No
         return False
     return True
 
-def _run_wd14_auto(output_dir, logf=print, script=None, model_key=None):
+def _run_pixai_tagger(output_dir, job_path, logf=print):
+    """Run the selected PixAI model in its isolated runtime on processed images."""
+    import json
+    import tempfile
+    if not job_path or not os.path.isfile(job_path):
+        raise RuntimeError("PixAI 运行配置缺失，请从软件中启动预处理。")
+    with open(job_path, encoding="utf-8") as stream:
+        job = json.load(stream)
+    images = _imgs_no_txt(output_dir)
+    if not images:
+        return True
+    # _imgs_no_txt returns image basenames; resolve them only inside the output root.
+    images = [os.path.abspath(os.path.join(output_dir, name)) for name in images]
+    root = os.path.abspath(output_dir)
+    if any(os.path.dirname(image) != root or os.path.islink(image) for image in images):
+        raise RuntimeError("PixAI 图片路径无效。")
+    job.update(images=images, write_sidecars=True)
+    failures, received = [], set()
+    with tempfile.TemporaryDirectory(prefix="kohya-pixai-batch-") as temporary:
+        path = os.path.join(temporary, "job.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(job, stream)
+        env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", PYTHONIOENCODING="utf-8")
+        # Exclude kohya_core from module lookup so torch imports the standard queue.
+        proc = subprocess.Popen([job["python"], "-I", "-u", job["script"], path], cwd=job["runtime"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line.startswith("[PIXAI_RESULT] "):
+                    value = json.loads(line[len("[PIXAI_RESULT] "):])
+                    index = value.get("index")
+                    if type(index) is not int or not 0 <= index < len(images) or index in received:
+                        raise RuntimeError("PixAI 打标结果无效。")
+                    received.add(index)
+                    if value.get("status") != "generated":
+                        failures.append(index)
+                        logf("[PixAI] 图片打标失败：%s · %s" % (os.path.basename(images[index]), value.get("error", "无有效标签")))
+                elif line:
+                    logf(line)
+            code = proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
+    if code != 0 or failures or len(received) != len(images) or _imgs_no_txt(output_dir):
+        raise RuntimeError("PixAI 打标未完成，已停止预处理。已生成标签保留；请查看日志后重试。")
+    return True
+
+
+def _run_wd14_auto(output_dir, logf=print, script=None, model_key=None, pixai_job=None):
     """自动打标总入口：官方脚本（GPU/CPU 回退）优先，失败/缺失改用内置 onnx 打标。
 
-    model_key：打标模型选项（`swinv2-v3` / `moat-v2` / None=默认）。
+    model_key：`pixai-v1` 走独立 PixAI 环境；WD14 使用 `swinv2-v3` / `moat-v2` / None=默认。
     **任何未知值都会静默回退到默认模型**（见 resolve_wd14_model）——
     老用户升级后设置里没有这个键时走的就是这条路，不该有任何报错或阻塞 ✓
     """
+    if model_key == "pixai-v1":
+        return _run_pixai_tagger(output_dir, pixai_job, logf)
     script = script or find_wd14_tagger()
     if script:
         if run_wd14_tagger(output_dir, logf=logf, script=script, model_key=model_key):
@@ -2142,8 +2196,9 @@ def main():
                         help="保留原图自带的 .txt 标签：不自动打标、不写兜底、不清洗概念标签")
     # 打标模型选项。★ 刻意**不用 choices**：未知/空值要走「静默回退默认」而不是 argparse 报错退出
     # （老用户升级后设置里没有这个键，传过来的可能是空串 ✓）
+    parser.add_argument("--pixai-job", default="", help="独立 PixAI 推理任务配置")
     parser.add_argument("--wd14-model", default="",
-                        help="打标模型：swinv2-v3（默认）/ moat-v2；留空或未知值都按默认处理")
+                        help="打标模型：swinv2-v3（默认）/ moat-v2 / pixai-v1（需应用准备独立运行环境）")
     parser.add_argument("--min-size", type=int, default=0,
                         help="过滤过小图片：长边小于该像素则跳过（0=不过滤）")
     parser.add_argument("--blur-threshold", type=float, default=0,
@@ -2422,6 +2477,16 @@ def main():
             )
             img.save(out_img, format="PNG", optimize=True)
 
+            if (args.wd14_model == "pixai-v1" and args.overwrite and not _keep_user_caps
+                    and not args.no_caption and not (mode == "style" and style_caption.strip())
+                    and os.path.lexists(out_txt)):
+                if os.path.islink(out_txt):
+                    raise ValueError("同名文本为链接，拒绝替换")
+                backup = os.path.join(output_dir, ".caption_backups", str(time.time_ns()))
+                os.makedirs(backup, exist_ok=True)
+                shutil.copy2(out_txt, os.path.join(backup, os.path.basename(out_txt)))
+                os.remove(out_txt)
+
             if _keep_user_caps and not args.no_caption:
                 sync_preserved_caption(raw_img, out_txt)
 
@@ -2480,6 +2545,19 @@ def main():
             print("[INFO] 提示：本次全部图片都已存在，等价于「没有重新处理图片」，"
                   "只会补做打标/标签环节。")
 
+    _tagger_label = "PixAI" if args.wd14_model == "pixai-v1" else "WD14"
+    if args.wd14_model == "pixai-v1" and not args.no_wd14 and not _keep_user_caps:
+        for _name in os.listdir(output_dir):
+            if os.path.splitext(_name)[1].lower() not in IMAGE_EXTS:
+                continue
+            _sidecar = os.path.join(output_dir, os.path.splitext(_name)[0] + ".txt")
+            if os.path.isfile(_sidecar):
+                if os.path.islink(_sidecar):
+                    raise RuntimeError("PixAI 标签路径为链接，拒绝处理。")
+                with open(_sidecar, encoding="utf-8-sig") as _stream:
+                    _empty = not _stream.read().strip()
+                if _empty:
+                    os.remove(_sidecar)
     # ---- 人物模式：WD14 / 内置打标 / 兜底 / 还原自带标签 / 插入 trigger ----
     if mode == "character" and not args.no_caption and not _natural and (ok + skipped):
         imgs_no_txt = _imgs_no_txt(output_dir)
@@ -2491,14 +2569,14 @@ def main():
                 if _purge_placeholder_captions(output_dir, DEFAULT_CHARACTER_CAPTION, trigger):
                     imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
-                _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None))
+                _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None), pixai_job=args.pixai_job)
                 missing_after_wd14 = _imgs_no_txt(output_dir)
                 if missing_after_wd14:
                     _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
                     print(f"[WARN] WD14 打标后仍有 {len(missing_after_wd14)} 张图片缺标签，已使用兜底 caption"
                           "（只有 1girl, solo 等极简词，训练效果会差；请查看上方日志排查后重试）")
             else:
-                print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
+                print(f"[INFO] 图片标签已齐全，跳过 {_tagger_label} 打标。")
         else:
             # ★ 2026-10-02：勾了「保留我已有的标签」时**不写兜底 caption** ✗ ——
             #   缺标签就让它缺着，由训练前的数据集校验去提示用户补全 ✓
@@ -2611,14 +2689,14 @@ def main():
                         output_dir, (DEFAULT_CAPTION, DEFAULT_CAPTION_REALISTIC), trigger):
                     imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
-                _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None))
+                _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None), pixai_job=args.pixai_job)
                 missing_after_wd14 = _imgs_no_txt(output_dir)
                 if missing_after_wd14:
                     _fill_missing_captions(output_dir, style_fb)
                     print(f"[WARN] WD14 打标后仍有 {len(missing_after_wd14)} 张图片缺标签，已使用兜底 caption"
                           "（训练效果会差；请查看上方日志排查后重试）")
             else:
-                print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
+                print(f"[INFO] 图片标签已齐全，跳过 {_tagger_label} 打标。")
         else:
             if not _keep_user_caps:
                 _fill_missing_captions(output_dir, style_fb)
@@ -2648,7 +2726,7 @@ def main():
                         with open(t, "w", encoding="utf-8") as fh:
                             fh.write(ncur)
                         n_f += 1
-            print(f"[INFO] 画风模式：已用 WD14 打标并过滤人物/五官标签 {n_f} 张（保留画风/内容标签）")
+            print(f"[INFO] 画风模式：已用 {_tagger_label} 打标并过滤人物/五官标签 {n_f} 张（保留画风/内容标签）")
         else:
             print("[INFO] 已按「保留我已有的标签」处理：画风模式跳过打标与人物标签过滤，"
                   "标签原样保留 ✓")
@@ -2687,6 +2765,8 @@ def main():
                 except Exception:
                     need = True
             if need:
+                if args.wd14_model == "pixai-v1" and not args.no_wd14:
+                    raise RuntimeError("PixAI 标签处理后缺失或为空：%s。已停止，不使用兜底标签。" % f)
                 with open(t, "w", encoding="utf-8") as fh:
                     fh.write(fb)
                 n_fill += 1

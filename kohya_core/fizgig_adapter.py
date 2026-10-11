@@ -20,10 +20,11 @@ def models_dir(core, family):
 def models(core, family, params=None):
     params = params or {}
     if family == "krea2":
-        f = core.krea2_fz_model_files()
-        fp8 = f.pop("te_fp8", None)
-        if fp8:
-            f["te"] = fp8
+        from .krea2_models import settings, encoder_key
+        selection = settings(params)
+        f = core.krea2_fz_model_files(selection)
+        f["te"] = f.get(encoder_key(f, selection))
+        f.pop("te_fp8", None)
         return dict(f, dit=f.get("raw"), preview_checkpoint=f.get("turbo"))
     if family == "klein":
         f = core.flux2_fz_model_files()
@@ -147,11 +148,17 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if source_version(record["source"]) != VERSION or not Path(record["python"]).is_file():
         raise RuntimeError("此项目选择 Fizgig v7.0.1，请先安装或更新引擎。")
     family = FAMILIES[mode]
+    if family == "krea2":
+        from .krea2_models import settings, validate_selected
+        validate_selected(core, settings(params))
     if family == "minimax":
         from .h3_models import validate_selected
         validate_selected(core, params.get("h3_models"))
     files = models(core, family, params)
     _validate(core, family, files)
+    if family == "krea2":
+        for key, label in (("dit", "RAW 底模"), ("vae", "VAE"), ("te", "文本编码器"), ("preview_checkpoint", "Turbo 预览底模")):
+            logf("[Fizgig · Krea 2] %s：%s" % (label, files.get(key) or "未使用"))
     if family == "anima":
         from .anima_ckpt import resolve_train_base, checkpoint_kind
         files["dit"], _kind = resolve_train_base(files["dit"], logf=logf)

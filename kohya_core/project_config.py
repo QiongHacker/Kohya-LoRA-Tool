@@ -11,9 +11,11 @@ WORKSPACE_PARAM_KEYS = (
     'fizgig_qwen_preset', 'wd14_model', 'overwrite', 'keep_user_captions', 'amd_mode',
     'batch_size', 'gc', 'global_pos', 'global_neg',
     'caption_method', 'caption_language', 'caption_length',
+    'pixai_character', 'pixai_copyright', 'pixai_style', 'pixai_threshold',
 )
 BOOL_PARAM_KEYS = frozenset(('strong_bind', 'clean_concept', 'sample_preview',
-                            'compile', 'overwrite', 'keep_user_captions', 'amd_mode'))
+                            'compile', 'overwrite', 'keep_user_captions', 'amd_mode',
+                            'pixai_character', 'pixai_copyright', 'pixai_style'))
 
 
 def normalize_learning_rate(value):
@@ -86,6 +88,7 @@ def training_params(core, config, project_name):
     params['caption_method'] = str(value('caption_method', 'wd14'))
     params['caption_language'] = str(value('caption_language', 'zh'))
     params['caption_length'] = str(value('caption_length', 'brief'))
+    params['pixai_threshold'] = str(value('pixai_threshold', '.17'))
     params['wd14_model'] = str(value('wd14_model', 'swinv2-v3') or 'swinv2-v3')
     for key in BOOL_PARAM_KEYS - {'sample_preview'}:
         params[key] = bool(value(key, key in ('strong_bind', 'clean_concept')))
@@ -107,6 +110,9 @@ def training_params(core, config, project_name):
     if mode == "zimage":
         from kohya_core.zimage_models import settings
         params["at_model"] = settings(core, config)
+    if mode == "krea2_fz":
+        from .krea2_models import settings
+        params["krea2_models"] = settings(config)
     if mode == "h3_fz":
         from .h3_models import settings
         params["h3_models"] = settings(config)
