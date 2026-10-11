@@ -72,7 +72,7 @@ function styledPresetValue(key: string, style = draft.style_preset): string {
   if (raw === undefined || raw === null || raw === '') return ''
   const number = Number(raw)
   const factor = !['unet_lr', 'te_lr'].includes(key) ? 1 : style === '动漫' ? 0.85 : style === '写实' ? 1.15 : 1
-  return factor !== 1 && Number.isFinite(number) ? (number * factor).toExponential(2).replace('e-0', 'e-').replace('e+0', 'e+') : String(raw)
+  return factor !== 1 && Number.isFinite(number) ? (number * factor).toExponential(2).replace(/e([+-])0+(\d+)$/, 'e$1$2') : String(raw)
 }
 const currentDatasetHint = computed(() => {
   if (!props.details.has_training_submode) return props.details.dataset_hint

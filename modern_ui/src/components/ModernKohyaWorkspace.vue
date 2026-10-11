@@ -81,7 +81,7 @@ function styledPresetValue(key: string, mode = currentModeKey.value, baseType = 
   const factor = !['unet_lr', 'te_lr'].includes(key) ? 1 : style === '动漫' ? 0.85 : style === '写实' ? 1.15 : 1
   const number = Number(raw)
   if (factor === 1 || !Number.isFinite(number)) return String(raw)
-  return (number * factor).toExponential(2).replace('e-0', 'e-').replace('e+0', 'e+')
+  return (number * factor).toExponential(2).replace(/e([+-])0+(\d+)$/, 'e$1$2')
 }
 function syncPresetValues(mode = currentModeKey.value, baseType = draft.base_type, force = false) {
   for (const key of presetParamKeys) {

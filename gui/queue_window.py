@@ -166,7 +166,10 @@ class TrainQueueWindow:
         self._stop = False
         self.status_var.set("运行中…")
         names = list(self.queue)
-        threading.Thread(target=self._worker, args=(names,), daemon=True).start()
+        worker = threading.Thread(target=self._worker, args=(names,), daemon=True)
+        # Keep the process alive while a closed queue finishes stopping/cleanup.
+        self.app._queue_worker = worker
+        worker.start()
 
     def stop(self):
         if not self._running:
@@ -208,11 +211,13 @@ class TrainQueueWindow:
         finally:
             self._running = False
             try:
-                self.win.after(0, self._done_ui)
+                self._master.after(0, self._done_ui)
             except Exception:
                 pass
 
     def _done_ui(self):
+        if not self.win.winfo_exists():
+            return
         self.status_var.set("空闲（失败项仍在队列中，可点开始重跑）")
         self._render_queue()
         self.refresh_projects()
@@ -220,7 +225,7 @@ class TrainQueueWindow:
     def _sink(self, text):
         self._lines.append(str(text))
         try:
-            self.app._log(str(text))
+            self.app.q.put(("LOG", str(text)))
         except Exception:
             pass
 

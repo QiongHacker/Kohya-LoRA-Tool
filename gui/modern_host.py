@@ -2848,10 +2848,12 @@ class ModernUIBridge:
                 directory = self._picker_initial_directory(self._picker_dirs.get(key) or saved_dirs.get(key))
 
             if kind == "image":
+                from kohya_core.prompt_reverse import IMAGE_EXTS
+                image_filter = "Image files (" + ";".join("*" + ext for ext in sorted(IMAGE_EXTS)) + ")"
                 selected = self._window.create_file_dialog(
                     webview.FileDialog.OPEN,
                     directory=directory,
-                    file_types=("Image files (*.png;*.jpg;*.jpeg;*.webp;*.bmp)",),
+                    file_types=(image_filter,),
                 )
             elif kind == "model":
                 selected = self._window.create_file_dialog(

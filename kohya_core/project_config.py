@@ -1,5 +1,6 @@
 """Saved project parameter contract shared by the desktop UI and training queue."""
 from pathlib import Path
+import re
 
 
 WORKSPACE_PARAM_KEYS = (
@@ -13,6 +14,13 @@ WORKSPACE_PARAM_KEYS = (
 )
 BOOL_PARAM_KEYS = frozenset(('strong_bind', 'clean_concept', 'sample_preview',
                             'compile', 'overwrite', 'keep_user_captions', 'amd_mode'))
+
+
+def normalize_learning_rate(value):
+    """Repair only the zero exponent truncated by old style-preset formatting."""
+    if isinstance(value, str) and re.fullmatch(r'[+-]?0+(?:\.0+)?[eE][+-]', value.strip()):
+        return '0'
+    return value
 
 
 def training_params(core, config, project_name):
@@ -67,8 +75,8 @@ def training_params(core, config, project_name):
         'batch_size': integer('batch_size', 1),
         'sample_interval': integer('sample_interval', 0),
         'sample_seed': str(value('sample_seed', 1234)),
-        'unet_lr': str(value('unet_lr', '3e-4' if kohya else '1e-4')),
-        'te_lr': str(value('te_lr', '1.5e-4' if kohya else '1e-4')),
+        'unet_lr': str(normalize_learning_rate(value('unet_lr', '3e-4' if kohya else '1e-4'))),
+        'te_lr': str(normalize_learning_rate(value('te_lr', '1.5e-4' if kohya else '1e-4'))),
         'crop_ratio': core.normalize_crop_ratio(value('crop_ratio', '')),
     }
     for key in ('optimizer', 'quant_mode', 'gc', 'fizgig_qwen_preset'):

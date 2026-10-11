@@ -13,6 +13,7 @@ import functools
 import traceback
 from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bundle
 import re
+from kohya_core.project_config import normalize_learning_rate
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -172,6 +173,37 @@ def _resolve_label_editor_project(current_project, utility_only=False,
     if current != expected:
         raise ValueError("当前项目与请求的项目不一致，已停止打开标签编辑器。")
     return expected
+
+
+class _DownloadProgressWindow(ctk.CTkToplevel):
+    """Cancel owned timers and ignore focus restoration to a closed chooser."""
+
+    def __init__(self, *args, **kwargs):
+        self._pending_timers = set()
+        super().__init__(*args, **kwargs)
+
+    def after(self, delay, callback=None, *args):
+        if callback is None:
+            return super().after(delay)
+        timer = None
+
+        def run():
+            self._pending_timers.discard(timer)
+            target = getattr(callback, "__self__", None)
+            if (getattr(callback, "__name__", "") == "focus_set"
+                    and isinstance(target, tk.Misc) and not target.winfo_exists()):
+                return
+            callback(*args)
+
+        timer = super().after(delay, run)
+        self._pending_timers.add(timer)
+        return timer
+
+    def destroy(self):
+        for timer in tuple(self._pending_timers):
+            self.after_cancel(timer)
+        self._pending_timers.clear()
+        super().destroy()
 
 
 def _run_mainloop_and_destroy(root):
@@ -663,6 +695,7 @@ class App:
         """Find an existing secondary window without changing its implementation."""
         candidates = [
             getattr(self, "_utility_popup", None),
+            getattr(self, "dl_win", None),
             getattr(getattr(self, "_label_editor", None), "win", None),
             getattr(getattr(self, "_queue_win", None), "win", None),
             getattr(self, "_tools_win", None),
@@ -672,18 +705,20 @@ class App:
         ]
         for candidate in candidates:
             try:
-                if candidate is not None and candidate.winfo_exists() and candidate.winfo_ismapped():
+                if candidate is not None and candidate.winfo_exists():
                     return candidate
             except Exception:
                 pass
 
-        # Most legacy dialogs do not expose a common window handle. Walk the Tk
-        # tree and pick the visible Toplevel created by the requested action.
+        # Windows CTk briefly withdraws a new Toplevel while styling its titlebar.
+        # Count existing windows even before their first paint; only the root is
+        # intentionally hidden in this utility process.
+        # Most legacy dialogs do not expose a common window handle.
         pending = list(self.root.winfo_children())
         while pending:
             widget = pending.pop(0)
             try:
-                if widget is not self.root and widget.winfo_toplevel() is widget and widget.winfo_ismapped():
+                if widget is not self.root and widget.winfo_toplevel() is widget:
                     return widget
                 pending.extend(widget.winfo_children())
             except Exception:
@@ -703,9 +738,13 @@ class App:
 
             def _close_utility(event):
                 if event.widget is popup:
+                    if getattr(self, "_utility_bound_popup", None) is popup:
+                        self._utility_popup = None
+                        self._utility_bound_popup = None
                     try:
-                        self.root.after_idle(self.root.quit)
-                    except Exception:
+                        # A popup may hand off to a progress window in this callback.
+                        self.root.after_idle(self._finish_utility_only)
+                    except tk.TclError:
                         pass
 
             try:
@@ -716,8 +755,7 @@ class App:
 
         if getattr(self, "_utility_wait_for_update_result", False):
             return
-        if (getattr(self, "busy", False) or getattr(self, "_checking_update", False)
-                or getattr(self, "_updating", False)):
+        if self._background_task_running():
             if not getattr(self, "_utility_close_poll_pending", False):
                 self._utility_close_poll_pending = True
 
@@ -737,10 +775,32 @@ class App:
             except Exception:
                 pass
             return
+        def _quit_if_idle():
+            # A new popup/task may have appeared after this callback was queued.
+            if (self._find_utility_popup() is not None or self._background_task_running()
+                    or getattr(self, "_utility_wait_for_update_result", False)):
+                self._finish_utility_only()
+                return
+            self.root.quit()
+
         try:
-            self.root.after_idle(self.root.quit)
-        except Exception:
+            self.root.after_idle(_quit_if_idle)
+        except tk.TclError:
             pass
+
+    def _background_task_running(self):
+        """Work owned by this process, including jobs outside _start_worker."""
+        flags = ("busy", "_checking_update", "_updating", "_downloading",
+                 "_exporting_diagnostics", "_waiting_for_installer")
+        if any(getattr(self, name, False) for name in flags):
+            return True
+        if any(getattr(self, "_tool_busy", {}).values()):
+            return True
+        for name in ("_diagnostics_thread", "_queue_worker"):
+            worker = getattr(self, name, None)
+            if worker is not None and worker.is_alive():
+                return True
+        return False
 
     # ---------- 日志 ----------
     def _log(self, text):
@@ -1235,12 +1295,12 @@ class App:
         """是否有任务正在进行（安装 / 预处理 / 训练 / 下载）。
 
         两个信号都看，双保险：
-          · self.busy —— 后台任务标记（_start_worker 置位，覆盖所有走 worker 的任务）
+          · 后台任务标记 —— 包括 worker、模型下载、更新、导出与小工具
           · core.active_process_pids() —— 底层**真实还有活跃子进程**
             （万一某条路径没用 worker，也不会漏掉）
         """
         try:
-            if getattr(self, "busy", False):
+            if self._background_task_running():
                 return True
         except Exception:
             pass
@@ -4981,7 +5041,8 @@ class App:
         w.after(100, w.focus_force)
 
     def cmd_export_diagnostics(self):
-        if self._diagnostics_thread and self._diagnostics_thread.is_alive():
+        if (getattr(self, "_exporting_diagnostics", False)
+                or (self._diagnostics_thread and self._diagnostics_thread.is_alive())):
             self._log("[诊断] 日志正在导出，请稍候。")
             return
         logs = "\n".join(self._full_log)
@@ -4992,6 +5053,18 @@ class App:
         task = {"title": self._task_title, "busy": self.busy}
         dest = os.path.join(os.path.expanduser("~"), "Desktop", "KohyaLoRA_运行日志_%s.txt" % time.strftime("%Y%m%d_%H%M%S"))
         self._log("[诊断] 正在后台收集环境和计算自检结果…")
+        self._exporting_diagnostics = True
+
+        def finish(path=None, error=None):
+            try:
+                if path:
+                    self._log("[诊断] 运行日志已导出：" + path)
+                    self._show_export_dialog(path)
+                else:
+                    self._log("[诊断] 导出失败：\n" + error)
+                    messagebox.showerror(core.APP_NAME, "日志导出失败：\n" + error, parent=self.root)
+            finally:
+                self._exporting_diagnostics = False
 
         def work():
             try:
@@ -5000,14 +5073,16 @@ class App:
                 except OSError:
                     fallback = os.path.join(core.data_sub("logs"), os.path.basename(dest))
                     path = write_bundle(core, fallback, logs, task, project, self._session_log)
-                self.root.after(0, lambda: self._log("[诊断] 运行日志已导出：" + path))
-                self.root.after(0, lambda: self._show_export_dialog(path))
+                self.root.after(0, lambda: finish(path=path))
             except Exception:
-                error = traceback.format_exc()
-                self.root.after(0, lambda: self._log("[诊断] 导出失败：\n" + error))
+                error = redact(traceback.format_exc())
+                self.root.after(0, lambda: finish(error=error))
 
         self._diagnostics_thread = threading.Thread(target=work, name="KohyaDiagnostics", daemon=True)
-        self._diagnostics_thread.start()
+        try:
+            self._diagnostics_thread.start()
+        except Exception:
+            finish(error=redact(traceback.format_exc()))
 
     def cmd_export_log(self):
         """统一导出完整日志与环境诊断为 TXT。"""
@@ -5348,10 +5423,12 @@ class App:
         # 不再「1.5 秒后无条件自杀」：先确认安装器真的跑起来了。
         # 安装包未做代码签名，被 Windows / 杀软拦截是常态；而 /VERYSILENT 下安装器
         # 不弹任何提示，旧逻辑会让用户看到「软件自己关了、然后什么都没发生」。
+        self._waiting_for_installer = True
         self.root.after(2500, lambda: self._check_installer_alive(proc, dest, ver))
 
     def _check_installer_alive(self, proc, dest, ver):
         """确认安装器真的在运行；没跑起来就保留当前版本并给放行指引。"""
+        self._waiting_for_installer = False
         try:
             rc = proc.poll()
         except Exception:
@@ -5416,7 +5493,7 @@ class App:
             self._tools_win = w
             body = ctk.CTkScrollableFrame(w, fg_color="transparent")
             body.pack(fill="both", expand=True, padx=14, pady=(10, 6))
-            self._tool_busy = {}
+            self._tool_busy = getattr(self, "_tool_busy", {})
             self._vram_rows = []
             self._tools_last_detail = ""
 
@@ -6356,8 +6433,8 @@ class App:
             "base_model": self.base_model_var.get().strip() or None,
             "rank": int(float(_getv("rank", "12"))),
             "alpha": int(float(_getv("alpha", "6"))),
-            "unet_lr": float(_getv("unet_lr", "3e-4")),
-            "te_lr": float(_getv("te_lr", "1.5e-4")),
+            "unet_lr": float(normalize_learning_rate(_getv("unet_lr", "3e-4"))),
+            "te_lr": float(normalize_learning_rate(_getv("te_lr", "1.5e-4"))),
             "repeats": int(float(_getv("repeats", "5"))),
             "max_epochs": int(float(_getv("max_epochs", "8"))),
             "resolution": int(float(_getv("resolution", default_resolution(self.mode, self.base_type)))),
@@ -8154,22 +8231,33 @@ class App:
                     "未检测到 Python 3.11/3.12。\n\n请先点「自动安装 Python 3.12」，\n装完再点「重新检查」，然后点「自动创建训练环境」。")
                 return
             target = os.path.join(core.data_dir(), "venv_amd")
-            self._log(f"[AMD] 正在用 Python {pv} 创建训练环境：{target} …")
-
             def work():
-                ok2, msg2 = core.create_python_venv(pv, target)
-                self.root.after(0, lambda: self._venv_done(ok2, msg2, target, pv))
-            threading.Thread(target=work, daemon=True).start()
+                try:
+                    ok2, msg2 = core.create_python_venv(pv, target)
+                except Exception as exc:
+                    ok2, msg2 = False, redact(str(exc))
+                try:
+                    self.root.after(0, lambda: self._venv_done(ok2, msg2, target, pv))
+                finally:
+                    self.q.put("__DONE__")
+            self._start_worker(work, "创建 AMD 训练环境")
 
         def _auto_py312():
-            self._log("[AMD] 开始自动安装 Python 3.12（内置安装包，静默安装，约 1 分钟）…")
-
             def work():
-                ok3, msg3 = core.install_python_312(self._log)
-                self.root.after(0, lambda: self._py312_done(ok3, msg3))
-            threading.Thread(target=work, daemon=True).start()
+                try:
+                    ok3, msg3 = core.install_python_312(lambda line: self.q.put(("LOG", line)))
+                except Exception as exc:
+                    ok3, msg3 = False, redact(str(exc))
+                try:
+                    self.root.after(0, lambda: self._py312_done(ok3, msg3))
+                finally:
+                    self.q.put("__DONE__")
+            self._start_worker(work, "安装 Python 3.12")
 
         def _auto_install_all():
+            if self.busy:
+                messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
+                return
             venv = self.train_env_var.get().strip()
             if not venv or not os.path.isfile(os.path.join(venv, "Scripts", "python.exe")):
                 messagebox.showwarning(core.APP_NAME, "请先点「自动创建训练环境」，再点「自动安装全部依赖」。")
@@ -9073,10 +9161,12 @@ class App:
                      font=ui_font(FONT_HINT), text_color=SUB, justify="left", wraplength=480).pack(padx=20, pady=(2, 10), anchor="w")
         def _act(k):
             m = sel["m"]
-            dlg.destroy()
             if k == "inapp":
-                self.cmd_dl_in_app(bt, m)
-            elif k == "web_fast":
+                if self.cmd_dl_in_app(bt, m):
+                    dlg.destroy()
+                return
+            dlg.destroy()
+            if k == "web_fast":
                 import webbrowser; webbrowser.open(m.get("url") or core.HF_MIRROR_URL)
             elif k == "web_fallback":
                 import webbrowser; webbrowser.open(m.get("fallback") or m.get("url") or core.HF_MIRROR_URL)
@@ -9129,43 +9219,78 @@ class App:
                     os.remove(part)
                 except Exception:
                     pass
+        return self._launch_model_download(url, dest, fname, fsize, "base", "底模")
+
+    def _launch_model_download(self, url, dest, fname, size, kind, label):
         self._downloading = True
-        self._dl_kind = "base"
-        self._show_dl_ui(fname, fsize)
-        self._log(f"[下载] 开始下载底模：{fname}（{fsize}）")
-        self._log(f"[下载] 保存到：{dest}")
-        self._dl = _ModelDownloader(url, dest,
-                                    progress_cb=self._dl_progress_cb,
-                                    done_cb=self._dl_done_cb,
-                                    logf=self._log)
-        self._dl.start()
+        self._dl_cancelled = False
+        self._dl_kind = kind
+        try:
+            self._show_dl_ui(fname, size)
+            self._log(f"[下载] 开始下载{label}：{fname}（{size}）")
+            self._log(f"[下载] 保存到：{dest}")
+            self._dl = _ModelDownloader(
+                url, dest, progress_cb=self._dl_progress_cb,
+                done_cb=self._dl_done_cb,
+                logf=lambda line: self.q.put(("LOG", line)),
+            )
+            self._dl.start()
+            return True
+        except Exception as exc:
+            self._downloading = False
+            error = redact(str(exc))
+            self._log("[下载] 无法启动下载：" + error)
+            window = getattr(self, "dl_win", None)
+            try:
+                messagebox.showerror(core.APP_NAME, "无法启动下载：\n" + error,
+                                     parent=window or self.root)
+            finally:
+                if window is not None:
+                    window.destroy()
+                self.dl_win = None
+            return False
 
     def _show_dl_ui(self, fname, fsize):
-        self.dl_win = ctk.CTkToplevel(self.root)
+        self.dl_win = _DownloadProgressWindow(self.root)
         self.dl_win.title("下载进度")
-        self.dl_win.geometry("460x160")
+        self.dl_win.geometry("480x200")
         self.dl_win.resizable(False, False)
-        self.dl_win.transient(self.root)
-        self.dl_status_var = tk.StringVar(value=f"正在准备下载 {fname}（{fsize}）…")
-        ctk.CTkLabel(self.dl_win, textvariable=self.dl_status_var, font=ui_font(FONT_BODY), text_color=TXT).pack(padx=20, pady=(16, 8), anchor="w")
-        self.dl_progress = ctk.CTkProgressBar(self.dl_win, height=10, fg_color=CARD2, progress_color=ACC)
+        if not self._utility_only:
+            self.dl_win.transient(self.root)
+        self.dl_win.protocol("WM_DELETE_WINDOW", self.cmd_dl_cancel)
+        self.dl_status_var = tk.StringVar(value=f"正在连接下载源：{fname}（{fsize}）…")
+        ctk.CTkLabel(self.dl_win, textvariable=self.dl_status_var, font=ui_font(FONT_BODY),
+                     text_color=TXT, wraplength=430, justify="left").pack(padx=20, pady=(16, 8), anchor="w")
+        self.dl_progress = ctk.CTkProgressBar(self.dl_win, height=10, fg_color=CARD2,
+                                           progress_color=ACC, mode="indeterminate")
         self.dl_progress.pack(fill="x", padx=20, pady=(0, 8))
-        self.dl_progress.set(0)
-        ctk.CTkButton(self.dl_win, text="取消下载", width=90, height=28, fg_color=CARD2, hover_color="#343a46",
-                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
-                      font=ui_font(FONT_HINT), command=self.cmd_dl_cancel).pack(pady=(4, 12))
+        self._dl_total_known = False
+        self.dl_progress.start()
+        self.dl_cancel_button = ctk.CTkButton(
+            self.dl_win, text="取消下载", width=90, height=28, fg_color=CARD2, hover_color="#343a46",
+            border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+            font=ui_font(FONT_HINT), command=self.cmd_dl_cancel)
+        self.dl_cancel_button.pack(pady=(4, 12))
+        self.dl_win.after(150, self.dl_win.lift)
 
     def _dl_progress_cb(self, done, total, speed):
-        pct = (done / total * 100) if total else 0
-        self.q.put(("DL_PROGRESS", pct, f"已下载 {done/1048576:.1f} / {total/1048576:.1f} MB，速度 {speed/1048576:.1f} MB/s"))
+        pct = (done / total * 100) if total else None
+        amount = f"{done/1048576:.1f} / {total/1048576:.1f} MB" if total else f"{done/1048576:.1f} MB（总大小未知）"
+        self.q.put(("DL_PROGRESS", pct, f"已下载 {amount}，速度 {speed/1048576:.1f} MB/s"))
 
     def _dl_done_cb(self, ok, dest):
         self.q.put(("DL_DONE", ok, dest))
 
     def _dl_progress_ui(self, pct, status):
         try:
-            self.dl_progress.set(pct / 100)
-            self.dl_status_var.set(status)
+            if pct is not None:
+                if not self._dl_total_known:
+                    self.dl_progress.stop()
+                    self.dl_progress.configure(mode="determinate")
+                    self._dl_total_known = True
+                self.dl_progress.set(pct / 100)
+            if not getattr(self, "_dl_cancelled", False):
+                self.dl_status_var.set(status)
         except Exception:
             pass
 
@@ -9232,10 +9357,20 @@ class App:
         self._downloading = False
         kind = getattr(self, "_dl_kind", "base")
         self._dl_kind = "base"
+        if not ok:
+            cancelled = getattr(self, "_dl_cancelled", False)
+            error = redact(str(getattr(getattr(self, "_dl", None), "error", None) or "下载未完成，请检查网络后重试。"))
+            self._log("[下载] 已取消下载，断点已保留。" if cancelled else "[ERROR] 下载失败：" + error)
+            parent = getattr(self, "dl_win", None) or self.root
+            if cancelled:
+                messagebox.showinfo(core.APP_NAME, "下载已取消。已下载的进度会保留，可稍后继续。", parent=parent)
+            else:
+                messagebox.showerror(core.APP_NAME, "下载失败：\n" + error + "\n\n可以重试，或使用浏览器下载。", parent=parent)
         try:
             self.dl_win.destroy()
         except Exception:
             pass
+        self.dl_win = None
         if ok:
             if kind == "h3":
                 self._log(f"[H3] 下载完成：{dest}")
@@ -9269,8 +9404,6 @@ class App:
                 self._log(f"[底模] 下载完成：{dest}")
                 self._scan_base_models()
                 messagebox.showinfo(core.APP_NAME, f"底模下载完成：\n{dest}\n\n已自动扫描并加入底模列表。")
-        else:
-            self._log("[ERROR] 下载失败或已取消")
 
     def _build_links_dialog(self, title, intro, links, files, open_label, open_cmd, rebuild_cmd, dl_fn, hint="", optional_keys=()):
         """通用模型文件下载对话框（H3 / FLUX / Krea2 共用）：每文件应用内下载或浏览器直链。"""
@@ -9434,16 +9567,7 @@ class App:
                     "若仍报 401/403，多为源临时故障：稍后重试；或用「🌐 浏览器」打开下方链接手动下载后放进 models/krea2/ 文件夹：\n"
                     f"{url}")
                 return
-        self._downloading = True
-        self._dl_kind = kind
-        self._show_dl_ui(fname, desc)
-        self._log(f"[下载] 开始下载 {label}：{fname}（{desc}）")
-        self._log(f"[下载] 保存到：{dest}")
-        self._dl = _ModelDownloader(url, dest,
-                                    progress_cb=self._dl_progress_cb,
-                                    done_cb=self._dl_done_cb,
-                                    logf=self._log)
-        self._dl.start()
+        return self._launch_model_download(url, dest, fname, desc, kind, label)
 
     def _start_h3_dl(self, key):
         self._start_model_file_dl(key, core.H3_MODEL_LINKS, core.h3_models_dir(), "h3", "H3 模型")
@@ -9479,11 +9603,13 @@ class App:
             pass
 
     def cmd_dl_cancel(self):
-        try:
-            if self._dl is not None:
-                self._dl.cancel()
-        except Exception:
-            pass
+        if not getattr(self, "_downloading", False) or getattr(self, "_dl_cancelled", False):
+            return
+        self._dl_cancelled = True
+        self.dl_status_var.set("正在取消下载，已下载进度将保留…")
+        self.dl_cancel_button.configure(state="disabled")
+        if self._dl is not None:
+            self._dl.cancel()
 
     def _refresh_one_click_state(self):
         steps = [s for s in self._current_steps() if s["check"] != "at_model"]

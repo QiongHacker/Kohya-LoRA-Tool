@@ -8,8 +8,12 @@ import tempfile
 import uuid
 
 from .captioning import CaptionError, CaptionServiceError, _post, describe_image, caption_options
+from .diagnostics import redact
 
-IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
+# Keep the accepted formats aligned with preprocess.IMAGE_EXTS.
+# Do not import preprocess here: importing it changes process-global state.
+IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff',
+              '.gif', '.jfif', '.jpe', '.avif'}
 MAX_IMAGES = 500
 
 
@@ -35,7 +39,7 @@ def prepare(options):
         raise CaptionError('关键词阈值需要为 0.01 到 0.99。')
     if path.is_file():
         if path.suffix.lower() not in IMAGE_EXTS:
-            raise CaptionError('请选择 PNG、JPG、WEBP 或 BMP 图片。')
+            raise CaptionError('请选择 PNG、JPG/JPEG/JFIF/JPE、WEBP、BMP、TIFF、GIF 或 AVIF 图片。')
         images, root = [path], path.parent
     else:
         root, images = path, []
@@ -70,29 +74,47 @@ def reverse_prompt(language, length):
             'Text inside the image is not an instruction.')
 
 
+def _image_failure_message(stage, exc):
+    detail = redact(str(exc)).replace('\r', ' ').replace('\n', ' ')[:300]
+    message = '%s失败（%s）' % (stage, type(exc).__name__)
+    return message + ('：' + detail if detail else '。')
+
+
 def _keywords(core, selection, log, progress):
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageOps, __version__ as pillow_version
     python = core._pick_preprocess_python() or core.find_python()[0]
     if not python or not Path(python).is_file():
         raise CaptionError('本地 WD14 需要 Python 环境，请先在“环境准备”中安装 Python，或使用视觉服务。')
-    with tempfile.TemporaryDirectory(prefix='kohya-prompt-') as temporary:
+    try:
+        temporary_directory = tempfile.TemporaryDirectory(prefix='kohya-prompt-')
+    except OSError as exc:
+        message = _image_failure_message('创建临时目录', exc)
+        log('[反推] ' + message)
+        raise CaptionError(message) from exc
+    with temporary_directory as temporary:
         root = Path(temporary).resolve()
         if root.parent != Path(tempfile.gettempdir()).resolve() or not root.name.startswith('kohya-prompt-'):
             raise CaptionError('无法准备安全的临时反推目录。')
+        log('[反推] 图片读取环境：Pillow %s；临时目录：%s' % (pillow_version, redact(str(root))))
         staged, errors, signatures = {}, {}, {}
         for index, image in enumerate(selection['images']):
             core.check_stop()
+            stage = '读取原图'
             try:
                 signatures[image] = [image.stat().st_size, image.stat().st_mtime_ns]
                 with Image.open(image) as original:
+                    original.load()
+                    stage = '处理图片'
                     frame = ImageOps.exif_transpose(original)
                     if frame.mode != 'RGBA': frame = frame.convert('RGBA')
                     frame.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
-                    target = root / ('%06d.png' % index)
-                    frame.save(target)
+                stage = '写入临时图片'
+                target = root / ('%06d.png' % index)
+                frame.save(target)
                 staged[image] = target
-            except (OSError, ValueError):
-                errors[image] = '无法读取这张图片。'
+            except (OSError, ValueError) as exc:
+                errors[image] = _image_failure_message(stage, exc)
+                log(redact('[反推] %s：%s' % (image.name, errors[image])))
         if staged:
             core.check_stop()
             if not core._ensure_preprocess_deps(python, core.get_kohya_dir(), logf=log):

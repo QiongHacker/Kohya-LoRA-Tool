@@ -24,6 +24,7 @@ class FakeRoot:
     def __init__(self):
         self.idle_callbacks = []
         self.events = []
+        self.timers = []
         self.in_mainloop = False
         self.exists = True
         self.allow_inloop_destroy = False
@@ -32,11 +33,17 @@ class FakeRoot:
         self.idle_callbacks.append(callback)
         return len(self.idle_callbacks)
 
+    def after(self, delay, callback):
+        self.timers.append(callback)
+
     def mainloop(self):
         self.events.append("mainloop started")
         self.in_mainloop = True
-        while self.idle_callbacks:
-            self.idle_callbacks.pop(0)()
+        while self.idle_callbacks or self.timers:
+            if self.idle_callbacks:
+                self.idle_callbacks.pop(0)()
+            else:
+                self.timers.pop(0)()
         self.in_mainloop = False
         self.events.append("mainloop returned")
 
@@ -54,10 +61,13 @@ class FakeRoot:
 
 
 class FakePopup:
+    exists = True
+
     def bind(self, _sequence, callback, add=None):
         self.destroy_callback = callback
 
     def destroy(self):
+        self.exists = False
         self.destroy_callback(SimpleNamespace(widget=self))
 
 
@@ -160,7 +170,7 @@ class LabelEditorUtilityScopeTests(unittest.TestCase):
         app = App.__new__(App)
         app._utility_only = True
         app.root = root
-        app._find_utility_popup = lambda: popup
+        app._find_utility_popup = lambda: popup if popup.exists else None
 
         app._finish_utility_only()
         popup.destroy()
@@ -202,12 +212,19 @@ class LabelEditorUtilityScopeTests(unittest.TestCase):
         app = App.__new__(App)
         app._utility_only = True
         app.root = root
-        app._find_utility_popup = lambda: popup
+        app._find_utility_popup = lambda: popup if popup.winfo_exists() else None
         app._finish_utility_only()
         root.after(100, popup.destroy)
         timed_out = []
         root.after(1500, lambda: (timed_out.append(True), root.quit()))
+        original_quit = root.quit
 
+        def quit_cleanly():
+            for timer in root.tk.call("after", "info"):
+                root.after_cancel(timer)
+            original_quit()
+
+        root.quit = quit_cleanly
         _run_mainloop_and_destroy(root)
         self.assertFalse(timed_out, "utility close failed to exit the Tk mainloop")
 
