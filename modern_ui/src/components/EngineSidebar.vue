@@ -84,6 +84,7 @@ const modeTips: Record<string, string> = {
       </section>
     </nav>
 
+    <button class="sidebar-action secondary" type="button" title="调整已有 LoRA 的层级倍率、预览对照并另存文件。" @click="emit('action', 'lora_workbench')"><UiIcon name="settings" /> LoRA 工作台</button>
     <button class="sidebar-action secondary" type="button" title="选择图片，独立生成关键词或中文 / 英文画面描述，不需要训练项目。" @click="emit('action', 'prompt_reverse')"><UiIcon name="image" /> 反推提示词</button>
 
     <div class="sidebar-spacer"></div>

@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.7"
+APP_VERSION = "0.19.8"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4632,7 +4632,9 @@ def _ai_toolkit_qwen21_local_components_patch_ready(at_dir):
             "AI_TOOLKIT_QWEN21_VAE_PATH",
             "AI_TOOLKIT_QWEN21_ASSETS_PATH",
         )
+        from kohya_core.qwen21_diffusers_compat import patch_ready as _qwen21_ffn_ready
         return (
+            _qwen21_ffn_ready(at_dir) and
             all(marker in source for marker in required) and
             re.search(
                 r'QwenImage21Transformer2DModel\.load\(\s*model_path\s*,\s*'
@@ -4662,6 +4664,9 @@ def _patch_ai_toolkit_qwen21_local_components(at_dir, logf=print):
     if not os.path.isfile(model_file):
         return False
     try:
+        from kohya_core.qwen21_diffusers_compat import patch_engine as _patch_qwen21_ffn
+        if not _patch_qwen21_ffn(at_dir, logf):
+            raise RuntimeError("Qwen-Image-2.1 Diffusers FFN compatibility patch is incomplete")
         with open(model_file, "r", encoding="utf-8") as f:
             source = f.read()
         te_marker = "AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH"
@@ -5197,6 +5202,8 @@ def install_ai_toolkit_engine(logf=print):
                     logf("[第三引擎] PyTorch 预装成功（阿里云/上海交大双国内镜像 + 本地安装）。")
                     _torch_ok = True
                     break
+                except StopRequested:
+                    raise
                 except Exception as e:
                     logf(f"[第三引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
             if not _torch_ok:
@@ -5296,6 +5303,8 @@ FIZGIG_ROCM_WHEELS = {
 }
 # torch 运行时 import rocm_sdk（AMD 元包，提供 GPU 目标探测）；以 sdist 构建安装
 FIZGIG_ROCM_SDIST = ("rocm-7.15.0a20260728.tar.gz", 20_000)
+# Fixed artifact hash agrees between the AMD nightly source and the domestic mirror.
+FIZGIG_ROCM_SDIST_SHA256 = "38bf338b6e16e07bcdb060781e989660cb91373b672e60b13186e8ee487d5fdc"
 # AMD 路径额外纯 Python 依赖（torch requires-dist，不在共享依赖里；setuptools<82 是 torch 硬约束）
 FIZGIG_ROCM_EXTRA_DEPS = "filelock typing-extensions sympy networkx jinja2 fsspec setuptools<82"
 
@@ -5641,6 +5650,27 @@ def _fizgig_amd_arch(fz_dir, vpy, logf=print):
     return _amd_gpu_arch(fz_dir, vpy, logf)
 
 
+def _rocm_sdist_valid(path, logf=print):
+    """Validate the pinned ROCm source package by full artifact identity."""
+    import hashlib
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return False
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                check_stop()
+                digest.update(chunk)
+        if digest.hexdigest() == FIZGIG_ROCM_SDIST_SHA256:
+            return True
+        logf("[ROCm] 元包 SHA-256 不匹配，需重新下载：%s" % os.path.basename(path))
+    except StopRequested:
+        raise
+    except OSError as exc:
+        logf("[ROCm] 无法校验元包：%s（%s）" % (os.path.basename(path), exc))
+    return False
+
+
 def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练引擎"):
     """在一个隔离引擎 venv 安装 Windows ROCm + PyTorch + bitsandbytes 栈。
 
@@ -5688,19 +5718,44 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
                           cwd=engine_dir, env=env, logf=logf) != 0:
                 raise RuntimeError("bitsandbytes 安装失败")
             sdist = os.path.join(rocm_dir, FIZGIG_ROCM_SDIST[0])
-            if not (os.path.isfile(sdist) and os.path.getsize(sdist) >= FIZGIG_ROCM_SDIST[1] and _wheel_valid(sdist)):
-                logf(f"[{label}] 下载 ROCm 源码包（魔搭国内直连，断点续传）：{FIZGIG_ROCM_SDIST[0]}")
-                if not _download_with_resume(FIZGIG_ROCM_MIRROR + FIZGIG_ROCM_SDIST[0], sdist, logf, direct=True) or not _wheel_valid(sdist):
-                    raise RuntimeError("ROCm 元包下载失败")
+            if not _rocm_sdist_valid(sdist, logf):
+                # A complete but invalid file must not be resumed as a valid cache.
+                if os.path.islink(sdist):
+                    raise RuntimeError("ROCm 元包缓存为链接，请检查缓存目录")
+                if os.path.isfile(sdist):
+                    os.remove(sdist)
+                for source, base in (("魔搭", FIZGIG_ROCM_MIRROR), ("AMD 官方", FIZGIG_ROCM_INDEX)):
+                    check_stop()
+                    logf(f"[{label}] 下载并校验 ROCm 元包（{source}）：{FIZGIG_ROCM_SDIST[0]}")
+                    got = _download_with_resume(base + FIZGIG_ROCM_SDIST[0], sdist, logf, direct=True, quick_fail=True)
+                    check_stop()
+                    if got and _rocm_sdist_valid(sdist, logf):
+                        break
+                    if os.path.isfile(sdist) and not os.path.islink(sdist):
+                        os.remove(sdist)
+                else:
+                    raise RuntimeError("ROCm 元包下载或 SHA-256 校验失败")
             if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120", sdist],
                           cwd=engine_dir, env=env, logf=logf) != 0:
                 raise RuntimeError("rocm 元包安装失败")
-            rocm_ok = True
             bootstrap = [p for p in local if "rocm_bootstrap" in os.path.basename(p)]
             if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + bootstrap,
                           cwd=engine_dir, env=env, logf=logf) != 0:
                 raise RuntimeError("rocm-bootstrap 安装失败")
-            logf(f"[{label}] AMD ROCm 栈安装成功（魔搭国内直连）。")
+            # The mirror contains generic wheels only; --no-deps does not install
+            # the GPU device packages or the pure Python runtime dependencies.
+            logf(f"[{label}] 基础 ROCm 包已安装，补齐 {arch} 显卡组件（AMD 官方多架构源）…")
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                           "--index-url", FIZGIG_ROCM_INDEX,
+                           "torch[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCH_PIN),
+                           "torchvision[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCHVISION_PIN),
+                           "rocm-sdk-devel==%s" % FIZGIG_ROCM_SDK_PIN],
+                          cwd=engine_dir, env=env, logf=logf) != 0:
+                check_stop()
+                raise RuntimeError("ROCm 显卡组件安装失败")
+            check_stop()
+            rocm_ok = True
+            logf(f"[{label}] AMD ROCm 栈安装成功（魔搭基础包 + AMD 官方显卡组件）。")
         except StopRequested:
             raise
         except Exception as e:
@@ -5715,6 +5770,7 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
 
     if not rocm_ok:
         for attempt in range(3):
+            check_stop()
             try:
                 cmd = [vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
                        "--index-url", FIZGIG_ROCM_INDEX,
@@ -5724,8 +5780,11 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
                 if run_stream(cmd, cwd=engine_dir, env=env, logf=logf) == 0:
                     rocm_ok = True
                     break
+            except StopRequested:
+                raise
             except Exception as e:
                 logf(f"[{label}] AMD nightly 安装异常（第{attempt + 1}/3 次）：{e}")
+            check_stop()
         if rocm_ok:
             bnb = os.path.join(rocm_dir, "bitsandbytes-0.50.2.dev0-cp312-cp312-win_amd64.whl")
             if not (os.path.isfile(bnb) and _wheel_valid(bnb)):
@@ -5734,6 +5793,7 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
                     raise RuntimeError("bitsandbytes ROCm 轮子下载失败（GitHub 直连较慢，可稍后重试）")
             if run_stream([vpy, "-m", "pip", "install", "--no-input", bnb], cwd=engine_dir, env=env, logf=logf) != 0:
                 raise RuntimeError("bitsandbytes ROCm 轮子安装失败")
+    check_stop()
     if not rocm_ok:
         raise RuntimeError("AMD ROCm 栈安装失败（魔搭国内直连 + AMD nightly 均失败，详见上方日志）。")
     # ★ 2026-09-23：装完**当场核对**"装的架构"和"显卡架构"是否一致 ✗
@@ -9570,8 +9630,8 @@ def _log_mentions_tokenizer_failure(tail):
 def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None, env=None):
     """确保训练 venv 可 import torchvision（torch 在但 torchvision 缺时自动补装匹配版本）。
 
-    版本映射：torch 2.7.x → torchvision 0.22.x（patch 同号）；阿里云 pytorch-wheels 源优先，官方源兜底。
-    torch 本身不可用/未知时跳过（由安装流程处理）。返回 True=可用/跳过；False=补装后仍不可用。
+    按明确的官方版本配对与实际 CUDA 构建补装；国内镜像优先，官方源兜底。
+    CPU/ROCm/未知构建不安装 CUDA 包。返回 True=可用；False=需要重配环境。
     """
     def _check_import():
         try:
@@ -9581,40 +9641,31 @@ def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None, env=None)
             return False
     if _check_import():
         return True
-    # torch 可用才补装（torch 缺失由安装流程处理，单独装 torchvision 无意义）
-    tver = ""
-    hip = ""
-    try:
-        r = subprocess.run(
-            [vpy, "-c", "import torch;print(torch.__version__);print(getattr(torch.version, 'hip', '') or '')"],
-            capture_output=True, text=True, timeout=120, env=env)
-        _torch_lines = (r.stdout or "").strip().splitlines()
-        tver = _torch_lines[0].strip() if _torch_lines else ""
-        hip = _torch_lines[1].strip() if len(_torch_lines) > 1 else ""
-    except Exception:
-        tver = ""
-    if not tver:
-        logf(f"[{label}] 未检测到 torch 版本，跳过 torchvision 补装（由安装流程处理）")
-        return True
-    if hip:
-        logf(f"[{label}] ROCm PyTorch 缺少可导入的 torchvision；不会尝试安装 CUDA/cu128 轮子，以免破坏 AMD 环境。请重装第三引擎 ROCm 运行时。")
+    info = _venv_torch_info(vpy, env=env)
+    if not info:
+        logf(f"[{label}] 无法读取 PyTorch 构建，停止 torchvision 补装，请重新配置训练环境。")
         return False
-    ver = ""
-    m = re.match(r"(\d+)\.(\d+)\.(\d+)", tver)
-    if m and int(m.group(1)) == 2:
-        _minor = int(m.group(2)) - 5
-        if 0 <= _minor <= 22:
-            ver = "torchvision==0.%d.%s+cu128" % (_minor, m.group(3))
-    if not ver:
-        ver = "torchvision==0.22.0+cu128"
-    logf(f"[{label}] venv 缺 torchvision（torch {tver}），自动补装 {ver}（国内镜像，无需代理）…")
-    env = build_env()
-    # 2026-09-11：上海交大 pytorch-wheels 实测 2.37 MB/s，阿里云仅 0.12 MB/s → 上海交大优先。
-    for _idx in ("https://mirror.sjtu.edu.cn/pytorch-wheels/cu128",
-                 "https://mirrors.aliyun.com/pytorch-wheels/cu128",
-                 "https://download.pytorch.org/whl/cu128"):
+    if info.get("hip"):
+        logf(f"[{label}] ROCm PyTorch 缺少可导入的 torchvision；请重新配置对应 ROCm 运行时。")
+        return False
+    tver = info["version"]
+    pair = _torch_torchvision_pair(tver)
+    cuda = str(info.get("cuda") or "")
+    if not pair or not re.fullmatch(r"\d+\.\d+", cuda):
+        logf(f"[{label}] torch {tver} 没有已配置的 CUDA torchvision 配对，请重新配置该引擎环境。")
+        return False
+    cu = "cu" + cuda.replace(".", "")
+    ver = f"torchvision=={pair[1]}+{cu}"
+    logf(f"[{label}] venv 缺少可导入的 torchvision（torch {tver}），补装 {ver}…")
+    install_env = (env if env is not None else build_env()).copy()
+    install_env.pop("PIP_EXTRA_INDEX_URL", None)
+    for _idx in (f"https://mirror.sjtu.edu.cn/pytorch-wheels/{cu}",
+                 f"https://mirrors.aliyun.com/pytorch-wheels/{cu}",
+                 f"https://download.pytorch.org/whl/{cu}"):
+        # 锁定实际 torch 构建，防止 torchvision 的依赖解析替换 CUDA/ROCm 环境。
         rc = run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                         "--index-url", _idx, ver], cwd=cwd or os.getcwd(), env=env, logf=logf)
+                         "--index-url", _idx, ver, f"torch=={tver}"],
+                        cwd=cwd or os.getcwd(), env=install_env, logf=logf)
         if rc == 0 and _check_import():
             logf(f"[{label}] torchvision 补装完成")
             return True
@@ -10953,26 +11004,50 @@ def _upgrade_pip(vpy, cwd, logf=print, label="环境"):
     return False
 
 
-def _venv_torch_version(vpy):
-    """读取 venv 内 torch 版本（如 2.7.1），未安装返回 None。"""
+def _venv_torch_info(vpy, env=None):
+    """读取实际 PyTorch 构建与 GPU 状态；CUDA 不可用不等于 CPU 构建。"""
+    code = (
+        "import json,torch\n"
+        "from importlib.metadata import version,PackageNotFoundError\n"
+        "try: tv=version('torchvision')\n"
+        "except PackageNotFoundError: tv=''\n"
+        "print(json.dumps({'version':torch.__version__,'torchvision':tv,"
+        "'cuda':getattr(torch.version,'cuda',None),"
+        "'hip':getattr(torch.version,'hip',None),"
+        "'available':torch.cuda.is_available()}))"
+    )
     try:
-        r = subprocess.run(
-            [vpy, "-c", "import importlib.metadata as md;print((md.version('torch') or '').split('+')[0])"],
-            capture_output=True, text=True, timeout=60)
-        return (r.stdout or "").strip() or None
+        r = subprocess.run([vpy, "-I", "-c", code], capture_output=True,
+                           text=True, timeout=120, env=env)
+        if r.returncode == 0:
+            info = json.loads((r.stdout or "").strip())
+            if isinstance(info, dict) and info.get("version"):
+                return info
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _torch_torchvision_pair(torch_v):
-    """torch x.y.z ↔ torchvision 0.(y+15).z（2.7.0→0.22.0、2.7.1→0.22.1、2.6.0→0.21.0）。"""
-    try:
-        p = (torch_v or "").split("+")[0].split(".")
-        if len(p) >= 3 and p[0] == "2":
-            return ".".join(p[:3]), "0.%d.%s" % (int(p[1]) + 15, p[2])
-    except Exception:
-        pass
-    return "2.7.1", "0.22.1"
+    """官方已发布的版本配对；未知版本不推算、不替换为其他版本。
+
+    来源：https://pytorch.org/get-started/previous-versions/（2026-10-12）。
+    """
+    pairs = {
+        "2.0.0": "0.15.1", "2.0.1": "0.15.2",
+        "2.1.0": "0.16.0", "2.1.1": "0.16.1", "2.1.2": "0.16.2",
+        "2.2.0": "0.17.0", "2.2.1": "0.17.1", "2.2.2": "0.17.2",
+        "2.3.0": "0.18.0", "2.3.1": "0.18.1",
+        "2.4.0": "0.19.0", "2.4.1": "0.19.1",
+        "2.5.0": "0.20.0", "2.5.1": "0.20.1", "2.6.0": "0.21.0",
+        "2.7.0": "0.22.0", "2.7.1": "0.22.1", "2.8.0": "0.23.0",
+        "2.9.0": "0.24.0", "2.9.1": "0.24.1", "2.10.0": "0.25.0",
+        "2.11.0": "0.26.0", "2.12.0": "0.27.0", "2.12.1": "0.27.1",
+        "2.13.0": "0.28.0",
+    }
+    version = str(torch_v or "").split("+")[0]
+    tv = pairs.get(version)
+    return (version, tv) if tv else None
 
 
 def _venv_imports_ok(vpy, mods):
@@ -11291,6 +11366,35 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             need_install = True
     if not need_install:
         return True
+    # 先修复 PyTorch 配对，再补普通依赖，避免从 PyPI 拉入 CPU 版 torch。
+    if not _venv_imports_ok(vpy, ("torch", "torchvision")):
+        if detect_gpu_vendor() != "nvidia":
+            raise RuntimeError("训练环境缺少 torch/torchvision，请重新配置对应显卡的训练环境；AMD 请使用 ROCm 环境引导。")
+        info = _venv_torch_info(vpy)
+        if not info:
+            raise RuntimeError("无法读取训练环境 PyTorch，请重跑【② 安装训练内核】。")
+        if info.get("hip"):
+            raise RuntimeError("当前为 ROCm PyTorch，请使用对应的 AMD 环境引导修复 torchvision。")
+        if not info.get("cuda"):
+            # 恢复本工具第一引擎的固定 CUDA 配对；不沿用 CPU 包的任意版本号。
+            tvv, tvv2, cu = "2.7.0", "0.22.0", "cu128"
+            logf("[环境] 检测到 CPU 版 PyTorch 且 torchvision 不完整，恢复 torch 2.7.0 + torchvision 0.22.0（CUDA 12.8）…")
+        else:
+            pair = _torch_torchvision_pair(info["version"])
+            cuda = str(info["cuda"])
+            if not pair or not re.fullmatch(r"\d+\.\d+", cuda):
+                raise RuntimeError("torch %s 没有已配置的 CUDA torchvision 配对，请重跑【② 安装训练内核】；不会推算版本下载。" % info["version"])
+            tvv, tvv2 = pair
+            cu = "cu" + cuda.replace(".", "")
+            logf(f"[环境] 补装配套 torchvision {tvv2}+{cu}（torch {info['version']}）…")
+        try:
+            _preinstall_torch(vpy, kdir, logf, torch_ver=tvv, tv_ver=tvv2, cu=cu, label="Kohya")
+        except StopRequested:
+            raise
+        except Exception as e:
+            raise RuntimeError("PyTorch 配对修复失败：%s\n请重跑【② 安装训练内核】。" % e) from e
+        if not _venv_imports_ok(vpy, ("torch", "torchvision")):
+            raise RuntimeError("PyTorch 配对修复后仍缺少依赖，请重跑【② 安装训练内核】。")
     logf("[环境] 训练环境需要补装/校正依赖（PIL/numpy/transformers/huggingface_hub/toml 等），正在处理…")
     subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                     PIP_INDEX_PRIMARY], capture_output=True, timeout=60)
@@ -11368,6 +11472,10 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python==4.10.0.84",
             "sentencepiece",
             "numpy==2.1.3", "scipy==1.15.3", "protobuf==5.29.5"]   # 兼容 Python 3.10-3.12、TensorFlow/W&B，避免旧 SciPy 引用 numpy.Inf（opencv/hf-hub 与 FIZGIG_SHARED_DEPS 同版本）
+    info = _venv_torch_info(vpy)
+    if not info or not info.get("torchvision"):
+        raise RuntimeError("无法确认 PyTorch 配对，已停止普通依赖补装，请重跑【② 安装训练内核】。")
+    pkgs += [f"torch=={info['version']}", f"torchvision=={info['torchvision']}"]
     ok = False
     for _round in range(2):
         for _idx in pip_mirror_urls():
@@ -11413,23 +11521,6 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     except Exception as e:
         raise RuntimeError("NumPy/SciPy 兼容验证失败：%s" % e)
 
-    # torch/torchvision 配对补装：安装中断常见“有 torch 没 torchvision”，
-    # 缺 torchvision 会在训练 import 时直接报 ModuleNotFoundError（用户 A 反馈）。
-    # torchvision 是 CUDA 大轮子，不走 pypi 镜像，按 torch 版本走 _preinstall_torch。
-    if not _venv_imports_ok(vpy, ("torch", "torchvision")):
-        if detect_gpu_vendor() == "amd":
-            raise RuntimeError("AMD 训练环境缺少 torchvision，请重跑 AMD 环境引导重新安装 ROCm torchvision")
-        _tv = _venv_torch_version(vpy)
-        if not _tv:
-            raise RuntimeError("训练环境缺少 PyTorch，请重跑【② 安装训练内核】自动安装 cu128 版 PyTorch")
-        _tvv, _tvv2 = _torch_torchvision_pair(_tv)
-        logf(f"[环境] 检测到 torch {_tvv} 缺少配套 torchvision，自动补装 torchvision {_tvv2}+cu128 …")
-        try:
-            _preinstall_torch(vpy, kdir, logf, torch_ver=_tvv, tv_ver=_tvv2, label="Kohya", force=False)
-        except Exception as e:
-            raise RuntimeError("自动补装 torchvision 失败：%s\n请重跑【② 安装训练内核】" % e)
-        if not _venv_imports_ok(vpy, ("torch", "torchvision")):
-            raise RuntimeError("torchvision 补装后仍不可用，请重跑【② 安装训练内核】")
     # ★ 2026-09-22：补装完**立刻做深度自检** —— 以前只 find_spec，坏环境要到训练中途才炸 ✗
     #   （见 env_selftest 的注释：三份用户日志 = 三种坏法，全都逃过了 find_spec ✗）
     _st_ok, _st_fails, _st_raw = env_selftest(vpy, logf)
@@ -13634,6 +13725,8 @@ def fix_cpu_torch(vpy, kdir, logf=print):
     logf("[训练] 检测到 CPU 版 torch，开始自动重装 cu128 版 PyTorch（约 3.3GB，国内镜像，断点续传，可随时点停止）…")
     try:
         _preinstall_torch(vpy, kdir, logf=logf, label="Kohya")
+    except StopRequested:
+        raise
     except Exception as e:
         return False, f"cu128 PyTorch 自动重装失败：{e}（无需开代理，请稍后重试；已下载缓存支持断点续传）"
     _bk = detect_torch_backend(vpy)
@@ -14032,29 +14125,29 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 "请按「使用说明」的 AMD 章节配置环境，或在界面关闭 AMD 兼容模式。" % (_bk or "未知"))
         logf("[训练] AMD 兼容模式（实验性）：torch 后端 = %s，参数已自动适配" % _bk)
     else:
-        # 自愈：训练前检测 torch 后端。CPU 版 torch（CUDA 不可用）会让训练全程 CPU 极慢。
-        # GUI 已在训练前弹窗确认（params["fix_cpu_torch"]），确认则自动重装 cu128；否则仅警告。
-        try:
-            _bk = detect_torch_backend(vpy)
-            if _bk == "cpu":
-                if params.get("fix_cpu_torch"):
-                    _ok, _msg = fix_cpu_torch(vpy, kdir, logf)
-                    if not _ok:
-                        raise RuntimeError(_msg)
-                else:
-                    logf("[训练] ⚠ 检测到当前 torch 为 CPU 版（CUDA 不可用）：训练会全程 CPU 且极慢，看起来像卡住。"
-                         "建议重跑【一键安装】安装 cu128 版 PyTorch，或检查 NVIDIA 驱动后重试。")
-            elif _bk is None:
-                logf("[训练] ⚠ 无法读取训练环境 torch 状态；若长时间无训练进度，请查看上方日志。")
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
+        info = _venv_torch_info(vpy)
+        if info and not info.get("available"):
+            if info.get("hip"):
+                raise RuntimeError("当前为 ROCm PyTorch，请启用 AMD 兼容模式并检查 ROCm 环境。")
+            if info.get("cuda"):
+                raise RuntimeError("当前已安装 CUDA 版 PyTorch，但无法使用显卡。请检查 NVIDIA 驱动及显卡状态后重试；无需反复下载 PyTorch。")
+            if params.get("fix_cpu_torch") and detect_gpu_vendor() == "nvidia":
+                _ok, _msg = fix_cpu_torch(vpy, kdir, logf)
+                if not _ok:
+                    raise RuntimeError(_msg)
+            else:
+                logf("[训练] 当前 PyTorch 不支持 CUDA，正在检查训练环境；若无法自动修复，请重跑【② 安装训练内核】。")
+        elif not info:
+            logf("[训练] 无法读取 PyTorch 构建，正在检查训练环境。")
     # 自愈：确保训练环境（AMD=venv_amd，普通=kohya venv）具备完整运行时依赖
     # （PIL/numpy/transformers/huggingface_hub/toml 等，缺了会导致分词器缓存、
     #  Anima/FLUX 组件下载、sd-scripts 训练报 ModuleNotFoundError）
     if not _ensure_kohya_deps(vpy, kdir, logf):
         raise RuntimeError("训练环境依赖补装失败（网络不稳），请检查网络后重试，或重跑【② 安装训练内核 / AMD 环境引导】")
+    if not amd_mode and detect_gpu_vendor() == "nvidia":
+        # 环境补装结束后确认 GPU 可用，不让 CPU 训练伪装成启动成功。
+        if detect_torch_backend(vpy) != "cuda":
+            raise RuntimeError("训练环境的 CUDA 仍不可用。请重跑【② 安装训练内核】；若已安装 CUDA 版 PyTorch，请检查 NVIDIA 驱动。")
     if amd_mode:
         # AMD 版 PyTorch 的 torch.distributed 可能残缺（收尾崩、最终模型不保存），自动补兼容层
         try:

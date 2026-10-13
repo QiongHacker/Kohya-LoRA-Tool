@@ -18,6 +18,7 @@ import uuid
 import traceback
 from pathlib import Path
 
+from gui.lora_workbench_bridge import LoRAWorkbenchBridge
 from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bundle
 from kohya_core.training_history import TrainingHistory
 from kohya_core.training_media import sample_files, image_preview, is_sample
@@ -111,7 +112,7 @@ def _ensure_web_asset_mimetypes() -> None:
     mimetypes.add_type("text/css", ".css", strict=True)
 
 
-class ModernUIBridge:
+class ModernUIBridge(LoRAWorkbenchBridge):
     """Expose a small JSON-shaped interface to the Vue frontend."""
 
     def __init__(self, core, engine_groups=(), short_mode_labels=None):
@@ -903,7 +904,7 @@ class ModernUIBridge:
             cancel_event.set()
         elif downloader is not None:
             downloader.cancel()
-        elif kind in ("setup", "training", "preprocess", "caption", "prompt_reverse", "prompt_reverse_model"):
+        elif kind in ("setup", "training", "preprocess", "caption", "prompt_reverse", "prompt_reverse_model", "lora_workbench"):
             self.core.stop_active_process()
         return {"ok": True}
 

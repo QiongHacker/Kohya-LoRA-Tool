@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import ModelTrainingChooser from './components/ModelTrainingChooser.vue'
 import { importedMultiSettings } from './useMultiCharacter'
 import catalogData from '../../kohya_core/model_catalog.json'
@@ -19,6 +19,7 @@ import TrainingHistoryDialog from './components/TrainingHistoryDialog.vue'
 import ModelDownloadDialog from './components/ModelDownloadDialog.vue'
 import EnvironmentDialog from './components/EnvironmentDialog.vue'
 import PromptReverseDialog from './components/PromptReverseDialog.vue'
+const LoRAWorkbench = defineAsyncComponent(() => import('./components/LoRAWorkbench.vue'))
 import ModernHelpDialog from './components/ModernHelpDialog.vue'
 import AppearanceDialog from './components/AppearanceDialog.vue'
 import {
@@ -73,6 +74,8 @@ const workspaceProject = ref<ProjectCard | null>(null)
 const workspaceConfig = ref<ProjectConfig | null>(null)
 const assistantOpen = ref(false)
 const promptReverseOpen = ref(false)
+const loraWorkbenchOpen = ref(false)
+const loraWorkbenchMounted = ref(false)
 const agentBusy = ref(false)
 const previewConfigs = ref<Record<string, ProjectConfig>>({})
 const modeWorkspace = ref<ModeWorkspaceData | null>(null)
@@ -1019,6 +1022,7 @@ function logExportCompleted(path: string) {
 }
 
 async function runAction(action: string, projectName?: string) {
+  if (action === 'lora_workbench') { loraWorkbenchMounted.value = true; loraWorkbenchOpen.value = true; return }
   if (action === 'prompt_reverse') { promptReverseOpen.value = true; return }
   if (action === 'export_log' || action === 'export_diagnostics') { await exportLog(action, projectName); return }
   if (action === 'train') {
@@ -1587,6 +1591,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       @changed="refreshGuideState"
       @notify="showToast"
     />
+    <LoRAWorkbench v-if="loraWorkbenchMounted" :open="loraWorkbenchOpen" :desktop="!preview" :project-name="workspaceProject?.name || ''" @close="loraWorkbenchOpen = false" @notify="showToast" @environment="loraWorkbenchOpen = false; setupAction = 'cmd_install_fizgig'; setupDialogOpen = true" />
     <PromptReverseDialog :open="promptReverseOpen" :desktop="!preview" @close="promptReverseOpen = false" @notify="showToast" />
     <EnvironmentDialog
       :open="envDialogOpen"

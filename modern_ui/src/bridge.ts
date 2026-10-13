@@ -174,6 +174,24 @@ export interface AgentRun {
   events: Array<{ kind: string; title: string; time: number; result: unknown }>;
 }
 
+export interface LoRABlockGroup { label: string; blocks: Array<{ id: string; label: string; modules: number }> }
+export interface LoRAInfo { source: string; name: string; fingerprint: string; family: string; family_label: string; bytes: number; ranks: number[]; groups: LoRABlockGroup[]; pairs: number; mapped_pairs: number; warnings: string[]; profile_windows?: Array<{ id: string; label: string; blocks: string[] }>; can_preview: boolean; can_compress: boolean }
+export interface LoRAPreview { exact_attention?: boolean; dit: string; vae: string; te: string; prompt: string; negative: string; seed: number; width: number; height: number; steps: number; cfg: number; strength: number; precision: string; swap: number }
+export interface LoRAWorkbenchOptions { source: string; family: string; fingerprint?: string; blocks?: Record<string, number>; rank?: number; preview?: LoRAPreview; profile?: LoRAProfileConfig; explore?: LoRAExploreConfig }
+export interface LoRAWeightAnalysis { blocks: Record<string, { norm: number; retained: Record<string, number> }>; max_rank: number; modules: number; rank_for: Record<string, number> }
+export interface LoRAProfileConfig { class_prompt: string; references: string[] }
+export interface LoRAProfilePicture { name: string; thumbnail: string; blocks?: Record<string, number> }
+export interface LoRAProfileBaseline { task_id: string; name: string; label: string; fingerprint: string; blocks: Record<string, number>; recipe: LoRAPreview }
+export interface LoRAProfileWindow { id: string; label: string; blocks: string[]; tag: string; text: string; alone_change: number | null; removed_change: number | null; likeness_share: number | null; bleed_share: number | null; alone: LoRAProfilePicture; removed: LoRAProfilePicture; class_alone: LoRAProfilePicture | null }
+export interface LoRAProfile { mode: string; scope: string; windows: LoRAProfileWindow[]; renders: number; baseline: LoRAProfilePicture; off: LoRAProfilePicture; class_baseline: LoRAProfilePicture | null; class_off: LoRAProfilePicture | null; suggested_blocks: Record<string, number>; suggestion_count: number; warnings: string[]; class_prompt: string; references: string[] }
+export interface LoRAPreset { id: string; name: string; family: string; block_ids: string[]; fingerprint: string; source_name: string; kernel: string; created_at: string; blocks: Record<string, number> }
+export interface LoRAExploreState { strength: number; enabled: boolean }
+export interface LoRAExploreConfig { state?: Record<string, LoRAExploreState>; intensity: number; structure: number; mutations: number; mutation_seed: number; frozen: string[]; last_pick: string[] }
+export interface LoRAExploreVariant { state: Record<string, LoRAExploreState>; name: string; label: string; blocks: Record<string, number>; changed: string[] }
+export interface LoRAExploration { config: LoRAExploreConfig; variants: LoRAExploreVariant[]; kernel: string }
+export interface LoRAWorkbenchReport { ok: boolean; action: string; error?: string; info: LoRAInfo; images?: Array<{ name: string; label: string }>; recipe?: LoRAPreview; blocks?: Record<string, number>; output?: string; output_bytes?: number; compression?: { rank: number; mean_energy: number }; analysis?: LoRAWeightAnalysis; profile?: LoRAProfile; profile_images?: Array<{ name: string; label: string }>; exploration?: LoRAExploration }
+export interface LoRAWorkbenchTask { id: string; status: string; message: string; progress: number | null }
+
 export interface DesktopApi {
   report_ui_startup(stage: string, detail?: string): Promise<{ ok: boolean }>
   open_ui_startup_report(): Promise<{ ok: boolean; error?: string; path?: string }>
@@ -186,6 +204,14 @@ export interface DesktopApi {
   control_agent(id: string, action: 'pause' | 'resume' | 'takeover'): Promise<{ ok: boolean; error?: string }>
   pick_agent_path(id: string, kind: 'folder' | 'model', path?: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
   stop_agent(id: string, stop_task: boolean): Promise<{ ok: boolean; error?: string }>
+  get_lora_workbench(project_name?: string, family?: string): Promise<{ ok: boolean; error?: string; ready: boolean; reason: string; families: Record<string, string>; saved: LoRAWorkbenchOptions & { last_task?: string; last_profile_task?: string; last_explore_task?: string; profile_explore_baseline?: LoRAProfileBaseline }; defaults: { dit: string; vae: string; te: string }; family: string; recent: Array<{ name: string; path: string }>; task?: LoRAWorkbenchTask | null }>
+  use_lora_workbench_profile_baseline(task_id: string, name: string, fingerprint: string, explore: LoRAExploreConfig): Promise<{ ok: boolean; error?: string; baseline?: LoRAProfileBaseline; explore?: LoRAExploreConfig; data_url?: string }>
+  get_lora_workbench_presets(): Promise<{ ok: boolean; error?: string; presets?: LoRAPreset[] }>
+  save_lora_workbench_preset(name: string, task_id: string, blocks: Record<string, number>): Promise<{ ok: boolean; error?: string; presets?: LoRAPreset[]; id?: string }>
+  delete_lora_workbench_preset(preset_id: string): Promise<{ ok: boolean; error?: string; presets?: LoRAPreset[] }>
+  start_lora_workbench(action: 'inspect' | 'analyze' | 'profile' | 'preview' | 'explore' | 'export' | 'compress', options: LoRAWorkbenchOptions): Promise<{ ok: boolean; error?: string; task_id?: string; cancelled?: boolean }>
+  get_lora_workbench_result(task_id: string): Promise<{ ok: boolean; error?: string; task?: LoRAWorkbenchTask | null; report?: LoRAWorkbenchReport | null }>
+  get_lora_workbench_image(task_id: string, name: string): Promise<{ ok: boolean; error?: string; data_url?: string }>
   start_prompt_reverse(options: { path: string; method: 'natural' | 'wd14' | 'ram' | 'qwen_vl' | 'pixai'; language: 'zh' | 'en'; length: 'brief' | 'detailed'; wd14_model: string; threshold: number; allow_remote: boolean; device?: 'auto' | 'cpu'; pixai_character?: boolean; pixai_copyright?: boolean; pixai_style?: boolean; pixai_threshold?: string | number }): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_prompt_reverse(task_id?: string): Promise<{ ok: boolean; task_id: string; report?: PromptReverseReport | null; task?: { id: string; kind?: string; model_key?: 'ram' | 'qwen_vl' | 'pixai'; status: string; message: string; detail: string; progress: number | null } | null }>
   get_prompt_reverse_model(model?: 'ram' | 'qwen_vl' | 'pixai'): Promise<{ ok: boolean; ready?: boolean; name?: string; directory?: string; size_bytes?: number; language?: string; error?: string }>
