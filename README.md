@@ -42,8 +42,8 @@
 |---|---|---|
 | **kohya / sd-scripts** | SD1.5、SDXL、FLUX.1、Anima | 图片 |
 | **musubi-tuner** | Krea 2、FLUX.2 | 图片 |
-| **AI Toolkit** | Krea2、Qwen-Image、Z-Image；MiniMax H3 | 图片；H3 视频 |
-| **Fizgig** | Krea2、FLUX.2 Klein 9B、Qwen-Image-2.1、MiniMax H3；SDXL、标准 Anima（实验性） | 图片；H3 图片 / 视频 / 音频 |
+| **AI Toolkit** | Krea2、Qwen-Image、Z-Image Base；MiniMax H3 | 图片；H3 视频 |
+| **Fizgig** | Krea2、FLUX.2 Klein 9B、Qwen-Image-2.1、Z-Image Turbo、MiniMax H3；SDXL、标准 Anima（实验性） | 图片；H3 图片 / 视频 / 音频 |
 
 **Windows 10 / 11，NVIDIA 为主要支持路径。** AMD 通过同一模型入口优先推荐已适配的 Fizgig ROCm 路径；SDXL / Anima 仍为实验性支持。Klein 4B 走 Musubi，Anima 2.9B / 40 层走 Kohya。显存需求和采样稳定性取决于具体模型、引擎与配置；第三方底模需匹配对应架构。
 
@@ -64,7 +64,7 @@
 
 定义变化方向，选择文字指导或配对图片，先跑 128 步试训，再查看固定条件下的权重对照。支持检查点选择、效果评估与 LoRA 导出；0 权重使用底模基线。
 
-首版为 Fizgig v7.0.1 实验性功能，暂不支持 Anima 2.9B / 40 层和滑块续训。效果取决于底模、描述与数据，需要检查目标变化和主体保持。
+基于 Fizgig 标准接口的实验性功能，暂不支持 Anima 2.9B / 40 层和滑块续训。效果取决于底模、描述与数据，需要检查目标变化和主体保持。
 
 ## AI 助手怎么用
 

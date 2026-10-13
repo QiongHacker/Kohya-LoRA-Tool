@@ -70,6 +70,7 @@ a = Analysis(
         'kohya_core.tagging', 'kohya_core.tagging.dictionary',
         'kohya_core.tagging.normalize', 'kohya_core.tagging.translate',
         'kohya_core.tagging.complete',
+        'kohya_core.amd_runtime', 'kohya_core.zimage_fizgig',
         'kohya_core.anima_ckpt',
         'kohya_core.anima_loader',
         'kohya_core.captioning', 'kohya_core.prompt_reverse', 'kohya_core.ram_caption',

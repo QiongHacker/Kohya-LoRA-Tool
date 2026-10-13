@@ -7,7 +7,7 @@ import time
 import uuid
 from . import slider_project as schema
 from . import slider_dataset as dataset
-from .fizgig_engine import VERSION, COMMIT, runtime, source_version, _env, _write
+from .fizgig_engine import VERSION, COMMIT, source_commit, SUPPORTED_V7, runtime, source_version, _env, _write
 from .fizgig_adapter import models, _validate, _helper_configs
 
 
@@ -18,8 +18,8 @@ def prepare(core, config, name):
     if not settings["neutral"]: raise ValueError("请填写共有画面描述。")
     if settings["source"] == "text": schema.prompts(settings)
     validations = schema.validation_prompts(settings)
-    record = runtime(core, VERSION)
-    if not Path(record["python"]).is_file() or source_version(record["source"]) != VERSION:
+    record = runtime(core, params["fizgig_version"])
+    if not Path(record["python"]).is_file() or source_version(record["source"]) != record["version"] or record["version"] not in SUPPORTED_V7:
         raise ValueError("滑块训练需要 Fizgig v7.0.1。请先安装 / 更新 Fizgig 引擎，原有项目仍使用原版本。")
     family = params["base_type"]
     files = models(core, family, params)
@@ -38,7 +38,7 @@ def prepare(core, config, name):
     if settings["preset"] != "trial" and scanned and len(scanned["train"]) < 4:
         warnings.append("正式训练的数据很少，请优先补充不同构图的对照；增加步数不能替代样本多样性。")
     return {"ok": True, "plan": dict(project_name=name, mode=params["mode"], mode_label="概念滑块 LoRA",
-        training_kind="slider", training_engine="fizgig", engine_label="Fizgig v7.0.1 · 滑块训练",
+        training_kind="slider", training_engine="fizgig", engine_label="Fizgig %s · 滑块训练" % record["version"],
         model_label=family.upper() if family == "sdxl" else "Anima · 标准 28 层", model_path=files["dit"],
         model_size="", model_download_required=False, raw_dir=settings["positive_dir"],
         image_count=len(scanned["train"]) if scanned else run_schedule["items"],
@@ -66,14 +66,14 @@ def train(core, config, name, logf=print, progress=None):
     params = schema.parameters(config, name)
     settings = params["slider"]
     family = params["base_type"]
-    record = runtime(core, VERSION)
+    record = runtime(core, params["fizgig_version"])
     files = models(core, family, params)
     if family == "anima":
         from .anima_ckpt import resolve_train_base
         files["dit"], _ = resolve_train_base(files["dit"], logf=logf)
     core.check_stop()
     recipe = dict(settings=settings, family=family, files=files, schedule=plan["slider_schedule"],
-                  multipliers=schema.multipliers(settings), commit=COMMIT, backend_version=1,
+                  multipliers=schema.multipliers(settings), commit=source_commit(record["version"]), backend_version=1,
                   validation_prompts=schema.validation_prompts(settings), holdout=[])
     run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     output = Path(core.data_sub("output", name, "slider_runs", run_id)); output.mkdir(parents=True, exist_ok=True)
@@ -123,7 +123,7 @@ def train(core, config, name, logf=print, progress=None):
             if core.run_stream(cmd, cwd=record["source"], env=env, logf=monitored): raise RuntimeError("滑块图片对缓存失败，请查看训练日志。")
     runner = Path(core.KIT_DIR) / "training_backends/sliders/run.py"
     if not runner.is_file(): raise RuntimeError("安装包缺少滑块训练脚本，请使用完整安装包。")
-    core._record_effective(training_kind="slider", engine="Fizgig", engine_version=VERSION, family=family,
+    core._record_effective(training_kind="slider", engine="Fizgig", engine_version=record["version"], family=family,
         total_steps=recipe["schedule"]["total_steps"], epochs=recipe["schedule"]["epochs"], rank=settings["rank"],
         alpha=settings["alpha"], optimizer="adamw", batch_size=1, unet_lr=settings["learning_rate"],
         train_text_encoder=False, resolution=settings["resolution"], quant_mode=settings["precision"],

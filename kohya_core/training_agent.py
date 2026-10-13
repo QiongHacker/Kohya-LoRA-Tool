@@ -336,7 +336,7 @@ class TrainingAgent:
         params = training_params(self.bridge.core, config, name)
         allowed = {key: LABELS[key] for key in LABELS if self.bridge.core.param_supports(key, mode)}
         quant = list(getattr(self.bridge.core, 'QUANT_MODE_OPTIONS', {}).get(mode, ()))
-        if params.get('fizgig_version') == 'v7.0.1':
+        if params.get('fizgig_version') in ('v7.0.1', 'v7.3.1'):
             quant = ['auto', 'int8', 'nf4', 'hqq'] if mode == 'h3_fz' else ['auto', 'bf16', 'int8', 'nf4']
             for key in ('optimizer', 'compile', 'global_pos', 'global_neg'):
                 if key in LABELS: allowed[key] = LABELS[key]
@@ -386,10 +386,10 @@ class TrainingAgent:
                  for mode in getattr(core, 'MODE_KEYS', ())]
         for row in modes:
             if row['mode'].endswith('_fz'):
-                row['new_project_version'] = 'v7.0.1'
+                row['new_project_version'] = 'v7.3.1'
                 row['quant_modes'] = ['auto', 'int8', 'nf4', 'hqq'] if row['mode'] == 'h3_fz' else ['auto', 'bf16', 'int8', 'nf4']
                 row['assistant_params'] += [key for key in ('optimizer', 'compile', 'global_pos', 'global_neg') if key in LABELS and key not in row['assistant_params']]
-                row['note'] = '新项目使用 v7.0.1；旧项目按 project 中的版本与量化选项处理。'
+                row['note'] = '新项目使用 v7.3.1；旧项目按 project 中的版本与量化选项处理。'
         with self.bridge._task_lock:
             task = self.bridge._task or {}
             task_state = {key: task.get(key) for key in ('id', 'kind', 'status', 'key', 'message')}
@@ -1226,7 +1226,7 @@ class TrainingAgent:
             actions = {'character': 'cmd_install', 'style': 'cmd_install', 'concept': 'cmd_install',
                        'krea2': 'cmd_install_musubi', 'flux2': 'cmd_install_musubi',
                        'video': 'cmd_install_at', 'krea2_at': 'cmd_install_at', 'qwen_image': 'cmd_install_at', 'zimage': 'cmd_install_at',
-                       'krea2_fz': 'cmd_install_fizgig', 'flux2_fz': 'cmd_install_fizgig', 'qwen21_fz': 'cmd_install_fizgig', 'h3_fz': 'cmd_install_fizgig', 'anima_fz': 'cmd_install_fizgig', 'sdxl_fz': 'cmd_install_fizgig'}
+                       'krea2_fz': 'cmd_install_fizgig', 'flux2_fz': 'cmd_install_fizgig', 'qwen21_fz': 'cmd_install_fizgig', 'h3_fz': 'cmd_install_fizgig', 'anima_fz': 'cmd_install_fizgig', 'sdxl_fz': 'cmd_install_fizgig', 'zimage_fz': 'cmd_install_fizgig'}
             action = 'cmd_env' if target == 'prerequisites' else actions.get(mode) if target == 'engine' else None
             if not action:
                 raise CaptionError('环境修复目标无效。')

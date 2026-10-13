@@ -92,10 +92,12 @@ def parameters(config, name):
         raise ValueError("滑块首批入口为 SDXL / 标准 28 层 Anima（Fizgig v7.0.1）。")
     params = config.get("params") or {}
     if not isinstance(params, dict): raise ValueError("训练参数需要为对象。")
-    if params.get("fizgig_version", "v7.0.1") != "v7.0.1":
+    from .fizgig_engine import SUPPORTED_V7
+    version = params.get("fizgig_version", "v7.0.1")
+    if version not in SUPPORTED_V7:
         raise ValueError("滑块需要 Fizgig v7.0.1，不能使用旧版本入口。")
     return dict(training_kind="slider", slider=settings, project=name, mode=family + "_fz", base_type=family,
-                fizgig_version="v7.0.1", base_model=str(config.get("base_model") or ""),
+                fizgig_version=version, base_model=str(config.get("base_model") or ""),
                 raw_dir=settings["positive_dir"], rank=settings["rank"], alpha=settings["alpha"],
                 unet_lr=settings["learning_rate"], te_lr="不参与训练", train_text_encoder=False,
                 resolution=settings["resolution"], quant_mode=settings["precision"], sample_seed=settings["seed"],

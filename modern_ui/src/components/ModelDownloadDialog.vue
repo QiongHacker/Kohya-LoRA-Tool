@@ -132,7 +132,9 @@ async function selectLocal(item: ModelDownloadItem, action: 'select' | 'default'
   try {
     const result = props.mode === 'krea2_fz'
       ? await api.select_krea2_component(props.projectName, item.key, action)
-      : await api.select_h3_component(props.projectName, item.key, action)
+      : props.mode === 'zimage_fz'
+         ? await api.select_zimage_fz_component(props.projectName, item.key, action === 'disable' ? 'default' : action)
+         : await api.select_h3_component(props.projectName, item.key, action)
     if (!result.ok) { error.value = result.error || '组件设置失败。'; return }
     if (result.cancelled) return
     await loadList()

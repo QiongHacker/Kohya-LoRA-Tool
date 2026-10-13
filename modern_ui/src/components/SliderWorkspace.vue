@@ -23,7 +23,7 @@ const kinds = [{ key: 'bidirectional', label: '双向变化', note: '正负权�
 const positiveLabel = computed(() => draft.purpose === 'reduce' ? '效果减弱图像' : draft.purpose === 'enhance' ? '效果增强图像' : '正向图像')
 const negativeLabel = computed(() => draft.purpose === 'bidirectional' ? '负向图像' : '基准图像')
 const patch = computed<ProjectConfig>(() => ({ training_kind: 'slider', base_model: base.value, unet_only: true,
-  slider: JSON.parse(JSON.stringify(draft)), params: { fizgig_version: 'v7.0.1' } }))
+  slider: JSON.parse(JSON.stringify(draft)), params: { fizgig_version: String(props.config?.params?.fizgig_version || 'v7.0.1') } }))
 const unsaved = computed(() => JSON.stringify(patch.value) !== saved.value)
 const requestedSteps = computed(() => draft.preset === 'trial' ? 128 : draft.preset === 'formal' ? 768 : draft.steps)
 const missing = computed(() => !base.value ? '请选择底模' : !draft.name.trim() ? '请填写滑块名称' : !draft.neutral.trim() ? '请填写基准提示词' :

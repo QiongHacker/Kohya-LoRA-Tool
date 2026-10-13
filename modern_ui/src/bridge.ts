@@ -285,6 +285,7 @@ export interface DesktopApi {
   cancel_task(task_id: string): Promise<{ ok: boolean; error?: string }>
   select_krea2_encoder(project_name: string, choice: Krea2EncoderChoice): Promise<{ ok: boolean; message?: string; error?: string }>
   select_krea2_component(project_name: string, key: string, action?: "select" | "default" | "disable"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
+  select_zimage_fz_component(project_name: string, key: string, action?: "select" | "default"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
   select_h3_component(project_name: string, key: string, action?: "select" | "default" | "disable"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
   get_model_downloads(mode: string, project_name?: string): Promise<ModelDownloadList>
   start_model_download(mode: string, key: string, project_name?: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
@@ -481,6 +482,8 @@ export interface ModeWorkspaceData {
   engine_update_available?: boolean
   fizgig_version?: string
   fizgig_versions?: string[]
+  fizgig_standard_versions?: string[]
+  zimage_components?: ModelDownloadList | null
   fizgig_target_version?: string
   model_choice?: ModelChoice
   krea2_components?: ModelDownloadList | null

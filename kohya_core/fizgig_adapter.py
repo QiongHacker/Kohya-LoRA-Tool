@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 import re
 import time
-from .fizgig_engine import VERSION, COMMIT, MIRROR, source_version, _env, _sha, _write
+from .fizgig_engine import VERSION, COMMIT, MIRROR, SUPPORTED_V7, source_commit, source_version, _env, _sha, _write
 
 FAMILIES = {"krea2_fz": "krea2", "flux2_fz": "klein", "qwen21_fz": "qwen_image21",
-            "h3_fz": "minimax", "anima_fz": "anima", "sdxl_fz": "sdxl"}
+            "h3_fz": "minimax", "anima_fz": "anima", "sdxl_fz": "sdxl", "zimage_fz": "zimage"}
 
 
 def models_dir(core, family):
@@ -19,6 +19,9 @@ def models_dir(core, family):
 
 def models(core, family, params=None):
     params = params or {}
+    if family == "zimage":
+        from .zimage_fizgig import files, settings
+        return files(core, settings(params))
     if family == "krea2":
         from .krea2_models import settings, encoder_key
         selection = settings(params)
@@ -60,6 +63,9 @@ def models(core, family, params=None):
 
 def missing(core, family, params=None):
     files = models(core, family, params)
+    if family == "zimage":
+        from .zimage_fizgig import missing as missing_zimage, settings
+        return missing_zimage(core, settings(params))
     if family == "sdxl":
         # A complete SDXL checkpoint contains the UNet, both text encoders and VAE.
         checkpoint = files.get("dit")
@@ -102,13 +108,16 @@ def _helper_configs(core, family, logf):
 
 def _validate(core, family, files):
     required = ("dit", "te", "vae")
-    if family == "qwen_image21": required += ("training_adapter",)
+    if family in ("qwen_image21", "zimage"): required += ("training_adapter",)
     for key in required:
         path = files.get(key)
         if not path or not Path(path).is_file(): raise RuntimeError("缺少 %s 的 %s 模型，请先准备模型文件。" % (family, key))
         if not core._safetensors_complete(path):
             raise RuntimeError("模型文件不完整或损坏：%s。请重新下载该文件。" % path)
     validate_base(core, family, files["dit"])
+    if family == "zimage":
+        from .zimage_fizgig import validate
+        for key in required: validate(files[key], key)
     if family == "krea2" and core._safetensors_is_prequantized(files["dit"]):
         raise RuntimeError("Krea2 需要 bf16 RAW 底模；推理用预量化文件不能直接用于训练。")
 
@@ -116,6 +125,9 @@ def _validate(core, family, files):
 def validate_base(core, family, checkpoint):
     if not core._safetensors_complete(checkpoint):
         raise RuntimeError("模型文件不完整或损坏，请重新下载。")
+    if family == "zimage":
+        from .zimage_fizgig import validate
+        validate(checkpoint, "dit")
     if family == "minimax":
         from .h3_models import validate
         validate(checkpoint, "dit")
@@ -125,12 +137,12 @@ def validate_base(core, family, checkpoint):
         keys = core._safetensors_keys(checkpoint)
         blocks = {int(m.group(1)) for k in keys if (m := re.search(r"(?:^|\.)blocks\.(\d+)\.", k))}
         if blocks != set(range(28)):
-            raise RuntimeError("Fizgig v7.0.1 仅支持标准 28 层 Anima；当前检测到 %s 层。2.9B / 40 层请选 Kohya 引擎。" % len(blocks))
+            raise RuntimeError("Fizgig 仅支持标准 28 层 Anima；当前检测到 %s 层。2.9B / 40 层请选 Kohya 引擎。" % len(blocks))
     if family == "sdxl" and core.detect_base_type(checkpoint) != "sdxl":
         raise RuntimeError("Fizgig SDXL 需要包含 UNet、双 CLIP 和 VAE 的完整 SDXL safetensors 底模。")
 
 
-def _cache_identity(core, family, files, subsets, resolution):
+def _cache_identity(core, family, files, subsets, resolution, commit=COMMIT):
     def stat(path):
         p = Path(path); st = p.stat()
         return [str(p.resolve()), st.st_size, st.st_mtime_ns]
@@ -140,14 +152,18 @@ def _cache_identity(core, family, files, subsets, resolution):
         for path in sorted(Path(folder).iterdir()):
             if path.is_file() and path.suffix.lower() in core.FIZGIG_IMAGE_EXTS | {".mp4", ".wav", ".mp3", ".flac", ".m4a", ".txt"}:
                 images.append(stat(path))
-    signature = {"commit": COMMIT, "family": family, "resolution": resolution, "models": assets, "files": images}
+    signature = {"commit": commit, "family": family, "resolution": resolution, "models": assets, "files": images}
     return hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:20], signature
 
 
 def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress):
-    if source_version(record["source"]) != VERSION or not Path(record["python"]).is_file():
-        raise RuntimeError("此项目选择 Fizgig v7.0.1，请先安装或更新引擎。")
+    version = record["version"]
+    commit = source_commit(version)
+    if source_version(record["source"]) != version or version not in SUPPORTED_V7 or not Path(record["python"]).is_file():
+        raise RuntimeError("此项目选择 Fizgig %s，请先安装或更新引擎。" % version)
     family = FAMILIES[mode]
+    if family == "zimage" and version != VERSION:
+        raise RuntimeError("Z-Image Turbo 需要 Fizgig %s，请更新引擎。" % VERSION)
     if family == "krea2":
         from .krea2_models import settings, validate_selected
         validate_selected(core, settings(params))
@@ -217,11 +233,14 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     output = Path(core.data_sub("output", proj)); output.mkdir(parents=True, exist_ok=True)
     output_name = core._sanitize_dirname(params.get("output_name")) or core.output_name_for(mode, params.get("style_preset"))
     model_path = Path(files["dit"])
-    run_identity = {"version": VERSION, "family": family, "commit": COMMIT,
+    run_identity = {"version": version, "family": family, "commit": commit,
                     "model": str(model_path.resolve()), "model_bytes": model_path.stat().st_size,
                     "model_mtime_ns": model_path.stat().st_mtime_ns,
                     "rank": rank, "alpha": alpha, "optimizer": optimizer,
                     "learning_rate": lr, "adaptive_lr": list(adaptive) if adaptive else None}
+    if family == "zimage":
+        adapter_path = Path(files["training_adapter"])
+        run_identity["training_adapter"] = [str(adapter_path.resolve()), adapter_path.stat().st_size, adapter_path.stat().st_mtime_ns]
     marker = output / (output_name + ".fizgig-runtime.json")
     if resume_from:
         state_file = Path(resume_from) / "training_state.json"
@@ -238,6 +257,9 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if frames != 1 and (frames < 22 or (frames - 5) % 17):
         raise ValueError("H3 视频帧数需要为 22、39、56、73 等（17n + 5）。")
     env = _env(core, record)
+    if record.get("backend") == "amd-rocm":
+        ok, detail = core._fizgig_amd_preflight(record["python"], record["source"], env, logf, "Fizgig")
+        if not ok: raise RuntimeError(detail)
     env["FIZGIG_KOHYA_RUNTIME"] = json.dumps(run_identity)
     env["FIZGIG_KOHYA_TARGET_EPOCHS"] = str(epochs)
     helper = _helper_configs(core, family, logf)
@@ -248,7 +270,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         if family == "sdxl": env["FIZGIG_SDXL_CONFIG_DIR"] = folder
     if family == "qwen_image21":
         env["FIZGIG_QWEN21_PROCESSOR_DIR"] = str(Path(core._ensure_at_image_qwen21_assets(logf)) / "processor")
-    fingerprint, identity = _cache_identity(core, family, files, subsets, resolution)
+    fingerprint, identity = _cache_identity(core, family, files, subsets, resolution, commit)
     cache = Path(core.data_sub("dataset", proj, "fizgig_v7_cache", family, fingerprint))
     cache.mkdir(parents=True, exist_ok=True)
     _write(cache / "identity.json", identity)
@@ -257,7 +279,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     source, python = record["source"], record["python"]
     for stage, key in (("latents", "vae"), ("text", "te")):
         core.check_stop()
-        logf("[Fizgig %s · %s] 缓存 %s；相同模型、分辨率和素材才复用缓存。" % (VERSION, family, stage))
+        logf("[Fizgig %s · %s] 缓存 %s；相同模型、分辨率和素材才复用缓存。" % (version, family, stage))
         cmd = [python, str(Path(source) / "src/fizgig/families/cache.py"), "--family", family,
                "--stage", stage, "--dataset_config", str(config), "--model", files[key],
                "--skip_existing", "--batch_size", "1", "--num_workers", "2"]
@@ -299,11 +321,11 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         positive = str(params.get("global_pos") or "").strip()
         prompt_lines = [", ".join(filter(None, (positive, line.strip()))) for line in prompt.splitlines() if line.strip()]
         prompts = cache / "sample_prompts.txt"; prompts.write_text("\n".join(prompt_lines) + "\n", encoding="utf-8")
-        steps, cfg = ((30, 4.5) if family == "anima" else (30, 3.0) if family == "sdxl" else (20, 3.5))
+        steps, cfg = ((30, 4.5) if family == "anima" else (30, 3.0) if family == "sdxl" else (8, 1.0) if family == "zimage" else (20, 3.5))
         cmd += ["--sample_prompts", str(prompts), "--sample_every_n_epochs", str(sample_epochs),
                 "--sample_width", str(resolution), "--sample_height", str(resolution),
                 "--sample_steps", str(steps), "--sample_cfg_scale", str(cfg),
-                "--sample_seed", str(core._sample_seed(params)), "--sample_negative", str(params.get("global_neg") or "")]
+                "--sample_seed", str(core._sample_seed(params)), "--sample_negative", str(params.get("global_neg") or "") if family != "zimage" else ""]
         if files.get("preview_checkpoint"): cmd += ["--preview_checkpoint", files["preview_checkpoint"]]
         if files.get("speed_lora"): cmd += ["--speed_lora", files["speed_lora"]]
         if family == "minimax":
@@ -312,7 +334,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         monitored("[Fizgig] 预览：每 %s 轮，%spx，%s 步，CFG %s；开始时不额外采样；最后一轮仅在满足间隔时采样。文件在项目 output 中。" % (sample_epochs, resolution, steps, cfg))
     for option in options: cmd += ["--family_option", option]
     _write(marker, run_identity)
-    core._record_effective(engine="Fizgig", engine_version=VERSION, family=family, network_type="lora",
+    core._record_effective(engine="Fizgig", engine_version=version, family=family, network_type="lora",
         rank=rank, alpha=alpha, epochs=epochs, unet_lr=lr, resolution=resolution, total_steps=total,
         train_text_encoder=False, te_lr="不参与训练", optimizer=optimizer, quant_mode=precision,
         blocks_to_swap=swap, batch_size=1, cache_dir=str(cache), sample_enabled=enabled,
@@ -320,7 +342,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         sample_at_first=False, sample_width=resolution if enabled else None,
         sample_height=resolution if enabled else None, sample_steps=steps if enabled else None,
         sample_cfg_scale=cfg if enabled else None, sample_at_end=False)
-    monitored("[Fizgig] %s · %s · 普通 LoRA；%s 个素材，%s 轮。" % (VERSION, family, count, epochs))
+    monitored("[Fizgig] %s · %s · 普通 LoRA；%s 个素材，%s 轮。" % (version, family, count, epochs))
     def runtime_log(line):
         text = str(line)
         planned = re.search(r"\[precision\] Auto plan: (bf16|int8|nf4|hqq), block swap (\d+)", text)

@@ -11,7 +11,7 @@
 | [RAM++](https://github.com/xinyu1205/recognize-anything) / [官方权重](https://huggingface.co/xinyu1205/recognize-anything-plus-model) | 可选下载的本地真实照片关键词模型（固定模型权重、推理源码、标签列表和 BERT 词表，逐文件 SHA256 校验；独立环境运行） | Apache-2.0；内含 Salesforce BERT/ViT 代码 BSD-3-Clause、Microsoft Swin 代码 MIT；原版权头与许可随源码保留 |
 | [PixAI Tagger v1.0](https://huggingface.co/pixai-labs/pixai-tagger-v1.0) | 可选二次元打标模型；训练与独立图片反推共用固定提交权重、配置及官方 tagger_pipeline.py，逐文件 SHA256 校验，独立环境运行。官方推理源码包含 SAM3 / ViTDet 与旋转位置编码来源说明，原文件保留这些说明。 | Apache-2.0（按模型仓库声明）；所含第三方实现遵循各自许可 |
 | [WD14 tagger](https://huggingface.co/SmilingWolf) | 人物模式自动打标（tag_images_by_wd14_tagger.py + wd-v1-4-moat-tagger-v2 模型） | 模型遵循其各自许可 |
-| [Fizgig](https://github.com/shootthesound/Fizgig) | 第四引擎（固定 v7.0.1；Krea2、Klein 9B、Qwen-Image-2.1、H3、实验性 Anima / SDXL 普通 LoRA 与概念滑块）| Apache-2.0 |
+| [Fizgig](https://github.com/shootthesound/Fizgig) | 第四引擎（固定 v7.3.1，兼容已有 v7.0.1；Krea2、Klein 9B、Qwen-Image-2.1、H3、Anima / SDXL / Z-Image Turbo 普通 LoRA 与概念滑块）| Apache-2.0；MiniMax 相关 ComfyUI 派生源码遵循 GPL-3.0，归档保留其版权头与许可 |
 | [comfyui-rocm](https://github.com/patientx/comfyui-rocm) | Fizgig 随包的 detect_gpu.py（AMD GPU 架构探测）| GPL-3.0 |
 | [ffdkj/Danbooru_Tag-Chinese-English-Translation-Table](https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table) | 内置离线中英词典主数据（每日更新 32.5 万条；收录 post_count≥30 词条） | 仓库未附明确开源许可证，仅内置离线查询 |
 | [byzod/a1111-sd-webui-tagcomplete-CN](https://github.com/byzod/a1111-sd-webui-tagcomplete-CN) | 离线词典常见词覆盖/补充（Tags-zh-full-pack.csv，整合自多个社区翻译） | MIT（沿用上游） |
@@ -23,7 +23,7 @@ Fizgig 的国内源码镜像保留固定提交的原始归档、许可证与声�
 
 分词器与配置来自 `circlestone-labs/Anima-Base-v1.0-Diffusers`、`stabilityai/stable-diffusion-xl-base-1.0`、`Qwen/Qwen3-8B` 和 `Qwen/Qwen3-VL-4B-Instruct` 的固定公开提交；来源、提交与文件 hash 记录在 `kohya_core/fizgig_helpers.json`。这些文件以及用户自行下载的模型分别遵循原仓库许可；镜像保留可获取的原仓库许可证。
 
-概念滑块复用 Fizgig v7.0.1 的文字 / 图片对正负倍率目标与原生 LoRA 导出；工具的独立子进程扩展增加固定条件权重对照、留出验证及方向元数据，不改写用户安装的上游训练源码。
+概念滑块复用项目选定 Fizgig 标准版本 的文字 / 图片对正负倍率目标与原生 LoRA 导出；工具的独立子进程扩展增加固定条件权重对照、留出验证及方向元数据，不改写用户安装的上游训练源码。
 
 ## 免责与合规
 
@@ -34,3 +34,7 @@ Fizgig 的国内源码镜像保留固定提交的原始归档、许可证与声�
 ## 本项目许可
 
 本项目本体（GUI、预处理封装、配置、文档）以 **MIT License** 开源，见 `LICENSE`。
+
+## Z-Image Turbo 组件
+
+Fizgig 的 Z-Image 实现改编自 Tongyi-MAI 的 Apache-2.0 参考源码，原始版权头和许可随固定引擎归档保留。Turbo 权重与 Qwen3-4B、FLUX.1 VAE 的单文件分发来自 `Comfy-Org/z_image_turbo`；训练适配器来自 `ShootTheSound/Fizgig-Z-Image-Turbo-Training-Adapter` 的固定提交。分词器与 VAE 配置来自 `Tongyi-MAI/Z-Image-Turbo` 的固定提交，来源与逐文件 hash 记录在 `kohya_core/fizgig_helpers.json`。模型、适配器分别遵循其上游仓库的许可；本工具仅按需下载，不随安装包附带大型模型权重。

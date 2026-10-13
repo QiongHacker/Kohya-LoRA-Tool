@@ -185,7 +185,7 @@ const catalog = computed<ModelCatalogData>(() => data.value?.model_catalog ?? { 
 const sidebarGroups = computed(() => [{label: '选择模型', modes: catalog.value.models.map(model => ({key: `model:${model.key}`, label: model.label}))}])
 function modelKeyForProject(project: ProjectCard): string {
   if (isKohyaProject(project)) return project.base_type
-  const modeMap: Record<string, string> = {anima_fz:'anima',sdxl_fz:'sdxl',krea2:'krea2',krea2_at:'krea2',krea2_fz:'krea2',flux2:'klein',flux2_fz:'klein',qwen_image:'qwen',qwen21_fz:'qwen',video:'h3',h3_fz:'h3',zimage:'zimage'}
+  const modeMap: Record<string, string> = {anima_fz:'anima',sdxl_fz:'sdxl',krea2:'krea2',krea2_at:'krea2',krea2_fz:'krea2',flux2:'klein',flux2_fz:'klein',qwen_image:'qwen',qwen21_fz:'qwen',video:'h3',h3_fz:'h3',zimage:'zimage',zimage_fz:'zimage'}
   return modeMap[project.mode] || project.mode
 }
 const selectedNavModel = computed(() => workspaceProject.value ? `model:${modelKeyForProject(workspaceProject.value)}` : selectedMode.value.startsWith('model:') ? selectedMode.value : `model:${firstEngineBaseTypeForSidebarMode(selectedMode.value) || modelKeyForProject({mode:selectedMode.value,base_type:'sdxl'} as ProjectCard)}`)
@@ -214,7 +214,7 @@ const guideSteps = computed(() => {
   if (workspaceKind.value !== 'slider' || !workspaceOpen.value) return modeWorkspace.value?.guide_steps ?? []
   const settings = workspaceConfig.value?.slider
   return [
-    {id:'fizgig', label:'① 训练环境', button:'配置', action:'cmd_install_fizgig', check:'fizgig', tip:'Fizgig v7.0.1。', done:Boolean(modeWorkspace.value?.engine_ready)},
+    {id:'fizgig', label:'① 训练环境', button:'配置', action:'cmd_install_fizgig', check:'fizgig', tip:'Fizgig v7.3.1。', done:Boolean(modeWorkspace.value?.engine_ready)},
     {id:'base', label:'② 选择底模', button:'选择', action:'cmd_pick_model_type', check:'base', tip:'SDXL / 标准 28 层 Anima。', done:Boolean(workspaceConfig.value?.base_model)},
     {id:'goal', label:'③ 训练目标', button:'设置', action:'cmd_pick_raw', check:'goal', tip:'设置目标与数据来源。', done:Boolean(settings?.name && settings?.neutral)},
   ]
@@ -346,6 +346,7 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     h3_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['fizgig', '② 安装第四引擎', '去安装', 'cmd_install_fizgig', '安装第四引擎 Fizgig。'], ['h3_fz_models', '③ 下载 H3 Fizgig 模型', '去下载', 'cmd_dl_h3_fz_models', '官方 int8 DiT、文本编码器、视频 VAE 必需；独立音频需音频 VAE，可选适配器和 Turbo LoRA。'], ['raw', '④ 选择混合媒体文件夹', '去选文件夹', 'cmd_pick_raw', '图片、视频和音频可放在同一目录或子目录；每个媒体都需要同名 .txt。']],
     video: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['h3_models', '③ 下载 H3 模型', '去下载', 'cmd_dl_h3_models', '检查 H3 主模型、文本编码器和视频 VAE。'], ['raw', '④ 选择视频文件夹', '去选文件夹', 'cmd_pick_raw', '选择包含 mp4 视频和同名 txt 字幕的数据集文件夹。']],
     qwen_image: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['at_model', '③ Qwen-Image 模型', '查看说明', 'cmd_at_model_help', '查看模型选择、显存和本地组件说明。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（15~30 张人物/风格图片）。']],
+    zimage_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '准备 Python / Git。'], ['fizgig', '② Fizgig 训练引擎', '去安装', 'cmd_install_fizgig', '安装 Fizgig v7.3.1。'], ['zimage_fz_models', '③ 模型与训练组件', '查看配置', 'cmd_dl_zimage_fz_models', '选择 Turbo 底模、Qwen3-4B、FLUX.1 VAE 和训练适配器。'], ['raw', '④ 图集与标签', '去选择', 'cmd_pick_raw', '选择训练图片文件夹。']],
     zimage: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['at_model', '③ Z-Image 模型', '查看说明', 'cmd_at_model_help', '查看模型选择、显存和本地组件说明。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（15~30 张人物/风格图片）。']],
   }
   const guide_steps = (demoGuideSpecs[mode] ?? []).map(([id, label, button, action, tip]) => ({ id, label, button, action, check: id, tip, done: false, persistent: mode === 'krea2_fz' && id === 'krea2_models' }))
@@ -379,7 +380,7 @@ function showToast(message: string) {
 function normalizeImportedConfig(raw: unknown): ProjectConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('配置文件内容不是有效的 JSON 对象。')
   const source = raw as Record<string, unknown>
-  const modes = new Set(['style', 'character', 'concept', 'krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz', 'flux2', 'flux2_fz', 'video', 'qwen_image', 'zimage'])
+  const modes = new Set(['style', 'character', 'concept', 'krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz', 'flux2', 'flux2_fz', 'video', 'qwen_image', 'zimage', 'zimage_fz'])
   const baseTypes = new Set(['sd15', 'sdxl', 'flux', 'anima'])
   const mode = typeof source.mode === 'string' && modes.has(source.mode) ? source.mode : 'character'
   const requestedBaseType = typeof source.base_type === 'string' ? source.base_type : ''
@@ -549,7 +550,7 @@ async function saveDialog() {
         previewConfigs.value = { ...previewConfigs.value, [name]: imported ?? {
           mode, base_type: baseType, at_sub_mode: createGoal.value === 'multi_character' ? 'character' : createGoal.value, model_choice: createChoice.value,
           training_kind: createGoal.value === 'multi_character' ? 'multi_character' : createGoal.value === 'slider' ? 'slider' : 'standard',
-          params: mode.endsWith('_fz') ? { fizgig_version: 'v7.0.1' } : {},
+          params: mode.endsWith('_fz') ? { fizgig_version: 'v7.3.1' } : {},
         } }
         data.value!.projects = [project, ...projects.value]
         appendLog(imported
@@ -940,7 +941,7 @@ async function onGuideAction(step: GuideStep) {
     setupDialogOpen.value = true
     return
   }
-  if (action === 'cmd_dl_krea2_models' || action === 'cmd_dl_flux2_models' || action === 'cmd_dl_h3_models' || action === 'cmd_dl_qwen21_fz_models' || action === 'cmd_dl_h3_fz_models' || action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models') {
+  if (action === 'cmd_dl_krea2_models' || action === 'cmd_dl_flux2_models' || action === 'cmd_dl_h3_models' || action === 'cmd_dl_qwen21_fz_models' || action === 'cmd_dl_h3_fz_models' || action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models' || action === 'cmd_dl_zimage_fz_models') {
     modelDialogOpen.value = true
     return
   }
@@ -1260,7 +1261,10 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
     setupDialogOpen.value = true
     return
   }
-  if (action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models') { modelDialogOpen.value=true; return }
+  if (action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models' || action === 'cmd_dl_zimage_fz_models') {
+    if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
+    modelDialogOpen.value=true; return
+  }
   if (action === 'training_history') { historyDialogOpen.value = true; return }
   if (!workspaceProject.value) return showToast('请先打开一个项目。')
   if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
@@ -1556,7 +1560,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <ModernTaskDialog
       ref="setupDialogRef"
       :open="setupDialogOpen"
-      :title="agentTaskTitle || (setupAction === 'video_caption' ? '视频 AI 自动描述' : setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v7.0.1' : '安装 Fizgig v7.0.1')"
+      :title="agentTaskTitle || (setupAction === 'video_caption' ? '视频 AI 自动描述' : setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v7.3.1' : '安装 Fizgig v7.3.1')"
       :action="setupAction"
       :description="setupAction === 'agent_task' ? '助手已启动此任务；这里显示软件的实际执行进度与日志。' : setupAction === 'video_caption' ? '为当前项目的视频生成英文描述，并保存为视频旁的同名 .txt 字幕。' : setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
       :project-name="workspaceProject?.name ?? ''"

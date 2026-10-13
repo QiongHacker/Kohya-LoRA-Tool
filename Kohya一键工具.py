@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.9"
+APP_VERSION = "0.19.10"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4423,6 +4423,8 @@ def _ai_toolkit_engine_status_impl():
     try:
         _is_amd = detect_gpu_vendor() == "amd"
         _env = _ai_toolkit_rocm_env(vpy) if _is_amd else build_direct_env()
+        if _env.get("KOHYA_ROCM_SELECTION_ERROR"):
+            return False, "ROCm 选卡失败：" + _env["KOHYA_ROCM_SELECTION_ERROR"], vpy
         _check_code = "import torch; from toolkit.config_modules import ModelConfig;"
         if _is_amd:
             _check_code += "from toolkit.util.quantize import get_qtype;"
@@ -4441,6 +4443,8 @@ def _ai_toolkit_torch_backend(vpy, at_dir=None, env=None):
     """Probe the AI Toolkit venv's actual accelerator backend without installing anything."""
     if not vpy or not os.path.isfile(vpy):
         return None, False, "未找到 AI Toolkit Python 环境。"
+    if env and env.get("KOHYA_ROCM_SELECTION_ERROR"):
+        return "rocm", False, "ROCm 选卡失败：" + env["KOHYA_ROCM_SELECTION_ERROR"]
     code = (
         "import torch\n"
         "print('TORCH=' + str(torch.__version__))\n"
@@ -5263,7 +5267,7 @@ def install_ai_toolkit_engine(logf=print):
 # NVIDIA 是主场（torch cu128）。做成双平台引擎：NVIDIA→CUDA 路径，AMD→ROCm 路径。
 # 模型 100% 复用 models/krea2/（raw / qwen_image_vae / qwen3vl_4b_bf16）。
 
-FIZGIG_VERSION = "v7.0.1"          # 钉死版本（Fizgig 更新节奏快，不追 master）
+FIZGIG_VERSION = "v7.3.1"          # 钉死版本（Fizgig 更新节奏快，不追 master）
 FIZGIG_SRC_MARKER = "src/fizgig/scripts/krea2_train.py"
 FIZGIG_SRC_REQUIRED = (
     "requirements.txt", FIZGIG_SRC_MARKER,
@@ -5334,8 +5338,8 @@ def _fizgig_marker_ok():
 
 
 def _fizgig_source_current(fz_dir):
-    from kohya_core.fizgig_engine import source_version, VERSION
-    return source_version(fz_dir) == VERSION or all(
+    from kohya_core.fizgig_engine import source_version, VERSION, SUPPORTED_V7
+    return source_version(fz_dir) in SUPPORTED_V7 or all(
         os.path.isfile(os.path.join(fz_dir, *rel.split("/"))) for rel in FIZGIG_SRC_REQUIRED)
 
 
@@ -5358,6 +5362,8 @@ def fizgig_engine_status():
         return False, "环境异常（%s）" % _vdetail, vpy, None
     try:
         _env = _fizgig_rocm_env(fz_dir, vpy) if detect_gpu_vendor() == "amd" else build_direct_env()
+        if _env.get("KOHYA_ROCM_SELECTION_ERROR"):
+            return False, "ROCm 选卡失败：" + _env["KOHYA_ROCM_SELECTION_ERROR"], vpy, "amd-rocm"
         r = subprocess.run(
             [vpy, "-c", "import torch; print(torch.__version__);"
                         "print('rocm=' + str(getattr(torch.version, 'rocm', '') or ''));"
@@ -5369,6 +5375,15 @@ def fizgig_engine_status():
             out = (r.stdout or "").splitlines()
             backend = "amd-rocm" if any(x.startswith(("rocm=", "hip=")) and x.split("=", 1)[1] for x in out) else "nvidia"
             if "ok=True" in (r.stdout or ""):
+                if backend == "amd-rocm" and FIZGIG_ROCM_TORCH_PIN in out:
+                    from kohya_core.amd_runtime import require_device_packages
+                    arch = _env.get("KOHYA_ROCM_DEVICE_ARCH")
+                    if not arch:
+                        return False, "ROCm 未返回训练显卡架构", vpy, backend
+                    try:
+                        require_device_packages(vpy, arch, _env)
+                    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                        return False, str(exc), vpy, backend
                 return True, ("已就绪（第四引擎 Fizgig · %s）" % ("AMD ROCm" if backend == "amd-rocm" else "NVIDIA")), vpy, backend
             return False, "环境异常（torch 未启用 GPU）", vpy, backend
         return False, "环境异常（import 失败）", vpy, None
@@ -5683,20 +5698,9 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
     os.makedirs(rocm_dir, exist_ok=True)
     env = _domestic_pip_env()
     rocm_ok = False
-    # ★★ 2026-09-23 关键修复：魔搭那套预存 wheel 是 **gfx1100 构建** ✗
-    #   证据（用户日志 KohyaLoRA_Frieren1_20260923，AMD RX 7800 XT 16G）：
-    #     · site-packages 里装的是 `rocm_sdk_device_gfx1100` + `amd_torch_device_gfx1100`
-    #       —— 而他的卡是 **gfx1101** ✗（魔搭 wheel 文件名里没有架构后缀，元数据固定拉 gfx1100 ✗）
-    #     · 装的时候"验证通过"✓ —— 因为那次只测 `_x @ _x`（走 hipBLAS，多架构包里都有 ✓）
-    #     · 训练第一步 VAE 卷积（走 **MIOpen**）就炸：
-    #       `torch.AcceleratorError: CUDA error: device kernel image is invalid`
-    #       / `hipErrorInvalidImage` ✗ —— MIOpen 的 kernel 是按架构分包的 ✗
-    #   期间用户被迫设 HSA_OVERRIDE_GFX_VERSION=11.0.0 去"伪装"成 gfx1100（老办法 ✗），
-    #   仍不奏效 —— 因为问题不是"没伪装"，而是**包本身就装错了架构** ✗
-    #   → 魔搭只留给 **gfx1100**（保留国内快速路径 ✓）；
-    #     其余架构（gfx1101 / gfx1102 / gfx103x / gfx12xx …）直接走 AMD 官方多架构源 ✗
-    #     （`torch[device-{arch}]` ✓ 会拉对应架构的 device 包 ✓）
-    #   ⚠️ 代价：非 gfx1100 用户失去国内镜像加速 ✗ → 但"**装对**"优先于"装快" ✓
+    # The cached wheels are generic ROCm components, not complete GPU installations.
+    # Keep the validated gfx1100 mirror route; other architectures use official extras.
+    # In both routes, GPU-specific binaries must be installed and verified separately.
     _mirror_ok = (arch == "gfx1100")
     if _mirror_ok:
         try:
@@ -5746,37 +5750,38 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
             # the GPU device packages or the pure Python runtime dependencies.
             logf(f"[{label}] 基础 ROCm 包已安装，补齐 {arch} 显卡组件（AMD 官方多架构源）…")
             if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                           "--index-url", FIZGIG_ROCM_INDEX,
+                           "--index-url", PIP_INDEX_PRIMARY, "--extra-index-url", PIP_INDEX_SECONDARY,
+                           "--extra-index-url", FIZGIG_ROCM_INDEX,
                            "torch[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCH_PIN),
                            "torchvision[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCHVISION_PIN),
-                           "rocm-sdk-devel==%s" % FIZGIG_ROCM_SDK_PIN],
+                           "rocm[libraries,devel,device-%s]==%s" % (arch, FIZGIG_ROCM_SDK_PIN)],
                           cwd=engine_dir, env=env, logf=logf) != 0:
                 check_stop()
                 raise RuntimeError("ROCm 显卡组件安装失败")
             check_stop()
             rocm_ok = True
-            logf(f"[{label}] AMD ROCm 栈安装成功（魔搭基础包 + AMD 官方显卡组件）。")
+            logf(f"[{label}] ROCm 安装命令已完成，正在核对显卡组件。")
         except StopRequested:
             raise
         except Exception as e:
             logf(f"[{label}] 魔搭 ROCm wheel 安装失败：{e}；回退 AMD nightly 直连…")
             rocm_ok = False
     else:
-        logf(f"[{label}] ⚠ 检测到 GPU 架构 {arch}：魔搭预存的 wheel 组是 **gfx1100 构建**，"
-             f"对 {arch} 会装成错的架构（训练时 VAE 卷积报 kernel image invalid），因此不用它 ✓")
-        logf(f"[{label}] 改用 AMD 官方多架构源：torch[device-{arch}] / torchvision[device-{arch}] ✓")
+        logf(f"[{label}] 检测到 GPU 架构 {arch}，通过 AMD 官方源安装对应的显卡组件。")
+        logf(f"[{label}] 常规 Python 依赖使用国内源，ROCm 组件使用固定版本。")
         logf(f"[{label}] 提示：官方源在国内可能较慢（数 GB，支持断点续传），下载期间请勿关闭软件。")
-        env = build_direct_env()
+        env = _domestic_pip_env()
 
     if not rocm_ok:
         for attempt in range(3):
             check_stop()
             try:
                 cmd = [vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                       "--index-url", FIZGIG_ROCM_INDEX,
+                       "--index-url", PIP_INDEX_PRIMARY, "--extra-index-url", PIP_INDEX_SECONDARY,
+                       "--extra-index-url", FIZGIG_ROCM_INDEX,
                        "torch[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCH_PIN),
                        "torchvision[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCHVISION_PIN),
-                       "rocm-sdk-devel==%s" % FIZGIG_ROCM_SDK_PIN]
+                       "rocm[libraries,devel,device-%s]==%s" % (arch, FIZGIG_ROCM_SDK_PIN)]
                 if run_stream(cmd, cwd=engine_dir, env=env, logf=logf) == 0:
                     rocm_ok = True
                     break
@@ -5798,6 +5803,22 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
         raise RuntimeError("AMD ROCm 栈安装失败（魔搭国内直连 + AMD nightly 均失败，详见上方日志）。")
     # ★ 2026-09-23：装完**当场核对**"装的架构"和"显卡架构"是否一致 ✗
     #   （RX 7800 XT 那位用户就是这么装错的 ✓ 而当时没人发现 ✗ —— 见上面注释）
+    from kohya_core.amd_runtime import device_package_report, require_device_packages
+    report = device_package_report(vpy, arch, env)
+    if report["issues"]:
+        # pip treats an existing dist-info as installed even if its DLLs were removed.
+        repairs = [report["required"][name].split(";", 1)[0].strip() for name in report["issues"]]
+        logf("[%s] 重新安装缺失或损坏的显卡组件：%s" % (label, "、".join(report["issues"])))
+        check_stop()
+        if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-deps", "--force-reinstall",
+                       "--retries", "10", "--timeout", "120", "--index-url", PIP_INDEX_PRIMARY,
+                       "--extra-index-url", PIP_INDEX_SECONDARY, "--extra-index-url", FIZGIG_ROCM_INDEX] + repairs,
+                      cwd=engine_dir, env=env, logf=logf) != 0:
+            check_stop()
+            raise RuntimeError("ROCm 显卡组件修复失败")
+        report = require_device_packages(vpy, arch, env)
+    check_stop()
+    logf("[%s] %s 显卡组件及安装文件核对通过：%s" % (label, arch, "、".join(report["versions"])))
     _warn_amd_arch_mismatch(vpy, arch, logf, label)
     return arch
 
@@ -5890,6 +5911,9 @@ def _amd_gpu_kernel_check(vpy, env=None, logf=print, label="训练引擎"):
     同时把 `archs` / `cap` 打出来（诊断用 ✓）：装错架构时一眼就能看出
     「设备报 gfx1100 但卡其实是 gfx1101」这类问题 ✓
     """
+    from kohya_core.amd_runtime import SELECTION_ERROR
+    if env and env.get(SELECTION_ERROR):
+        return False, "ROCm 选卡失败：" + env[SELECTION_ERROR]
     code = (
         "import torch\n"
         "import torch.nn.functional as F\n"
@@ -5904,6 +5928,7 @@ def _amd_gpu_kernel_check(vpy, env=None, logf=print, label="训练引擎"):
         "    pass\n"
         "try:\n"
         "    _info.append('dev=' + str(torch.cuda.get_device_name(0)))\n"
+        "    _info.append('gfx=' + str(getattr(torch.cuda.get_device_properties(0), 'gcnArchName', '')))\n"
         "except Exception:\n"
         "    pass\n"
         "print('INFO|' + '|'.join(_info))\n"
@@ -5948,16 +5973,13 @@ def _amd_gpu_kernel_check(vpy, env=None, logf=print, label="训练引擎"):
         return True, _w
     _err = _conv[len("FAIL|"):]
     _pkgs = "、".join(_amd_device_pkgs(vpy)) or "（未发现按架构分包的包）"
-    _detail = ("GPU 卷积自检未通过 ✗ —— 这才是训练第一步（VAE 编码）会炸的真正原因 ✓\n"
+    _detail = ("GPU 卷积自检失败。\n"
                "   报错：%s\n"
-               "   已装 ROCm device 包：%s\n"
-               "   GPU 信息：%s\n"
-               "   说明：`import torch` 与矩阵乘能过、但**卷积**过不去时，几乎都是\n"
-               "         「装的 ROCm 包架构与显卡不符」或「驱动与这套 ROCm 版本不匹配」✗\n"
-               "   修法：① 删除 HSA_OVERRIDE_GFX_VERSION / AMD_SERIALIZE_KERNEL 环境变量\n"
-               "        ② 点「⚙ 安装第四引擎」重装（本版按真实架构选包 ✓）\n"
-               "        ③ 若仍不行：更新 AMD 显卡驱动；或先用第二引擎（musubi）训练 ✓"
-               % (_err or "未知", _pkgs, _info or "未知"))
+               "   实际计算设备：%s\n"
+               "   ROCm 显卡组件：%s\n"
+               "   请确认实际计算设备与目标显卡一致，并核对对应的显卡组件；"
+               "设备和组件正确后仍失败，再检查驱动兼容性。"
+               % (_err or "未知", _info or "未知", _pkgs))
     return False, _detail
 
 
@@ -6051,6 +6073,15 @@ def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
         if backend == "amd-rocm" and not any(ln.startswith(("rocm=", "hip=")) and ln.split("=", 1)[1] for ln in out):
             raise RuntimeError("AMD ROCm torch 缺少 HIP 版本信息，疑似装成 CUDA/CPU 版")
         if backend == "amd-rocm":
+            from kohya_core.amd_runtime import require_device_packages
+            if _env.get("KOHYA_ROCM_SELECTION_ERROR"):
+                raise RuntimeError("ROCm 选卡失败：" + _env["KOHYA_ROCM_SELECTION_ERROR"])
+            arch = _env.get("KOHYA_ROCM_DEVICE_ARCH") or _amd_gpu_arch(fz_dir, vpy, logf)
+            if FIZGIG_ROCM_TORCH_PIN in out:
+                require_device_packages(vpy, arch, _env)
+            if _env.get("KOHYA_ROCM_DEVICE_NAME"):
+                logf("[第四引擎] 实际训练显卡：%s（%s），HIP_VISIBLE_DEVICES=%s" %
+                     (_env["KOHYA_ROCM_DEVICE_NAME"], arch, _env.get("HIP_VISIBLE_DEVICES", "用户指定")))
             # ★ 2026-09-23：AMD 上**必须真跑一次卷积** ✗ —— 见 _amd_gpu_kernel_check 的注释：
             #   只测 `import torch`（甚至 + 矩阵乘）会漏掉「包装错架构」✗ ——
             #   RX 7800 XT 用户就是这样"装的时候验证通过、训练第一步炸"✗（白折腾一整晚 ✓）
@@ -6058,8 +6089,8 @@ def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
             _kok, _kdetail = _amd_gpu_kernel_check(vpy, _env, logf, "第四引擎")
             if not _kok:
                 raise RuntimeError(_kdetail)
-        from kohya_core.fizgig_engine import source_version, VERSION, cli_ready
-        if source_version(fz_dir) == VERSION:
+        from kohya_core.fizgig_engine import source_version, VERSION, SUPPORTED_V7, cli_ready
+        if source_version(fz_dir) in SUPPORTED_V7:
             cli_ready(sys.modules[__name__], {"python": vpy, "source": fz_dir, "backend": backend})
         elif _fizgig_source_current(fz_dir):
             _fizgig_v65_cli_ready(vpy, fz_dir, backend)
@@ -6470,7 +6501,8 @@ def _windows_rocm_runtime_env(vpy, bnb_rocm_version="715", engine_backend=None):
         if os.path.isdir(_p):
             path.append(_p)
     env["PATH"] = ";".join(path + [env.get("PATH", "")])
-    return env
+    from kohya_core.amd_runtime import bind_runtime_env
+    return bind_runtime_env(vpy, env, preferred_name=detect_gpu_name() or "")
 
 
 def _fizgig_rocm_env(fz_dir, vpy):
@@ -9734,8 +9766,8 @@ def _warn_alloc_conf(logf):
 
 _INTERVAL_PARAM_KEYS = ("save_every", "sample_interval")
 _INTERVAL_EPOCH_MODES = {
-    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz")),
-    "sample_interval": frozenset(("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz")),
+    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz", "zimage_fz")),
+    "sample_interval": frozenset(("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz", "zimage_fz")),
 }
 
 
@@ -9856,7 +9888,7 @@ def rollback_fizgig_engine(logf=print):
 
 
 def train_fizgig_lora(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
-    from kohya_core.fizgig_engine import use_runtime, VERSION
+    from kohya_core.fizgig_engine import use_runtime, VERSION, SUPPORTED_V7
     from kohya_core.fizgig_adapter import train_lora
     params = dict(params or {})
     if mode == "krea2_fz" and "krea2_models" not in params:
@@ -9871,12 +9903,12 @@ def train_fizgig_lora(logf=print, mode="krea2_fz", params=None, vram_gb=None, re
         config = load_project(params.get("project"))
         return train_slider(sys.modules[__name__], config, params.get("project"), logf, progress)
     with use_runtime(sys.modules[__name__], params) as record:
-        if record.get("version") == VERSION:
+        if record.get("version") in SUPPORTED_V7:
             return train_lora(sys.modules[__name__], record, logf, mode, params, vram_gb, resume_from, progress)
         legacy = {"krea2_fz": _train_krea2_fizgig_legacy, "flux2_fz": _train_flux2_fizgig_legacy,
                   "qwen21_fz": _train_qwen21_fizgig_legacy, "h3_fz": _train_h3_fizgig_legacy}.get(mode)
         if legacy is None:
-            raise RuntimeError("这个模型需要 Fizgig v7.0.1，请先安装或更新引擎。")
+            raise RuntimeError("这个模型需要新版 Fizgig，请先安装或更新引擎。")
         return legacy(logf, mode, params, vram_gb, resume_from, progress)
 
 
@@ -9977,7 +10009,7 @@ def is_concept_mode(mode, at_sub_mode=None):
     if mode == "concept":
         return True
     return mode in ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz",
-                    "qwen_image", "zimage") and (at_sub_mode or "") == "concept"
+                    "qwen_image", "zimage", "zimage_fz") and (at_sub_mode or "") == "concept"
 
 
 # ==================== 小工具：训练前通用操作（主页 🧰 小工具模块） ====================
@@ -10259,7 +10291,7 @@ def export_config_json(params, include_prompts=False):
         if not include_prompts:
             for key in ("name", "neutral", "positive", "negative", "effect", "validation_prompts"): settings[key] = ""
         cfg.update(training_kind="slider", slider=settings, unet_only=True)
-        cfg["params"] = {"fizgig_version": "v7.0.1"}
+        cfg["params"] = {"fizgig_version": str(params.get("fizgig_version") or "v7.0.1")}
     if params.get("training_kind") == "multi_character":
         from kohya_core.multi_character import export_settings
         cfg.update(training_kind="multi_character", multi_character=export_settings(params.get("multi_character", {})))
@@ -10336,7 +10368,11 @@ def parse_config_json(text):
         settings = normalize(raw.get("slider"))
         settings.update(positive_dir="", negative_dir="", pairs=[])
         cfg.update(training_kind="slider", slider=settings, unet_only=True)
-        cfg["params"]["fizgig_version"] = "v7.0.1"
+        from kohya_core.fizgig_engine import SUPPORTED_V7
+        version = str(prm.get("fizgig_version") or "v7.0.1")
+        if version not in SUPPORTED_V7:
+            raise ValueError("概念滑块配置的 Fizgig 版本不受支持。")
+        cfg["params"]["fizgig_version"] = version
         summary["applied"] += 2
     if raw.get("training_kind") == "multi_character":
         from kohya_core.multi_character import export_settings, IMAGE_MODES
@@ -12607,7 +12643,7 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
         return None
     pat = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
     candidates = []
-    for _d in (output_dir, os.path.join(output_dir, "snapshots"), os.path.join(output_dir, "snapshots", "fizgig-v7.0.1")):
+    for _d in (output_dir, os.path.join(output_dir, "snapshots"), os.path.join(output_dir, "snapshots", "fizgig-v7.0.1"), os.path.join(output_dir, "snapshots", "fizgig-v7.3.1")):
         if not os.path.isdir(_d):
             continue
         for f in os.listdir(_d):
@@ -12622,19 +12658,19 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
                     with open(os.path.join(p, "training_state.json"), encoding="utf-8") as stream:
                         state_meta = json.load(stream)
                     identity = state_meta.get("kohya_runtime") or {}
-                    if version == "v7.0.1":
+                    if version in ("v7.0.1", "v7.3.1"):
                         if identity.get("version") != version or (family and identity.get("family") != family):
                             continue
                         if state_meta.get("kohya_complete") and (epochs is None or int(state_meta.get("epoch", 0)) >= int(epochs)):
                             continue
-                    elif identity.get("version") == "v7.0.1":
+                    elif identity.get("version") in ("v7.0.1", "v7.3.1"):
                         continue
                 except (OSError, ValueError, AttributeError):
                     continue
             candidates.append((int(m.group(1)), p))
     try:
         final = os.path.join(output_dir, output_name + ".safetensors")
-        if version != "v7.0.1" and os.path.isfile(final):
+        if version not in ("v7.0.1", "v7.3.1") and os.path.isfile(final):
             final_mtime = os.path.getmtime(final)
             candidates = [(epoch, path) for epoch, path in candidates
                           if os.path.getmtime(os.path.join(path, "training_state.json")) > final_mtime]
@@ -16285,6 +16321,19 @@ def _ensure_anima_components(logf=print):
     logf(f"[Anima] ✓ 文本编码器已就绪：{qwen3_path}")
     logf(f"[Anima] ✓ VAE 已就绪：{vae_file}")
     return qwen3_path, vae_file
+
+
+from kohya_core.zimage_fizgig import LINKS as ZIMAGE_FZ_MODEL_LINKS
+
+
+def zimage_fz_models_dir():
+    from kohya_core.zimage_fizgig import models_dir
+    return models_dir(sys.modules[__name__])
+
+
+def zimage_fz_model_files():
+    from kohya_core.zimage_fizgig import files
+    return files(sys.modules[__name__])
 
 
 def anima_fz_models_dir():

@@ -16,13 +16,16 @@ import sys
 import time
 import zipfile
 
-VERSION = "v7.0.1"
-COMMIT = "1c8ec88edc1a4f99f73585aeae00fec740b12ea6"
-ARCHIVE_SHA256 = "526b6dcac6e0f470031c98249b3bf10dea74df6a73a4d2e4f52f5a419c7178e4"
-ARCHIVE_BYTES = 11098816
+VERSION = "v7.3.1"
+LEGACY_V7 = "v7.0.1"
+SUPPORTED_V7 = (LEGACY_V7, VERSION)
+OLD_COMMIT = "1c8ec88edc1a4f99f73585aeae00fec740b12ea6"
+COMMIT = "7ee4986dae28fe35cc4ef636b984729624b32b42"
+ARCHIVE_SHA256 = "ed0dfe599006492d5dfb04ddbc66aae0a4237b257d05eab0424aa4280de1b3bc"
+ARCHIVE_BYTES = 12666311
 MIRROR = "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/"
 SOURCES = (
-    ("魔搭国内镜像", MIRROR + "fizgig-v7.0.1.zip", True),
+    ("魔搭国内镜像", MIRROR + "fizgig-" + VERSION + ".zip", True),
     ("GitHub 加速镜像", "https://ghfast.top/https://github.com/shootthesound/Fizgig/archive/" + COMMIT + ".zip", False),
     ("GitHub 备用加速镜像", "https://gh-proxy.com/https://github.com/shootthesound/Fizgig/archive/" + COMMIT + ".zip", False),
     ("GitHub 官方源", "https://codeload.github.com/shootthesound/Fizgig/zip/" + COMMIT, False),
@@ -32,6 +35,13 @@ REQUIRED = ("requirements.txt", "src/fizgig/families/train.py", "src/fizgig/fami
             "src/fizgig/qwen_image21/driver.py", "src/fizgig/minimax/driver.py",
             "src/fizgig/anima/driver.py", "src/fizgig/sdxl/driver.py",
             "src/fizgig/qwen_image21/embedder.py", "src/fizgig/utils/hf_cache.py")
+OLD_REQUIRED = REQUIRED
+REQUIRED = (*OLD_REQUIRED, "src/fizgig/families/zimage.py", "src/fizgig/zimage/driver.py",
+            "src/fizgig/zimage/model.py", "src/fizgig/zimage/pipeline.py")
+
+def source_commit(version):
+    return OLD_COMMIT if version == LEGACY_V7 else COMMIT
+
 _CONTEXT = contextvars.ContextVar("kohya_fizgig_runtime", default=None)
 
 
@@ -62,11 +72,12 @@ def _sha(path):
 def source_version(source):
     source = Path(source)
     record = _read(source / ".kohya-fizgig-source.json")
-    if record.get("version") == VERSION and record.get("commit") == COMMIT and record.get("adapter") == 2:
+    version = record.get("version")
+    if version in SUPPORTED_V7 and record.get("commit") == source_commit(version) and record.get("adapter") == (2 if version == LEGACY_V7 else 3):
         hashes = record.get("files") or {}
         try:
-            if all((source / name).is_file() and hashes.get(name) == _sha(source / name) for name in REQUIRED):
-                return VERSION
+            if all((source / name).is_file() and hashes.get(name) == _sha(source / name) for name in (OLD_REQUIRED if version == LEGACY_V7 else REQUIRED)):
+                return version
         except OSError:
             return ""
         return ""
@@ -95,9 +106,9 @@ def runtime(core, version=None):
               "python": str(root / "fizgig_venv/Scripts/python.exe")}
     if version in (None, "v6.5.0", "legacy"):
         return legacy
-    if version == VERSION:
-        return {"version": VERSION, "source": str(root / "fizgig_versions" / VERSION / "source"),
-                "python": str(root / "fizgig_versions" / VERSION / ("venv-rocm" if core.detect_gpu_vendor() == "amd" else "venv-cuda") / "Scripts/python.exe")}
+    if version in SUPPORTED_V7:
+        return {"version": version, "source": str(root / "fizgig_versions" / version / "source"),
+                "python": str(root / "fizgig_versions" / version / ("venv-rocm" if core.detect_gpu_vendor() == "amd" else "venv-cuda") / "Scripts/python.exe")}
     raise ValueError("未安装或不支持的 Fizgig 版本：%s" % version)
 
 
@@ -123,7 +134,7 @@ def update_status(core):
     return {"installed": installed, "update_available": installed and not current,
             "target_version": VERSION, "current_version": record.get("version") or "待识别",
             "engine_dir": record["source"], "h3_supported": installed, "qwen_image_2_supported": installed,
-            "new_families_supported": current, "versions": versions}
+            "new_families_supported": current, "versions": versions, "standard_versions": list(SUPPORTED_V7)}
 
 
 def download(core, logf):
@@ -167,7 +178,7 @@ def _deploy(core, archive, source):
         raise RuntimeError("Fizgig 源码缺少新版模型家族入口。")
     _patch_helpers(source)
     _write(source / ".kohya-fizgig-source.json", {"version": VERSION, "commit": COMMIT,
-            "archive_sha256": ARCHIVE_SHA256, "adapter": 2,
+            "archive_sha256": ARCHIVE_SHA256, "adapter": 3,
             "files": {name: _sha(source / name) for name in REQUIRED}})
 
 
@@ -205,6 +216,15 @@ def _patch_helpers(source):
         raise RuntimeError("Fizgig 本地分词器接口变化。")
     text = text.replace(anchor, "    import json\n    paths = json.loads(os.environ.get('FIZGIG_LOCAL_HELPERS', '{}'))\n    if repo_id in paths:\n        return cls.from_pretrained(paths[repo_id], local_files_only=True, **kwargs)\n" + anchor)
     path.write_text(text, encoding="utf-8")
+    path = source / "src/fizgig/zimage/pipeline.py"
+    text = path.read_text(encoding="utf-8")
+    anchor = "    local = cached_snapshot_dir(config)"
+    if text.count(anchor) != 1:
+        raise RuntimeError("Fizgig Z-Image VAE 配置接口变化。")
+    text = text.replace(anchor, "    import json, os\n    local = json.loads(os.environ.get('FIZGIG_LOCAL_HELPERS', '{}')).get(config) or cached_snapshot_dir(config)")
+    # Prepared config failures must be reported instead of silently contacting the Hub.
+    text = text.replace("        except Exception:\n            pass", "        except Exception:\n            raise")
+    path.write_text(text, encoding="utf-8")
     path = source / "src/fizgig/qwen_image21/embedder.py"
     text = path.read_text(encoding="utf-8")
     marker = 'tokenizer_dir = tokenizer_dir or os.environ.get("FIZGIG_QWEN21_PROCESSOR_DIR")'
@@ -226,9 +246,9 @@ def _patch_helpers(source):
     state_anchor = 'state_dir = os.path.join(output_dir, f"{output_name}-{epoch:06d}-state")'
     if text.count(state_anchor) != 1 or text.count("prune_state_dirs(output_dir, output_name, keep_last_n_states)") != 1:
         raise RuntimeError("Fizgig 快照目录接口变化。")
-    text = text.replace(state_anchor, 'state_dir = os.path.join(output_dir, "snapshots", "fizgig-v7.0.1", f"{output_name}-{epoch:06d}-state")')
+    text = text.replace(state_anchor, 'state_dir = os.path.join(output_dir, "snapshots", "fizgig-%s", f"{output_name}-{epoch:06d}-state")' % VERSION)
     text = text.replace("prune_state_dirs(output_dir, output_name, keep_last_n_states)",
-                        'prune_state_dirs(os.path.join(output_dir, "snapshots", "fizgig-v7.0.1"), output_name, keep_last_n_states)')
+                        'prune_state_dirs(os.path.join(output_dir, "snapshots", "fizgig-%s"), output_name, keep_last_n_states)' % VERSION)
     path.write_text(text, encoding="utf-8")
 
 
@@ -250,8 +270,15 @@ def _dependencies_match(record, env):
     try:
         result = subprocess.run([record["python"], "-c", code], env=env, capture_output=True, text=True, timeout=60)
         found = json.loads(result.stdout or "{}")
-        return result.returncode == 0 and all(found.get(p) == v for p, v in packages.items())
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+        matched = result.returncode == 0 and all(found.get(p) == v for p, v in packages.items())
+        if matched and record["backend"] == "amd-rocm":
+            from .amd_runtime import SELECTION_ERROR, require_device_packages
+            arch = env.get("KOHYA_ROCM_DEVICE_ARCH")
+            if env.get(SELECTION_ERROR) or not arch:
+                return False
+            require_device_packages(record["python"], arch, env)
+        return matched
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         return False
 
 
@@ -323,7 +350,7 @@ def install(core, logf=print):
                                 "-r", str(requirements)], cwd=str(source), env=env, logf=logf):
                 raise RuntimeError("Fizgig 新版依赖安装失败，原版本仍可使用。")
         core.check_stop()
-        logf("[Fizgig] 正在检查 GPU 环境和六个模型入口…")
+        logf("[Fizgig] 正在检查 GPU 环境和模型入口…")
         core._fizgig_verify(record["python"], str(source), logf, backend=backend)
         core.check_stop()
         installs = dict(registry.get("installs") or {})

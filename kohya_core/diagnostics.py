@@ -132,7 +132,9 @@ try:
     import torch
     out["gpu"] = {"status": "unavailable", "hip": torch.version.hip, "cuda_build": torch.version.cuda,
                   "available": torch.cuda.is_available(), "device_count": torch.cuda.device_count()}
-    if not RUN_GPU_TEST:
+    if os.environ.get("KOHYA_ROCM_SELECTION_ERROR"):
+        out["gpu"].update(status="skipped_device_selection_failed", reason=os.environ["KOHYA_ROCM_SELECTION_ERROR"])
+    elif not RUN_GPU_TEST:
         out["gpu"]["status"] = "skipped_active_task"
     elif torch.cuda.is_available():
         out["gpu"].update(name=torch.cuda.get_device_name(0), architecture=getattr(torch.cuda.get_device_properties(0), "gcnArchName", ""))
@@ -152,7 +154,9 @@ print("KLT_DIAGNOSTIC=" + json.dumps(out, ensure_ascii=False))
 
 def _runtime_probe(label, path, env, check_gpu=True):
     python = Path(path)
-    report = {"label": label, "python": str(python)}
+    report = {"label": label, "python": str(python), "device_selection": {
+        key: env[key] for key in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "KOHYA_ROCM_DEVICE_NAME",
+                                 "KOHYA_ROCM_DEVICE_ARCH", "KOHYA_ROCM_SELECTION_ERROR") if key in env}}
     if not python.is_file():
         return {**report, "status": "missing", "reason": "该环境的 python.exe 不存在"}
     cfg = python.parent.parent / "pyvenv.cfg"
@@ -194,6 +198,12 @@ def write_bundle(core, destination, logs, task=None, project=None, session=None)
             locations = _call(core, method)
             if isinstance(locations, (list, tuple)) and locations and isinstance(locations[0], str):
                 profiles[label] = locations[0]
+    if isinstance(kdir, str):
+        from .fizgig_engine import VERSION
+        for backend in ("rocm", "cuda"):
+            candidate = Path(kdir) / "fizgig_versions" / VERSION / ("venv-" + backend) / "Scripts/python.exe"
+            if candidate.is_file() and str(candidate) not in profiles.values():
+                profiles["fizgig_%s_%s" % (VERSION, backend)] = str(candidate)
     project = project or {}
     train_env = project.get("train_env") or (project.get("params") or {}).get("train_env")
     if train_env:
@@ -205,7 +215,21 @@ def write_bundle(core, destination, logs, task=None, project=None, session=None)
                      "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,PNPDeviceID,Status | ConvertTo-Json -Compress"], timeout=10) if ps else {"status": "unavailable", "reason": "未找到 Windows PowerShell"}
     with ThreadPoolExecutor(max_workers=3) as pool:
         check_gpu = not ((task or {}).get("busy") or (task or {}).get("status") == "running")
-        futures = {label: pool.submit(_runtime_probe, label, path, env, check_gpu) for label, path in profiles.items()}
+        def environment(label, path):
+            specific = dict(env)
+            if summary.get("gpu", {}).get("vendor") == "amd":
+                try:
+                    if label.startswith("fizgig"):
+                        source = Path(path).parent.parent.parent / "source"
+                        specific = core._fizgig_rocm_env(str(source), path)
+                    elif label == "ai_toolkit":
+                        specific = core._ai_toolkit_rocm_env(path)
+                except Exception as exc:
+                    specific["KOHYA_ROCM_SELECTION_ERROR"] = str(exc)
+            return specific
+        def probe(label, path):
+            return _runtime_probe(label, path, environment(label, path), check_gpu)
+        futures = {label: pool.submit(probe, label, path) for label, path in profiles.items()}
         reports = {}
         for label, future in futures.items():
             try:

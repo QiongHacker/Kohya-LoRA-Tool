@@ -45,7 +45,7 @@ def training_params(core, config, project_name):
             return default
 
     if mode.endswith('_fz'):
-        params_version = str(stored.get('fizgig_version') or ('v7.0.1' if mode in ('anima_fz', 'sdxl_fz') else 'v6.5.0'))
+        params_version = str(stored.get('fizgig_version') or ('v7.3.1' if mode == 'zimage_fz' else 'v7.0.1' if mode in ('anima_fz', 'sdxl_fz') else 'v6.5.0'))
     else:
         params_version = ''
     kohya = mode in ('character', 'style', 'concept')
@@ -113,6 +113,9 @@ def training_params(core, config, project_name):
     if mode == "krea2_fz":
         from .krea2_models import settings
         params["krea2_models"] = settings(config)
+    if mode == "zimage_fz":
+        from .zimage_fizgig import settings
+        params["zimage_fz_models"] = settings(config)
     if mode == "h3_fz":
         from .h3_models import settings
         params["h3_models"] = settings(config)

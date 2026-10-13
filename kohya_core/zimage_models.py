@@ -108,12 +108,16 @@ def validate(path, kind):
         if set(tensors) & set(current):
             raise ValueError("组件分片包含重复张量。")
         tensors.update(current)
-    keys = {k.removeprefix("diffusion_model.") for k in tensors}
+    def model_key(key):
+        if kind == "transformer":
+            key = key.removeprefix("model.diffusion_model.")
+        return key.removeprefix("diffusion_model.")
+    keys = {model_key(k) for k in tensors}
     if kind == "transformer":
         required = ("cap_embedder.1.weight", "t_embedder.mlp.0.weight")
         if not all(k in keys for k in required) or not all(any(k.startswith("layers.%d." % i) for k in keys) for i in range(30)):
             raise ValueError("所选文件不是完整的标准 Z-Image 底模（30 层）。")
-        cap = next(v for k, v in tensors.items() if k.removeprefix("diffusion_model.") == required[0])
+        cap = next(v for k, v in tensors.items() if model_key(k) == required[0])
         if cap["shape"] != [3840, 2560]:
             raise ValueError("该 Z-Image 底模架构与当前训练入口不兼容。")
         if any(v["dtype"] not in ("F16", "BF16") for k, v in tensors.items() if k.endswith("weight") and len(v["shape"]) >= 2):

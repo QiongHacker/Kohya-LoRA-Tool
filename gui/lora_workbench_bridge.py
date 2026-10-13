@@ -11,7 +11,7 @@ import tempfile
 import threading
 import uuid
 
-from kohya_core.fizgig_engine import runtime, source_version, VERSION, _env, _write, _sha
+from kohya_core.fizgig_engine import runtime, source_version, VERSION, SUPPORTED_V7, _env, _write, _sha
 from kohya_core.fizgig_adapter import models, _helper_configs, validate_base
 from kohya_core.diagnostics import redact
 
@@ -81,7 +81,7 @@ class LoRAWorkbenchBridge:
             if _sha(info["source"]) != info["fingerprint"]:
                 raise ValueError("LoRA 文件已发生变化，请重新读取。")
             item = {"id": uuid.uuid4().hex, "name": name, "family": info["family"], "block_ids": ids,
-                    "fingerprint": info["fingerprint"], "source_name": info["name"], "kernel": "Fizgig " + VERSION,
+                    "fingerprint": info["fingerprint"], "source_name": info["name"], "kernel": "Fizgig " + runtime(self.core)["version"],
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "blocks": {key: number(value, -3, 3) for key, value in blocks.items()}}
             with self._task_lock:
@@ -174,9 +174,9 @@ class LoRAWorkbenchBridge:
             return {"ok": False, "error": redact(str(exc))}
 
     def _workbench_record(self):
-        record = runtime(self.core, VERSION)
-        if not Path(record["python"]).is_file() or source_version(record["source"]) != VERSION:
-            raise ValueError("请先准备 Fizgig v7.0.1，再使用 LoRA 工作台。")
+        record = runtime(self.core)
+        if not Path(record["python"]).is_file() or source_version(record["source"]) not in SUPPORTED_V7:
+            raise ValueError("请先准备新版 Fizgig，再使用 LoRA 工作台。")
         for name in ("families/workbench.py", "families/extract.py", "families/lorafile.py", "repair_studio/state.py", "repair_studio/bake.py", "families/block_profile.py"):
             if not (Path(record["source"]) / "src" / "fizgig" / name).is_file():
                 raise ValueError("Fizgig 安装缺少工作台组件，请重新准备引擎。")

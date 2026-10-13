@@ -47,7 +47,7 @@
           },
           {
             "key": "fizgig",
-            "label": "Fizgig v7.0.1",
+            "label": "Fizgig v7.3.1",
             "mode": "sdxl_fz",
             "template": "SDXL LoRA（Fizgig）",
             "vendors": [
@@ -114,7 +114,7 @@
           },
           {
             "key": "fizgig",
-            "label": "Fizgig v7.0.1",
+            "label": "Fizgig v7.3.1",
             "mode": "anima_fz",
             "template": "Anima LoRA（Fizgig）",
             "vendors": [
@@ -163,7 +163,7 @@
         "engines": [
           {
             "key": "fizgig",
-            "label": "Fizgig v7.0.1",
+            "label": "Fizgig v7.3.1",
             "mode": "krea2_fz",
             "template": "Krea2 图像 LoRA（Fizgig）",
             "vendors": [
@@ -235,7 +235,7 @@
         "engines": [
           {
             "key": "fizgig",
-            "label": "Fizgig v7.0.1",
+            "label": "Fizgig v7.3.1",
             "mode": "flux2_fz",
             "template": "Klein 9B LoRA（Fizgig）",
             "vendors": [
@@ -281,7 +281,7 @@
         "engines": [
           {
             "key": "fizgig",
-            "label": "Fizgig v7.0.1",
+            "label": "Fizgig v7.3.1",
             "mode": "qwen21_fz",
             "template": "Qwen-Image-2.1 LoRA（Fizgig）",
             "vendors": [
@@ -318,7 +318,7 @@
           },
           {
             "key": "fizgig",
-            "label": "Fizgig v7.0.1",
+            "label": "Fizgig v7.3.1",
             "mode": "h3_fz",
             "template": "MiniMax H3 全模态 LoRA（Fizgig）",
             "vendors": [
@@ -342,8 +342,31 @@
     "label": "Z-Image",
     "variants": [
       {
+        "key": "zimage_turbo",
+        "label": "Z-Image Turbo",
+        "note": "训练与出图使用 Turbo；支持选择本地单文件组件。建议 12 GB 以上显存。",
+        "preferred": {
+          "nvidia": "fizgig",
+          "amd": "fizgig"
+        },
+        "engines": [
+          {
+            "key": "fizgig",
+            "label": "Fizgig v7.3.1",
+            "mode": "zimage_fz",
+            "template": "Z-Image Turbo LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "直接训练 Turbo；训练适配器保持冻结，预览 8 步、CFG 1。",
+            "experimental": true
+          }
+        ]
+      },
+      {
         "key": "zimage",
-        "label": "Z-Image",
+        "label": "Z-Image Base",
         "engines": [
           {
             "key": "ai_toolkit",
@@ -358,7 +381,7 @@
             "experimental": false
           }
         ],
-        "note": "AMD 使用原有兼容路径。",
+        "note": "Base 使用 AI Toolkit；已有项目保留原底模和组件设置。",
         "preferred": {}
       }
     ]
