@@ -273,6 +273,7 @@ export interface DesktopApi {
   prepare_training(project_name: string): Promise<{ ok: boolean; error?: string; plan?: TrainingPlan }>
   start_training(project_name: string, use_resume?: boolean): Promise<{ ok: boolean; task_id?: string; error?: string }>
   continue_training(task_id: string): Promise<{ ok: boolean; error?: string }>
+  start_video_caption_task(project_name: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
   start_preprocess_task(project_name: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_model_catalog(): Promise<ModelCatalogData>
   get_mode_workspace(mode: string, project_name?: string): Promise<ModeWorkspaceData>
@@ -292,7 +293,7 @@ export interface DesktopApi {
   reset_env_locations(): Promise<EnvLocations>
   get_log_export_status(export_id: string): Promise<LogExportStatus>
   open_log_export(export_id: string, target: 'file' | 'folder'): Promise<{ ok: boolean; error?: string }>
-  run_action(action: string, project_name?: string): Promise<{ ok: boolean; error?: string; message?: string; log?: string; export_id?: string }>
+  run_action(action: string, project_name?: string): Promise<{ ok: boolean; error?: string; message?: string; log?: string; export_id?: string; task_id?: string }>
 }
 
 export interface LogExportStatus {

@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.8"
+APP_VERSION = "0.19.9"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -7265,33 +7265,63 @@ def h3_generate_placeholder_captions(folder, trigger="", logf=print):
     return n
 
 
-def run_video_caption(logf=print, video_dir="", trigger="", frames=6, overwrite=False):
-    """用 Qwen2.5-VL 给视频文件夹里的视频自动生成英文描述（写同名 txt）。
-
-    用 kohya venv（transformers 4.54 已支持 Qwen2.5-VL），模型按需下载（走 hf-mirror）。
-    已有同名 txt 默认跳过（避免覆盖手写描述），overwrite=True 强制重写。
-    """
-    vpy = venv_python()
-    if not os.path.isfile(vpy):
-        raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
+def run_video_caption(logf=print, video_dir="", trigger="", frames=6, overwrite=False,
+                      mode="", params=None, recursive=False):
+    """Reuse a compatible installed engine environment; write same-name captions."""
     if not video_dir or not os.path.isdir(video_dir):
         raise RuntimeError("请先选择视频数据集文件夹")
     script = os.path.join(KIT_DIR, "video_caption.py")
     if not os.path.isfile(script):
         raise RuntimeError("缺少 video_caption.py（打包异常），请重新安装")
-    # 确保 kohya venv 依赖可用（transformers 等）
-    _ensure_kohya_deps(vpy, get_kohya_dir(), logf)
+    from kohya_core.fizgig_engine import runtime, VERSION
+    candidates = []
+    for version in ((params or {}).get("fizgig_version"), None, VERSION):
+        try:
+            candidates.append(("Fizgig", runtime(sys.modules[__name__], version or None)["python"]))
+        except (ValueError, OSError):
+            pass
+    candidates.append(("AI Toolkit", _at_dirs()[0]))
+    candidates.append(("Kohya", venv_python()))
+    if mode == "video":
+        candidates.insert(0, ("AI Toolkit", _at_dirs()[0]))
     env = build_direct_env()
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
-    cmd = [vpy, script, "--video_dir", video_dir, "--frames", str(frames)]
+    probe = ("import torch, cv2, accelerate; from PIL import Image; "
+             "from transformers import Qwen2_5_VLProcessor, Qwen2_5_VLForConditionalGeneration; "
+             "print('VIDEO_CAPTION_READY')")
+    seen = set()
+    vpy = None
+    for label, candidate in candidates:
+        check_stop()
+        identity = os.path.normcase(os.path.abspath(candidate))
+        if identity in seen or not os.path.isfile(candidate):
+            continue
+        seen.add(identity)
+        logf("[环境] 正在检查 %s 的视频描述依赖…" % label)
+        lines = []
+        rc = run_stream([candidate, "-I", "-u", "-c", probe], cwd=KIT_DIR,
+                        env=env, logf=lambda line: lines.append(str(line)))
+        check_stop()
+        if rc == 0 and any(line.strip() == "VIDEO_CAPTION_READY" for line in lines):
+            vpy = candidate
+            logf("[环境] 视频描述使用 %s 环境。" % label)
+            break
+        logf("[环境] %s 依赖不可用：%s" % (label, " | ".join(lines[-4:])))
+    if not vpy:
+        raise RuntimeError("没有可运行视频描述的已安装环境。请准备 Fizgig / AI Toolkit / Kohya 环境；"
+                           "需要 torch、transformers（Qwen2.5-VL）、accelerate、opencv 和 Pillow。具体缺项见日志。")
+    cmd = [vpy, "-I", "-u", script, "--video_dir", video_dir, "--frames", str(frames)]
     if trigger:
         cmd += ["--trigger", trigger]
     if overwrite:
         cmd += ["--overwrite"]
-    logf(f"[打标] 启动 Qwen2.5-VL 自动描述：{video_dir}（首次会下载模型约 6~7GB，请耐心等待）")
+    if recursive:
+        cmd += ["--recursive"]
+    logf("[打标] 启动 Qwen2.5-VL 自动描述：%s（首次会下载模型约 6~7GB）" % video_dir)
     rc = run_stream(cmd, cwd=KIT_DIR, env=env, logf=logf)
+    check_stop()
     if rc != 0:
-        raise RuntimeError(f"视频自动打标失败（退出码 {rc}），请查看上方日志")
+        raise RuntimeError("视频自动描述失败（退出码 %s），具体原因见任务日志；已完成字幕保留。" % rc)
     return True
 
 

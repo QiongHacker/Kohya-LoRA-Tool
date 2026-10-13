@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """视频自动打标：用 Qwen2.5-VL 给视频生成英文描述（写入同名 .txt）。
 
-独立脚本，用 kohya venv 的 Python 运行（transformers 4.54 已支持 Qwen2.5-VL）：
+独立脚本，使用已安装且兼容的训练引擎 Python 环境运行：
   python video_caption.py --video_dir <视频文件夹> [--trigger <触发词>] [--frames 6] [--overwrite]
 
 模型：Qwen/Qwen2.5-VL-3B-Instruct（约 6~7GB，首次使用自动下载，走 hf-mirror 国内镜像）。
@@ -34,13 +34,16 @@ import sys
 MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 
-def find_videos(folder):
+def find_videos(folder, recursive=False):
     exts = (".mp4", ".avi", ".mov", ".webm", ".mkv", ".wmv", ".m4v", ".flv")
     out = []
-    for f in sorted(os.listdir(folder)):
-        p = os.path.join(folder, f)
-        if os.path.isfile(p) and f.lower().endswith(exts):
-            out.append(p)
+    folders = os.walk(folder) if recursive else [(folder, [], os.listdir(folder))]
+    for root, dirs, files in folders:
+        dirs.sort()
+        for f in sorted(files):
+            p = os.path.join(root, f)
+            if os.path.isfile(p) and f.lower().endswith(exts):
+                out.append(p)
     return out
 
 
@@ -70,20 +73,34 @@ def extract_frames(video_path, n=6, short=448):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--video_dir", required=True)
     ap.add_argument("--trigger", default="")
     ap.add_argument("--frames", type=int, default=6)
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--recursive", action="store_true", help="包含数据集子文件夹")
     ap.add_argument("--model", default=MODEL_ID, help="Qwen2.5-VL 模型 ID（默认 %s）" % MODEL_ID)
     args = ap.parse_args()
 
-    videos = find_videos(args.video_dir)
+    if args.frames < 1:
+        ap.error("--frames 必须大于 0")
+    videos = find_videos(args.video_dir, recursive=args.recursive)
     if not videos:
         print(f"[打标] 视频文件夹里没有找到视频：{args.video_dir}")
         return 1
 
+    pending = [vp for vp in videos if args.overwrite or not os.path.isfile(os.path.splitext(vp)[0] + ".txt")]
+    n_ok, n_skip, n_fail = 0, len(videos) - len(pending), 0
+    print(f"[打标] 找到 {len(videos)} 个视频，待描述 {len(pending)} 个，已有字幕跳过 {n_skip} 个。")
+    if not pending:
+        print(f"[打标] 完成：成功 0 | 跳过(已有txt) {n_skip} | 失败 0；无需加载模型。")
+        return 0
+
     # 加载 Qwen2.5-VL（按需下载，走 HF_ENDPOINT 镜像）
+    import torch
     from transformers import Qwen2_5_VLProcessor, Qwen2_5_VLForConditionalGeneration
     print("[打标] 加载 Qwen2.5-VL-3B（首次会自动下载模型，约 6~7GB，请耐心等待）…")
     proc = Qwen2_5_VLProcessor.from_pretrained(args.model)
@@ -93,39 +110,43 @@ def main():
 
     trig = (args.trigger or "").strip()
     prefix = f"<{trig}> " if trig else ""
-    n_ok = n_skip = n_fail = 0
-    for vp in videos:
+    for index, vp in enumerate(pending, 1):
         txt = os.path.splitext(vp)[0] + ".txt"
-        if os.path.isfile(txt) and not args.overwrite:
-            print(f"[打标] 跳过（已有 txt）：{os.path.basename(vp)}")
-            n_skip += 1
-            continue
-        frames = extract_frames(vp, args.frames)
-        if not frames:
-            print(f"[打标] 抽帧失败：{os.path.basename(vp)}")
-            n_fail += 1
-            continue
         try:
+            if os.path.isfile(txt) and not args.overwrite:
+                print(f"[打标] 跳过（已有 txt）：{os.path.basename(vp)}")
+                n_skip += 1
+                continue
+            print(f"[打标] 正在抽帧并描述：{os.path.basename(vp)}")
+            frames = extract_frames(vp, args.frames)
+            if not frames:
+                raise RuntimeError("抽帧失败，视频可能无法读取")
             prompt = (f"{prefix}Describe this video clip in one concise English sentence: "
                       "who or what, the action, the scene, the style. No extra words.")
             msgs = [{"role": "user",
                      "content": [{"type": "image"}] * len(frames) +
                                 [{"type": "text", "text": prompt}]}]
             text = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-            inputs = proc(text=[text], images=[frames], return_tensors="pt")
-            gen = model.generate(**inputs, max_new_tokens=160, do_sample=False,
-                                 num_beams=1, use_cache=True)
+            inputs = proc(text=[text], images=[frames], return_tensors="pt").to(model.device)
+            with torch.inference_mode():
+                gen = model.generate(**inputs, max_new_tokens=160, do_sample=False,
+                                     num_beams=1, use_cache=True)
             out = proc.batch_decode(gen[:, inputs["input_ids"].shape[1]:],
                                     skip_special_tokens=True)[0].strip()
             if not out:
-                out = trig if trig else "a video"
-            with open(txt, "w", encoding="utf-8") as f:
+                raise RuntimeError("模型没有生成描述，未写入占位字幕")
+            with open(txt, "w" if args.overwrite else "x", encoding="utf-8") as f:
                 f.write(out + "\n")
             print(f"[打标] OK {os.path.basename(vp)} -> {out[:90]}")
             n_ok += 1
+        except FileExistsError:
+            print(f"[打标] 跳过（已有 txt）：{os.path.basename(vp)}")
+            n_skip += 1
         except Exception as e:
             print(f"[打标] 失败 {os.path.basename(vp)}: {e}")
             n_fail += 1
+        finally:
+            print(f"[视频描述进度] {index}/{len(pending)}")
 
     print(f"[打标] 完成：成功 {n_ok} | 跳过(已有txt) {n_skip} | 失败 {n_fail}")
     return 0 if n_fail == 0 else 1

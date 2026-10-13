@@ -729,7 +729,7 @@ async function openAgentTask(id: string, project = '', force = true) {
     await trainingDialogRef.value?.attach(id)
   } else {
     agentTaskTitle.value = task.title || '助手执行任务'
-    setupAction.value = task.kind === 'preprocess' ? 'preprocess' : 'agent_task'
+    setupAction.value = task.kind === 'preprocess' ? 'preprocess' : task.kind === 'video_caption' ? 'video_caption' : 'agent_task'
     setupDialogOpen.value = true
     await nextTick()
     await setupDialogRef.value?.attach(id)
@@ -1047,6 +1047,7 @@ async function runAction(action: string, projectName?: string) {
     return
   }
   const result = await window.pywebview.api.run_action(action, projectName || (['export_log', 'export_diagnostics'].includes(action) ? workspaceProject.value?.name : undefined))
+  if (result.ok && result.task_id) return openAgentTask(result.task_id, projectName ?? '', true)
   if (result.log) appendLog(result.log)
   if (!result.ok) showToast(result.error ?? '操作失败。')
   else if (result.message) showToast(result.message)
@@ -1263,9 +1264,9 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
   if (action === 'training_history') { historyDialogOpen.value = true; return }
   if (!workspaceProject.value) return showToast('请先打开一个项目。')
   if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
-  if (action === 'preprocess') {
+  if (action === 'preprocess' || action === 'video_caption') {
     if (preview.value || !window.pywebview?.api) return showToast('浏览器预览中，这个操作不会触碰本机数据。')
-    setupAction.value = 'preprocess'
+    setupAction.value = action
     agentTaskTitle.value = ''
     setupDialogOpen.value = true
     return
@@ -1280,6 +1281,7 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
     return
   }
   const result = await window.pywebview.api.run_action(action, workspaceProject.value.name)
+  if (result.ok && result.task_id) return openAgentTask(result.task_id, workspaceProject.value.name, true)
   if (result.log) appendLog(result.log)
   if (!result.ok) showToast(result.error ?? '无法打开该功能。')
   else if (result.message) showToast(result.message)
@@ -1554,9 +1556,9 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <ModernTaskDialog
       ref="setupDialogRef"
       :open="setupDialogOpen"
-      :title="agentTaskTitle || (setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v7.0.1' : '安装 Fizgig v7.0.1')"
+      :title="agentTaskTitle || (setupAction === 'video_caption' ? '视频 AI 自动描述' : setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v7.0.1' : '安装 Fizgig v7.0.1')"
       :action="setupAction"
-      :description="setupAction === 'agent_task' ? '助手已启动此任务；这里显示软件的实际执行进度与日志。' : setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
+      :description="setupAction === 'agent_task' ? '助手已启动此任务；这里显示软件的实际执行进度与日志。' : setupAction === 'video_caption' ? '为当前项目的视频生成英文描述，并保存为视频旁的同名 .txt 字幕。' : setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
       :project-name="workspaceProject?.name ?? ''"
       @close="setupDialogOpen = false"
       @finished="refreshGuideState"

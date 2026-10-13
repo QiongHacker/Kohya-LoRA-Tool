@@ -16,6 +16,7 @@ const emit = defineEmits<{
 }>()
 
 defineExpose({ attach })
+const startError = ref('')
 const taskId = ref('')
 const state = ref<ModernTaskStatus | null>(null)
 const taskLogs = ref<string[]>([])
@@ -63,12 +64,16 @@ async function start() {
   const api = window.pywebview?.api
   if (!api) return emit('notify', '安装任务需要在桌面版运行。')
   starting.value = true
+  startError.value = ''
   try {
     const result = props.action === 'preprocess'
       ? await api.start_preprocess_task(props.projectName ?? '')
-      : await api.start_setup_task(props.action)
+      : props.action === 'video_caption'
+        ? await api.start_video_caption_task(props.projectName ?? '')
+        : await api.start_setup_task(props.action)
     if (!result.ok || !result.task_id) {
-      emit('notify', result.error ?? '无法启动安装任务。')
+      startError.value = result.error ?? '无法启动任务。'
+      emit('notify', startError.value)
       return
     }
     taskId.value = result.task_id
@@ -76,9 +81,10 @@ async function start() {
     taskLogs.value = []
     state.value = { ok: true, status: 'running', message: '正在准备任务…', logs: [] }
     await poll()
-    timer = window.setInterval(() => { void poll() }, 700)
+    if (running()) timer = window.setInterval(() => { void poll() }, 700)
   } catch (error) {
-    emit('notify', error instanceof Error ? error.message : '无法启动安装任务。')
+    startError.value = error instanceof Error ? error.message : '无法启动任务。'
+    emit('notify', startError.value)
   } finally {
     starting.value = false
   }
@@ -96,7 +102,7 @@ async function cancel() {
 }
 
 function close() {
-  if (running()) return
+  if (running() || starting.value) return
   stopPolling()
   emit('close')
 }
@@ -105,6 +111,7 @@ watch(() => props.open, (open) => {
   minimized.value = false
   if (!open) {
     stopPolling()
+    startError.value = ''
     taskId.value = ''
     state.value = null
     taskLogs.value = []
@@ -120,15 +127,16 @@ onUnmounted(stopPolling)
     <div v-if="open && !minimized" class="task-backdrop">
       <section class="task-dialog" role="dialog" aria-modal="true" :aria-labelledby="`task-title-${action}`">
         <header class="task-header">
-          <div><span class="task-kicker">{{ action==='agent_task'?'助手执行任务':action==='preprocess'?'数据准备':'训练环境设置' }}</span><h2 :id="`task-title-${action}`">{{ title }}</h2></div>
-          <button v-if="running()" class="task-button" type="button" @click="minimized=true">最小化</button><button class="task-close" type="button" aria-label="关闭" :disabled="running()" @click="close">×</button>
+          <div><span class="task-kicker">{{ action==='agent_task'?'助手执行任务':action==='preprocess' || action==='video_caption'?'数据准备':'训练环境设置' }}</span><h2 :id="`task-title-${action}`">{{ title }}</h2></div>
+          <button v-if="running()" class="task-button" type="button" @click="minimized=true">最小化</button><button class="task-close" type="button" aria-label="关闭" :disabled="running() || starting" @click="close">×</button>
         </header>
         <p class="task-description">{{ description }}</p>
         <template v-if="!taskId">
-          <div class="task-note">{{ action === 'preprocess' ? '只处理当前项目的数据并生成标签，不会启动训练。完成后可打开标签编辑器检查。日志会显示在此窗口和主页运行日志中。' : '安装操作会在后台运行，并复用软件现有的安装与检测流程。日志会显示在此窗口和主页运行日志中。' }}</div>
+          <div class="task-note">{{ action === 'video_caption' ? '使用 Qwen2.5-VL 抽帧描述视频；首次使用会下载约 6~7GB 模型。已有同名字幕跳过，H3 混合媒体项目包含子文件夹。下载、处理进度和失败原因会显示在此窗口。' : action === 'preprocess' ? '只处理当前项目的数据并生成标签，不会启动训练。完成后可打开标签编辑器检查。日志会显示在此窗口和主页运行日志中。' : '安装操作会在后台运行，并复用软件现有的安装与检测流程。日志会显示在此窗口和主页运行日志中。' }}</div>
+          <div v-if="startError" class="task-state failed" role="alert">{{ startError }}</div>
           <footer class="task-actions">
-            <button class="task-button" type="button" @click="close">稍后再说</button>
-            <button class="task-button primary" type="button" :disabled="starting" @click="start">{{ starting ? '正在启动…' : '开始操作' }}</button>
+            <button class="task-button" type="button" :disabled="starting" @click="close">稍后再说</button>
+            <button class="task-button primary" type="button" :disabled="starting" @click="start">{{ starting ? '正在启动…' : action === 'video_caption' ? '开始描述' : '开始操作' }}</button>
           </footer>
         </template>
         <template v-else>

@@ -904,7 +904,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             cancel_event.set()
         elif downloader is not None:
             downloader.cancel()
-        elif kind in ("setup", "training", "preprocess", "caption", "prompt_reverse", "prompt_reverse_model", "lora_workbench"):
+        elif kind in ("setup", "training", "preprocess", "caption", "prompt_reverse", "prompt_reverse_model", "lora_workbench", "video_caption"):
             self.core.stop_active_process()
         return {"ok": True}
 
@@ -1193,6 +1193,75 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                         self._task.update(status="failed", message=message)
 
         threading.Thread(target=worker, daemon=True, name="caption-batch").start()
+        return {"ok": True, "task_id": task_id}
+
+    def start_video_caption_task(self, project_name):
+        """Describe dataset videos in the visible modern task dialog."""
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        project_name = str(project_name or "").strip()
+        config = self.core.load_project(project_name) if project_name else None
+        if not isinstance(config, dict):
+            return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
+        mode = str(config.get("mode") or "")
+        if mode not in ("video", "h3_fz"):
+            return {"ok": False, "error": "视频自动描述适用于 H3 视频或混合媒体项目。"}
+        try:
+            params = training_params(self.core, config, project_name)
+        except (ValueError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+        raw_dir = str(params.get("raw_dir") or "").strip()
+        if not raw_dir or not os.path.isdir(raw_dir):
+            return {"ok": False, "error": "请先选择有效的视频数据文件夹。"}
+        task_id = self._begin_task("视频 AI 自动描述", "video_caption", mode=mode, key=project_name)
+        if not task_id:
+            return {"ok": False, "error": "已有任务正在运行，请等它完成或停止后再试。"}
+        self.core.reset_stop()
+
+        def log(line):
+            line = redact(str(line))
+            match = re.search(r"\[视频描述进度\] (\d+)/(\d+)", line)
+            with self._task_lock:
+                if self._task and self._task.get("id") == task_id:
+                    if match:
+                        done, total = map(int, match.groups())
+                        self._task.update(progress=done / max(total, 1), message="正在描述视频：%d / %d" % (done, total))
+                    elif line.startswith("[打标]") or line.startswith("[环境]"):
+                        self._task.update(message=line, detail="字幕写入视频旁的同名 .txt 文件；已有字幕跳过。")
+            self._task_log(task_id, line)
+
+        def worker():
+            try:
+                self._release_agent_model_for_task(task_id)
+                self.core.run_video_caption(log, video_dir=raw_dir,
+                                            trigger=str(params.get("trigger") or ""),
+                                            mode=mode, params=params, recursive=mode == "h3_fz")
+                self.core.check_stop()
+                with self._task_lock:
+                    if self._task and self._task.get("id") == task_id:
+                        self._task.update(status="completed", progress=1.0,
+                                          message="视频描述完成；已有字幕保留，结果见日志。",
+                                          detail="生成的字幕保存在视频旁，可检查后开始训练。")
+            except getattr(self.core, "StopRequested", Exception):
+                log("[停止] 视频描述已停止；已完成的字幕保留。")
+                with self._task_lock:
+                    if self._task and self._task.get("id") == task_id:
+                        self._task.update(status="cancelled", message="视频描述已停止；已完成的字幕保留。")
+            except Exception as exc:
+                message = "视频描述失败：" + redact(str(exc))
+                log("[失败] " + message)
+                log(traceback.format_exc())
+                with self._task_lock:
+                    if self._task and self._task.get("id") == task_id:
+                        self._task.update(status="failed", message=message)
+
+        try:
+            threading.Thread(target=worker, name="ModernVideoCaption", daemon=True).start()
+        except Exception as exc:
+            with self._task_lock:
+                self._task.update(status="failed", message="无法启动视频描述：" + redact(str(exc)))
+            return {"ok": False, "error": "无法启动视频描述：" + redact(str(exc))}
         return {"ok": True, "task_id": task_id}
 
     def start_preprocess_task(self, project_name):
@@ -4223,10 +4292,13 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     return {"ok": False, "error": self._log_export["error"]}
             return {"ok": True, "export_id": export_id, "message": "正在收集运行日志与环境信息。"}
 
+        if action == "video_caption":
+            return self.start_video_caption_task(project_name)
+
         project_actions = {
             "label_editor", "export_config", "readme", "at_model_help",
             "at_engine_update", "fizgig_engine_update", "anima_components", "krea2_guide", "flux2_guide",
-            "h3_guide", "video_caption_stub", "video_caption", "amd_env",
+            "h3_guide", "video_caption_stub", "amd_env",
         }
         if action in project_actions:
             project_name = str(project_name or "").strip()
@@ -4248,7 +4320,6 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 "flux2_guide": "FLUX.2 使用引导",
                 "h3_guide": "H3 视频引导",
                 "video_caption_stub": "视频字幕工具",
-                "video_caption": "视频字幕工具",
                 "amd_env": "AMD 环境检查",
             }.get(action, "工具")
             message = "已在单独窗口打开「%s」的%s；新版训练页和当前项目会保留，关闭此窗口即可继续操作。" % (
