@@ -1,11 +1,12 @@
 """Project-scoped H3 component paths and header-only Fizgig compatibility checks.
 
-No tensor framework is imported and no model weights are copied or loaded into RAM.
+No tensor framework is imported. Official adapter downloads also receive a streamed SHA256 check.
 Shape contracts come from the official Comfy checkpoints and the v7.0.1 loader.
 """
 from __future__ import annotations
 
 from functools import lru_cache
+import hashlib
 import json
 import math
 import os
@@ -14,12 +15,31 @@ import struct
 
 KEYS = ("dit", "te", "video_vae", "audio_vae", "training_adapter", "turbo_lora")
 REQUIRED = ("dit", "te", "video_vae")
+TRAINING_ADAPTER_ID = {
+    "repo": "circlestone-labs/MiniMax-H3-Image-Training-Adapter",
+    "revision": "7c6c04f75ba597232d4ce2bb4a14709948ec723a",
+    "filename": "minimax_h3_image_training_adapter.safetensors",
+    "bytes": 620284872,
+    "sha256": "6d2c2de7bc11db101ed99cb348d8cb522da85ecdb23fddc96f0dbeee053ab18b",
+}
+
+
 TITLES = dict(dit="H3 主模型", te="Qwen3-VL-32B 文本编码器", video_vae="H3 视频 VAE",
               audio_vae="H3 音频 VAE", training_adapter="H3 训练适配器", turbo_lora="H3 Turbo 预览 LoRA")
 _FLOATS = {"BF16", "F16", "F32", "F64"}
 _BYTES = {"BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1, "F8_E5M2": 1,
           "F8_E4M3FN": 1, "F8_E8M0": 1, "I16": 2, "U16": 2, "BF16": 2,
           "F16": 2, "F32": 4, "I32": 4, "U32": 4, "I64": 8, "U64": 8, "F64": 8}
+
+
+def required_keys(media=None):
+    """Prepare the image adapter before choosing data; require it when photos are present."""
+    required = list(REQUIRED)
+    if not media or not media.get("total") or media.get("images", 0):
+        required.append("training_adapter")
+    if media and media.get("audio", 0):
+        required.append("audio_vae")
+    return tuple(required)
 
 
 def settings(config=None):
@@ -250,10 +270,26 @@ def files(core, selection=None):
     return {key: row["path"] if row["present"] else None for key, row in rows(core, selection).items()}
 
 
-def missing(core, selection=None, require_audio=False):
+def missing(core, selection=None, require_audio=False, require_adapter=False):
     state = rows(core, selection)
-    required = (*REQUIRED, "audio_vae") if require_audio else REQUIRED
+    required = (*REQUIRED, *(("training_adapter",) if require_adapter else ()),
+                *(("audio_vae",) if require_audio else ()))
     return [state[k]["error"] or "缺少 " + TITLES[k] for k in required if not state[k]["present"]]
+
+
+def validate_download(path, kind):
+    detail = validate(path, kind)
+    if kind == "training_adapter":
+        identity = TRAINING_ADAPTER_ID
+        if Path(path).stat().st_size != identity["bytes"]:
+            raise ValueError("H3 图片训练适配器下载大小不匹配，请重新下载。")
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != identity["sha256"]:
+            raise ValueError("H3 图片训练适配器 SHA256 校验失败，请重新下载。")
+    return detail
 
 
 def validate_selected(core, selection=None):

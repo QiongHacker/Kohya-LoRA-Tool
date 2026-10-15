@@ -26,10 +26,10 @@ from kohya_core.model_catalog import catalog as model_catalog, resolve_choice
 from kohya_core.fizgig_engine import runtime as fizgig_runtime, source_version as fizgig_source_version, VERSION as FIZGIG_TARGET, SUPPORTED_V7 as FIZGIG_STANDARD, use_runtime as fizgig_use_runtime
 from kohya_core.fizgig_adapter import FAMILIES as FIZGIG_FAMILIES, models as fizgig_models, missing as fizgig_missing, _validate as validate_fizgig_models
 from kohya_core.zimage_fizgig import settings as zimage_fz_settings, rows as zimage_fz_rows, validate as validate_zimage_fz_component, files as zimage_fz_files, models_dir as zimage_fz_models_dir
-from kohya_core.h3_models import settings as h3_settings, rows as h3_rows, validate as validate_h3_component, validate_selected as validate_h3_selected, training_precision as h3_training_precision
+from kohya_core.h3_models import settings as h3_settings, rows as h3_rows, validate as validate_h3_component, validate_selected as validate_h3_selected, training_precision as h3_training_precision, required_keys as h3_required_keys, validate_download as validate_h3_download
 from kohya_core.krea2_models import encoder_state as krea2_encoder_state, CHOICES as KREA2_ENCODER_CHOICES, settings as krea2_settings, rows as krea2_rows, files as krea2_files, missing as krea2_missing, encoder_key as krea2_encoder_key, change as change_krea2_selection, validate as validate_krea2_component, validate_selected as validate_krea2_selected
 from kohya_core.zimage_models import settings as zimage_settings, discover as zimage_components, validate_selection as validate_zimage_selection, missing as zimage_missing
-from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary, dataset_images, read_caption
+from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary, dataset_images, read_caption, normalize_batch_size, normalize_gradient_checkpointing
 
 try:
     from model_downloader import ModelDownloader
@@ -63,6 +63,7 @@ _MODERN_IMPORT_EXTRA_PARAMS = {
     "wd14_model", "overwrite", "keep_user_captions", "amd_mode", "fizgig_qwen_preset",
     "batch_size", "gc", "sample_prompt", "sample_seed", "global_pos", "global_neg",
     "caption_method", "caption_language", "caption_length",
+    "h3_caption_replace", "h3_sync_trigger",
 }
 
 _APPEARANCE_BACKGROUND_HISTORY_LIMIT = 8
@@ -409,6 +410,13 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     if match:
                         done, total = map(int, match.groups())
                         task.update(progress=min(done / max(total, 1), 1), message="正在使用 PixAI 打标…")
+                if (task.get("mode") == "h3_fz" and task.get("kind") in ("preprocess", "training")
+                        and task.get("status") == "running" and message.startswith("[H3 ")):
+                    task["detail"] = message[:240]
+                    match = re.search(r"\[H3 图片打标\] (\d+)/(\d+)", message)
+                    if match:
+                        done, total = map(int, match.groups())
+                        task.update(progress=min(done / max(total, 1), 1), message="正在准备 H3 图片标签…")
                 if task.get("kind") == "training":
                     task.setdefault("effective_params", {}).update(getattr(self.core, "get_effective", lambda: {})())
                 if task.get("kind") == "training" and re.search(r"preview failed|sampling failed|disabling previews|采样(?:预览)?(?:生成)?失败|停用后续预览|(?:采样|预览).*(?:Error:|Exception:)|No prompt file", message, re.I):
@@ -620,12 +628,14 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         required = set(required)
         if links_name == "KREA2_FZ_MODEL_LINKS":
             required.add(krea2_encoder_key(existing, selection))
-        if mode == "h3_fz" and config and config.get("raw_dir"):
-            try:
-                if self.core.scan_fizgig_h3_dataset(config["raw_dir"]).get("audio", 0):
-                    required.add("audio_vae")
-            except OSError:
-                pass
+        if mode == "h3_fz":
+            media = None
+            if config and config.get("raw_dir"):
+                try:
+                    media = self.core.scan_fizgig_h3_dataset(config["raw_dir"])
+                except OSError:
+                    pass
+            required = set(h3_required_keys(media))
         items = []
         for key, value in links.items():
             filename, label = value[0], value[1]
@@ -640,8 +650,11 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 part_size = 0
             main_choice = mode == "video" and key in ("dit", "dit_nvfp4")
             encoder_choice = links_name == "KREA2_FZ_MODEL_LINKS" and key in ("te", "te_fp8")
+            display_label = "H3 主模型（必需）" if mode == "h3_fz" and key == "dit" else self._plain_ui_text(label)
+            if mode == "h3_fz" and key == "training_adapter" and key in required:
+                display_label = "Circlestone 图片训练适配器（必需）"
             items.append({
-                "key": key, "filename": filename, "label": ("H3 主模型（必需）" if mode == "h3_fz" and key == "dit" else self._plain_ui_text(label)),
+                "key": key, "filename": filename, "label": display_label,
                 "url": url, "path": path, "present": present,
                 "required": key in required,
                 "required_group": "主模型（二选一）" if main_choice else "文本编码器（二选一）" if encoder_choice else "",
@@ -666,7 +679,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         elif mode == "qwen21_fz":
             note = "DiT、VAE、文本编码器和训练适配器为训练必需；speed LoRA 仅供预览，可选。"
         elif mode == "h3_fz":
-            note = "支持本地组件，无需复制或改名。主模型推荐 pruned int8 ConvRot，也支持完整浮点版本（训练时 NF4）；图片训练需要视频 VAE。音频 VAE 按需准备，训练适配器推荐，Turbo LoRA 可选。"
+            note = "支持本地组件，无需复制或改名。图片训练需准备 Circlestone 适配器：训练时冻结，预览和成品不包含它。主模型支持 pruned int8 ConvRot 或完整浮点版本；音频 VAE 按需准备，Turbo LoRA 可选。"
         else:
             note = "下载支持断点续传；取消或中断后再次点击同一文件即可接着下载。"
         params = {
@@ -739,8 +752,10 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         with self._task_lock:
             if self._task and self._task.get("status") in ("running", "awaiting_review"):
                 return {"ok": False, "error": "请等当前任务结束后再修改模型组件。"}
-        if action == "disable" and key in ("dit", "te", "video_vae"):
-            return {"ok": False, "error": "训练必需组件不能停用。"}
+        if action == "disable":
+            media = self.core.scan_fizgig_h3_dataset(config.get("raw_dir")) if config.get("raw_dir") else None
+            if key in h3_required_keys(media):
+                return {"ok": False, "error": "当前训练所需组件不能停用。"}
         path = ""
         if action == "select":
             state = h3_rows(self.core, h3_settings(config))[key]
@@ -888,8 +903,10 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         def done(ok, path):
             failure = ""
             if ok and mode == "h3_fz":
+                validated = False
                 try:
-                    validate_h3_component(path, key)
+                    validate_h3_download(path, key)
+                    validated = True
                     # Replace an invalid manual override only after a valid download.
                     if project_name and key in selected_before:
                         current = self.core.load_project(project_name)
@@ -901,6 +918,12 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                                 raise OSError("模型已下载，但项目路径保存失败；请重新选择这个文件。")
                 except (ValueError, OSError) as exc:
                     ok, failure = False, str(exc)
+                    if (key == "training_adapter" and not validated and os.path.isfile(path)
+                            and os.path.abspath(path) == os.path.abspath(dest)):
+                        try:
+                            os.replace(path, path + ".invalid." + str(time.time_ns()))
+                        except OSError as quarantine_error:
+                            failure += "；无法隔离下载文件：" + str(quarantine_error)
             if ok and mode == "krea2_fz":
                 try:
                     validate_krea2_component(path, key)
@@ -1184,6 +1207,9 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             directory = str(options.get("directory") or config.get("raw_dir") or "").strip()
             if not os.path.isdir(directory):
                 raise CaptionError("请先选择有效的原始图片文件夹。")
+            if config.get("mode") == "h3_fz":
+                from kohya_core.h3_dataset import media_files
+                media_files(self.core, directory)
             service = self._caption_settings.connection()
             preview, replace = bool(options.get("preview", True)), bool(options.get("replace", False))
             names = None
@@ -1227,7 +1253,9 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 report = generate_captions(service, directory, language, length, replace=replace,
                                            preview=preview, names=names, preview_cache=preview_cache, stop=self.core.check_stop,
                                            log=lambda line: self._task_log(task_id, line), progress=progress,
-                                           report_path=self.core.data_sub("logs", "caption_%s.json" % task_id))
+                                           report_path=self.core.data_sub("logs", "caption_%s.json" % task_id),
+                                           recursive=config.get("mode") == "h3_fz",
+                                           image_extensions=self.core.FIZGIG_IMAGE_EXTS if config.get("mode") == "h3_fz" else None)
                 report.update(project_name=project_name, directory=directory, replace=replace)
                 with self._task_lock:
                     self._caption_reports[task_id] = report
@@ -1379,7 +1407,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         def worker():
             import tempfile
 
-            report_path = os.path.join(tempfile.gettempdir(), "kohya_modern_manual_preprocess_%s.json" % task_id)
+            report_path = (self.core.data_sub("logs", "h3_preparation_%s.json" % task_id) if mode == "h3_fz"
+                           else os.path.join(tempfile.gettempdir(), "kohya_modern_manual_preprocess_%s.json" % task_id))
             try:
                 self._release_agent_model_for_task(task_id)
                 if mode == "video":
@@ -1389,19 +1418,9 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     ))
                     message = "视频数据检查完成。"
                 elif mode == "h3_fz":
-                    summary = self.core.scan_fizgig_h3_dataset(raw_dir)
-                    total = int(summary.get("total", 0) or 0)
-                    missing = summary.get("missing_captions", 0)
-                    missing = len(missing) if isinstance(missing, (list, tuple, set)) else int(missing or 0)
-                    self._task_log(task_id, "[预处理] H3 混合媒体扫描：图片 %d，视频 %d，音频 %d，总计 %d，缺字幕 %d。" % (
-                        int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
-                        int(summary.get("audio", 0) or 0), total, missing,
-                    ))
-                    if total <= 0:
-                        raise RuntimeError("目录中没有可训练的图片、视频或音频样本。")
-                    if missing:
-                        raise RuntimeError("有 %d 个媒体文件缺少同名 .txt 字幕；请补齐字幕后重新扫描。" % missing)
-                    message = "H3 混合媒体扫描完成；未移动或转码文件。"
+                    h3_params = training_params(self.core, config, project_name)
+                    self.core.prepare_h3_dataset(h3_params, lambda line: self._task_log(task_id, line), report=report_path)
+                    message = "H3 图片标签、媒体描述与触发词检查完成；媒体保持原文件。"
                 else:
                     self._task_log(task_id, "[预处理] 正在检查、整理并打标当前图集…")
                     with self._task_lock:
@@ -1461,7 +1480,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 self._task_log(task_id, traceback.format_exc())
             finally:
                 try:
-                    if os.path.isfile(report_path):
+                    if mode != "h3_fz" and os.path.isfile(report_path):
                         os.remove(report_path)
                 except OSError:
                     pass
@@ -1686,6 +1705,10 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             rows.append({"label": "训练量口径", "value": "轮数 × 每轮批次数；重复目录、过滤及分桶会改变总步数。启动后的生效参数和进度为准"})
         if kohya and params.get("base_type") == "sdxl":
             rows.append({"label": "SDXL 分辨率", "value": "默认 512 是资源起点；请查看处理后图片细节，再按显存自行调高"})
+        if mode == "h3_fz":
+            kind = str(params.get("at_sub_mode") or "character")
+            rows.append({"label": "视频静帧增强", "value": "画风模式关闭" if kind == "style" else "含视频时启用，辅助学习人物与对象细节"})
+            rows.append({"label": "训练媒体", "value": "递归读取原始目录；仅准备文本，缓存按训练类型区分"})
         rows.append({"label": "采样失败边界", "value": "Fizgig 部分入口可停用后续预览；其他入口的采样异常仍可能中断训练，不能保证隔离"})
         return rows
 
@@ -1780,19 +1803,32 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         min_count = int(getattr(self.core, "MIN_IMAGES", {}).get(mode, 15))
         media_summary = None
         if mode == "h3_fz":
+            from kohya_core.h3_dataset import scan as scan_h3, validate_options as validate_h3_options
             try:
-                media_summary = self.core.scan_fizgig_h3_dataset(raw_dir)
+                validate_h3_options(params)
+                media_summary, _ = scan_h3(self.core, raw_dir, trigger=params.get("trigger") or "")
             except Exception as exc:
                 return {"ok": False, "error": "H3 混合媒体数据集预检失败：%s" % exc}
             image_count = int(media_summary.get("total", 0) or 0)
-            missing_captions = media_summary.get("missing_captions", 0)
-            missing_captions = len(missing_captions) if isinstance(missing_captions, (list, tuple, set)) else int(missing_captions or 0)
             if image_count < min_count:
                 return {"ok": False, "error": "H3 混合媒体目录只有 %d 个样本；至少需要 %d 个。" % (image_count, min_count)}
-            if missing_captions:
-                return {"ok": False, "error": "有 %d 个 H3 媒体文件缺少同名 .txt 字幕；请补齐后再训练。" % missing_captions}
+            missing_images = media_summary.get("missing_images", [])
+            missing_other = media_summary.get("missing_videos", []) + media_summary.get("missing_audio", [])
+            if missing_other:
+                return {"ok": False, "error": "视频或音频缺少描述：%s。请先生成视频 AI 描述，音频准备同名 .txt。" % "、".join(missing_other[:8])}
+            if missing_images and params.get("caption_method") != "wd14":
+                return {"ok": False, "error": "%d 张 H3 图片缺少描述；请先批量补齐自然语言描述，或选择自动打标。" % len(missing_images)}
+            if missing_images:
+                warnings.append("%d 张图片缺少标签；数据准备阶段将使用所选模型补齐。" % len(missing_images))
+            if params.get("h3_caption_replace") and params.get("caption_method") == "wd14":
+                warnings.append("将重新生成已有图片标签，原文本会备份。")
+            if media_summary.get("missing_trigger"):
+                warnings.append("%d 个文本未包含触发词；%s。" % (len(media_summary["missing_trigger"]),
+                    "数据准备时补入并备份原文本" if params.get("h3_sync_trigger", True) else "触发词同步关闭，请检查是否符合训练目标"))
             has_audio = int(media_summary.get("audio", 0) or 0) > 0
             has_video = int(media_summary.get("videos", 0) or 0) > 0
+            if media_summary.get("images", 0) and not h3_files.get("training_adapter"):
+                return {"ok": False, "error": "H3 图片训练需要 Circlestone 图片训练适配器；请打开 H3 训练组件，下载缺失组件或选择本地文件。"}
             if has_audio:
                 try:
                     audio_missing = list(self.core.h3_fz_missing_models(require_audio=True, model_settings=params.get("h3_models")))
@@ -2376,7 +2412,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         def worker():
             import tempfile
 
-            report_path = os.path.join(tempfile.gettempdir(), "kohya_modern_preprocess_%s.json" % task_id)
+            report_path = (self.core.data_sub("logs", "h3_preparation_%s.json" % task_id) if params["mode"] == "h3_fz"
+                           else os.path.join(tempfile.gettempdir(), "kohya_modern_preprocess_%s.json" % task_id))
             monitor = None
             monitor_stop = threading.Event()
             monitor_thread = None
@@ -2394,16 +2431,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     self._task_log(task_id, "[预处理] 视频无需图片预处理；数据集 %d 段，约 %.1f 秒，%d 段缺少字幕。" % (
                         len(videos), duration, no_caption))
                 elif params["mode"] == "h3_fz":
-                    media_summary = self.core.scan_fizgig_h3_dataset(params["raw_dir"])
-                    processed_count = int(media_summary.get("total", 0) or 0)
-                    missing_captions = media_summary.get("missing_captions", 0)
-                    missing_captions = len(missing_captions) if isinstance(missing_captions, (list, tuple, set)) else int(missing_captions or 0)
-                    self._task_log(task_id, "[预处理] H3 混合媒体扫描：图片 %d，视频 %d，音频 %d，总计 %d，缺字幕 %d；不移动、不转码。" % (
-                        int(media_summary.get("images", 0) or 0), int(media_summary.get("videos", 0) or 0),
-                        int(media_summary.get("audio", 0) or 0), processed_count, missing_captions,
-                    ))
-                    if missing_captions:
-                        raise RuntimeError("有 %d 个媒体文件缺少同名 .txt 字幕；请补齐后再训练。" % missing_captions)
+                    report = self.core.prepare_h3_dataset(params, lambda line: self._task_log(task_id, line), report=report_path)
+                    processed_count = int(report["summary"].get("total", 0))
                 else:
                     is_kohya = params["mode"] in ("character", "style", "concept")
                     preprocess_mode = self.core.preprocess_mode(params["mode"], params["at_sub_mode"])
@@ -2443,7 +2472,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                         processed_count, label, plan["mode_label"], plan["min_images"]))
                 engine_name = plan.get("engine_label") or self._engine_label_for_mode(params["mode"])
                 review_message = ("视频字幕检查完成；确认后启动 %s。" % engine_name if params["mode"] == "video"
-                                  else "混合媒体扫描完成；确认字幕与样本后启动 %s。" % engine_name if params["mode"] == "h3_fz"
+                                  else "H3 数据准备完成；确认标签与样本后启动 %s。" % engine_name if params["mode"] == "h3_fz"
                                   else "可以打开标签编辑器查看或修改标签；确认后才会启动 %s。" % engine_name)
                 with self._task_lock:
                     task = self._task
@@ -2621,7 +2650,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 except Exception as exc:
                     self._task_log(task_id, "[WARN] 本次训练记录保存失败：%s" % exc)
                 try:
-                    if os.path.isfile(report_path):
+                    if params["mode"] != "h3_fz" and os.path.isfile(report_path):
                         os.remove(report_path)
                 except OSError:
                     pass
@@ -3048,6 +3077,11 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     return {"ok": False, "error": "PixAI 内容标签阈值需要为 0.01 到 0.99。"}
             if key == "fizgig_qwen_preset" and value not in ("auto", "fast", "standard", "style"):
                 return {"ok": False, "error": "Qwen-Image-2.1 训练预设无效。"}
+            if key in ("batch_size", "gc"):
+                try:
+                    value = normalize_batch_size(value) if key == "batch_size" else normalize_gradient_checkpointing(value)
+                except ValueError as exc:
+                    return {"ok": False, "error": str(exc)}
             if key in BOOL_PARAM_KEYS:
                 if not isinstance(value, bool):
                     return {"ok": False, "error": "训练参数「%s」必须为开关值。" % key}
@@ -3078,13 +3112,23 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         self._log("[项目] 已保存「%s」的训练配置。" % name)
         return {"ok": True, "project": next((p for p in self.list_projects() if p["name"] == name), None)}
 
-    def inspect_dataset(self, directory):
+    def inspect_h3_dataset(self, directory, trigger=""):
+        """Read the same recursive H3 inventory used by training and preparation."""
+        from kohya_core.h3_dataset import scan
+        try:
+            summary, _ = scan(self.core, str(directory or ""), trigger=str(trigger or "").strip())
+            return {"ok": True, **summary}
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def inspect_dataset(self, directory, recursive=False, h3=False):
         """Provide a read-only catalog; image reads require membership in this selected directory."""
         if not str(directory or "").strip():
             return {"ok": False, "error": "请先选择图片文件夹。"}
         try:
             root = Path(str(directory or "")).resolve()
-            images = dataset_images(root)
+            images = dataset_images(root, recursive=bool(recursive),
+                                    image_extensions=self.core.FIZGIG_IMAGE_EXTS if h3 else None)
             summary = caption_summary(root, images)
             names = [image.relative_to(root).as_posix() for image in images]
             token = uuid.uuid4().hex
@@ -3131,10 +3175,11 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             if not task or task.get("id") != str(task_id or "") or task.get("kind") != "training":
                 return {"ok": False, "error": "训练任务已不存在。"}
             directory = task.get("dataset_directory")
+            is_h3 = task.get("mode") == "h3_fz"
             is_raw = task.get("mode") in ("video", "h3_fz")
         if not directory:
             return {"ok": False, "error": "图片预处理尚未完成。"}
-        return {**self.inspect_dataset(directory), "source_kind": "raw_media" if is_raw else "processed"}
+        return {**self.inspect_dataset(directory, recursive=is_raw, h3=is_h3), "source_kind": "raw_media" if is_raw else "processed"}
 
     @staticmethod
     def _picker_initial_directory(path):
@@ -3774,7 +3819,10 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 missing = list(core.qwen21_fz_missing_models())
                 asset_dir = core.qwen21_fz_models_dir()
             elif mode == "h3_fz":
-                missing = list(core.h3_fz_missing_models(model_settings=h3_settings(project_config)))
+                media = core.scan_fizgig_h3_dataset(project_config.get("raw_dir")) if project_config.get("raw_dir") else None
+                required = h3_required_keys(media)
+                missing = list(core.h3_fz_missing_models(model_settings=h3_settings(project_config),
+                               require_adapter="training_adapter" in required, require_audio="audio_vae" in required))
                 asset_dir = core.h3_fz_models_dir()
             elif mode == "video":
                 missing = list(core.h3_missing_models())
@@ -3848,6 +3896,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "zimage": getattr(core, "TRIGGER_HINT_AT", ""),
             "zimage_fz": getattr(core, "TRIGGER_HINT_AT", ""),
         }
+        if mode == "h3_fz":
+            trigger_hints.update({key: "同步触发词会保留描述正文，并在改写前备份原文本；已有标签不做关键词过滤。" for key in ("character", "style", "concept")})
         dataset_hints = getattr(core, "DATASET_TIPS", {})
         project_config = core.load_project(str(project_name or "").strip()) if project_name else {}
         project_config = project_config if isinstance(project_config, dict) else {}
@@ -3931,7 +3981,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "presets": presets,
             "is_video": mode in ("video", "h3_fz"),
             "is_step_based": mode in ("video", "qwen_image", "zimage"),
-            "has_training_submode": mode in ("krea2", "krea2_at", "krea2_fz", "qwen21_fz", "flux2", "flux2_fz", "anima_fz", "sdxl_fz", "zimage_fz"),
+            "has_training_submode": mode in ("krea2", "krea2_at", "krea2_fz", "qwen21_fz", "flux2", "flux2_fz", "anima_fz", "sdxl_fz", "zimage_fz", "h3_fz"),
             "guide_steps": guide_steps,
         }
 

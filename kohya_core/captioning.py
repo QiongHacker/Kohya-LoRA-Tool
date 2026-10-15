@@ -294,11 +294,11 @@ def save_caption(image, text, previous, backup_root):
 
 
 def generate_captions(config, directory, language='zh', length='brief', replace=False,
-                      preview=False, stop=lambda: None, log=print, progress=None, report_path=None, names=None, preview_cache=None):
+                      preview=False, stop=lambda: None, log=print, progress=None, report_path=None, names=None, preview_cache=None, recursive=False, image_extensions=None):
     from kohya_core.project_config import dataset_images, read_caption
     caption_options(language, length)
     root = Path(directory).resolve()
-    images = dataset_images(root)
+    images = dataset_images(root, recursive=recursive, image_extensions=image_extensions)
     if not images:
         raise CaptionError('所选目录没有支持的图片；视频和音频不通过此功能描述。')
     sidecars = [str(image.with_suffix('.txt')).casefold() for image in images]

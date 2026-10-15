@@ -121,8 +121,8 @@ def training_job(core, values, log):
         yield str(path), env
 
 
-def generate(core, selection, report, log, progress, publish):
-    job, env = _job(core, selection['pixai_options'], log, progress, selection.get('device', 'auto'))
+def generate(core, selection, report, log, progress, publish, auto_download=False):
+    job, env = _job(core, selection['pixai_options'], log, progress, selection.get('device', 'auto'), auto_download=auto_download)
     job['images'] = [str(path) for path in selection['images']]
     received = set()
     prefix = '[PIXAI_RESULT] '

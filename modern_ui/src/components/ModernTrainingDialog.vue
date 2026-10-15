@@ -86,13 +86,16 @@ const settingSummary = computed(() => {
   const config = props.plan?.config_summary || {}
   const supports = props.plan?.config_supports || {}
   const rawMedia = ['video', 'h3_fz'].includes(props.plan?.mode || '')
+  const h3 = props.plan?.mode === 'h3_fz'
+  const h3Caption = config.caption_method === 'wd14' ? `${config.h3_caption_replace ? '重新生成图片标签，原文本备份' : '图片只补缺失标签'}；视频和音频读取同名文本` : '保留已有描述；缺失的图片描述需先生成或填写'
   const rows = [
-    [props.plan?.training_kind === 'slider' ? '训练依据' : '标签处理', props.plan?.training_kind === 'slider' ? '文字指导或配对图像' : rawMedia ? '读取媒体同名字幕' : config.keep_user_captions ? '保留已有标签，不自动打标' : '按当前设置预处理与打标'],
+    [props.plan?.training_kind === 'slider' ? '训练依据' : '标签处理', props.plan?.training_kind === 'slider' ? '文字指导或配对图像' : h3 ? h3Caption : rawMedia ? '读取媒体同名字幕' : config.keep_user_captions ? '保留已有标签，不自动打标' : '按当前设置预处理与打标'],
     ['训练采样', props.plan?.sampling_rule ? `${props.plan.sampling_rule.enabled ? '开启' : '关闭'}（${props.plan.sampling_rule.reason}）` : config.sample_preview === false ? '关闭' : config.sample_preview === true ? '开启' : '按显存自动选择'],
     ['采样种子', String(config.sample_seed || 1234)],
     ['采样间隔', props.plan?.sampling_rule?.cadence || '训练时确定'],
     ['保存间隔', props.plan?.save_interval_effective != null ? `每 ${props.plan.save_interval_effective} ${props.plan.save_interval_unit === 'epochs' ? '轮' : '步'}` : '训练时确定'],
   ]
+  if (h3) rows.push(['触发词处理', config.h3_sync_trigger !== false ? '补入缺少触发词的文本；保留正文并备份' : '保留原文本，不自动同步'])
   if (supports.quant_mode) rows.unshift(['量化精度', config.quant_mode === 'auto' ? '引擎自动选择' : String(config.quant_mode || '自动')])
   if (supports.batch_size) rows.push(['批大小', String(config.batch_size || 1)])
   if (supports.gc) rows.push(['梯度检查点', ({ on: '开启', off: '关闭', 开启: '开启', 关闭: '关闭', auto: '按显存自动' } as Record<string, string>)[String(config.gc)] || '按显存自动'])
@@ -101,12 +104,12 @@ const settingSummary = computed(() => {
 })
 const effectiveSummary = computed(() => {
   const p = state.value?.effective_params || {}
-  const labels: Record<string, string> = { total_steps: '引擎总步数', epochs: '实际轮数', optimizer: '实际优化器', batch_size: '实际批大小', unet_lr: '起始 UNet 学习率', te_lr: '文本编码器学习率', lr_scheduler: '学习率计划', lr_warmup_steps: '学习率预热', resolution: '训练分辨率', sample_seed: '固定采样种子', sample_width: '采样宽度', sample_height: '采样高度', sample_interval: '实际采样间隔', sample_interval_unit: '采样间隔单位', sample_error: '采样准备错误' }
-  return Object.entries(p).filter(([key, value]) => key in labels && value !== undefined).map(([key, value]) => ({ label: labels[key], value: key === 'sample_interval_unit' ? value === 'epochs' ? '轮' : '步' : value === 'engine_default' ? '引擎默认（未指定）' : String(value) }))
+  const labels: Record<string, string> = { total_steps: '引擎总步数', epochs: '实际轮数', optimizer: '实际优化器', batch_size: '实际批大小', gradient_checkpointing: '实际梯度检查点', unet_lr: '起始 UNet 学习率', te_lr: '文本编码器学习率', lr_scheduler: '学习率计划', lr_warmup_steps: '学习率预热', resolution: '训练分辨率', sample_seed: '固定采样种子', sample_width: '采样宽度', sample_height: '采样高度', sample_interval: '实际采样间隔', sample_interval_unit: '采样间隔单位', sample_error: '采样准备错误', resume_step: '续训起始步数', resume_snapshot: '续训快照', training_adapter: '图片训练适配器', training_adapter_loaded: '适配器加载状态', training_type: '训练类型', caption_method: '图片打标方式', clip_still_as_photo: '视频静帧增强' }
+  return Object.entries(p).filter(([key, value]) => key in labels && value !== undefined).map(([key, value]) => ({ label: labels[key], value: key === 'training_type' ? ({ character: '人物', style: '画风', concept: '概念' } as Record<string, string>)[String(value)] || String(value) : key === 'caption_method' ? ({ wd14: '自动关键词', natural: '自然语言描述', existing: '已有文本' } as Record<string, string>)[String(value)] || String(value) : ['clip_still_as_photo', 'gradient_checkpointing'].includes(key) ? value ? '开启' : '关闭' : key === 'training_adapter_loaded' ? value ? '引擎已加载' : '尚未确认加载' : key === 'sample_interval_unit' ? value === 'epochs' ? '轮' : '步' : value === 'engine_default' ? '引擎默认（未指定）' : String(value) }))
 })
 const hasResume = computed(() => Boolean(props.plan?.resume_path))
 const isRawMediaMode = computed(() => ['video', 'h3_fz'].includes(props.plan?.mode || ''))
-const trainingTypeLabel = computed(() => props.plan?.training_kind === 'multi_character' ? '多角色' : props.plan?.training_kind === 'slider' ? '概念滑块' : props.plan?.mode === 'h3_fz' ? '混合媒体' : props.plan?.mode === 'video' ? '视频' : props.plan?.training_type === 'style' ? '画风' : props.plan?.training_type === 'concept' ? '概念' : '人物')
+const trainingTypeLabel = computed(() => props.plan?.training_kind === 'multi_character' ? '多角色' : props.plan?.training_kind === 'slider' ? '概念滑块' : props.plan?.mode === 'h3_fz' ? `${props.plan?.training_type === 'style' ? '画风' : props.plan?.training_type === 'concept' ? '概念' : '人物'} · 混合媒体` : props.plan?.mode === 'video' ? '视频' : props.plan?.training_type === 'style' ? '画风' : props.plan?.training_type === 'concept' ? '概念' : '人物')
 const engineDescription = computed(() => props.plan?.training_kind === 'slider'
   ? '使用文字或图片对训练滑块 LoRA；底模与文本编码器冻结。'
   : props.plan?.training_engine === 'kohya'
@@ -114,7 +117,7 @@ const engineDescription = computed(() => props.plan?.training_kind === 'slider'
   : props.plan?.mode === 'video'
     ? '先检查视频和字幕；确认后直接调用现有 MiniMax H3 训练入口。'
     : props.plan?.mode === 'h3_fz'
-      ? '扫描原始目录中的图片、视频、音频和同名字幕；不会移动或转码媒体，确认后调用 Fizgig H3 训练入口。'
+      ? '按当前设置准备图片标签、检查媒体描述；确认后开始 H3 训练。'
     : `开始后先按当前设置预处理图集；你可以检查和修改自动标签，确认后直接调用现有 ${props.plan?.engine_label || '训练引擎'}入口。`)
 
 watch([() => props.open, () => props.plan?.resume_path], ([open, resumePath]) => {
@@ -399,10 +402,10 @@ onUnmounted(stopPolling)
           <p v-if="state?.detail" class="train-detail">{{ state.detail }}</p>
           <div v-if="awaitingReview" class="review-callout">
             <strong>训练尚未开始</strong>
-            <span>{{ plan?.mode === 'video' ? '请确认视频字幕和训练数据后继续。' : plan?.mode === 'h3_fz' ? '请确认混合媒体样本与同名字幕后继续；格式会在引擎缓存阶段校验。' : '请检查预处理后的图片和标签；需要时打开标签编辑器修改，回来后确认继续训练。' }}</span>
+            <span>{{ plan?.mode === 'video' ? '请确认视频字幕和训练数据后继续。' : plan?.mode === 'h3_fz' ? '请检查原图、标签和媒体描述后继续；媒体格式在引擎缓存阶段校验。' : '请检查预处理后的图片和标签；需要时打开标签编辑器修改，回来后确认继续训练。' }}</span>
           </div>
           <TrainingMetrics :metrics="state?.metrics" :history="state?.loss_history" />
-          <DatasetImageBrowser v-if="awaitingReview && !isRawMediaMode" :task-id="taskId" :directory="plan?.raw_dir" :desktop="true" />
+          <DatasetImageBrowser v-if="awaitingReview && (!isRawMediaMode || plan?.mode === 'h3_fz')" :task-id="taskId" :directory="plan?.raw_dir" :desktop="true" :recursive="plan?.mode === 'h3_fz'" :raw-media="plan?.mode === 'h3_fz'" />
           <details v-if="effectiveSummary.length" class="train-effective"><summary>引擎启动后记录的生效参数</summary><div v-for="row in effectiveSummary" :key="row.label"><span>{{ row.label }}</span><strong>{{ row.value }}</strong></div><p>这里记录工具已解析的设置；引擎内部再次调整以日志为准。学习率不是保证不变的实时值。</p></details>
           <section v-if="!awaitingReview" class="train-sample" aria-label="训练采样预览">
             <p v-if="plan?.training_kind === 'slider'">权重从左到右：{{ (plan.config_summary?.slider as SliderSettings | undefined)?.purpose === 'bidirectional' ? '−1 / −0.5 / 0 / +0.5 / +1' : '0 / +0.25 / +0.5 / +0.75 / +1' }}。0 为底模基线。完整对照见滑块页。</p>

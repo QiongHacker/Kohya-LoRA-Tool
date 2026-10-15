@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type { CaptionReport, CaptionServiceSettings, ModernTaskStatus } from '../bridge'
 
-const props = defineProps<{ projectName: string; directory: string; desktop: boolean; method: string; language: string; length: string }>()
+const props = defineProps<{ projectName: string; directory: string; desktop: boolean; method: string; language: string; length: string; recursive?: boolean }>()
 const emit = defineEmits<{ 'update:method': [value: string]; 'update:language': [value: string]; 'update:length': [value: string] }>()
 const settings = reactive<CaptionServiceSettings>({ provider: 'compatible', base_url: 'http://127.0.0.1:1234/v1', model: '', unload_after: true, has_key: false })
 const apiKey = ref('')
@@ -77,7 +77,7 @@ async function loadThumbnails() {
   const api = window.pywebview?.api
   if (!api || disposed) return
   const id = taskId.value
-  const catalog = await api.inspect_dataset(taskDirectory.value)
+  const catalog = await api.inspect_dataset(taskDirectory.value, Boolean(props.recursive), Boolean(props.recursive))
   if (!catalog.ok || !catalog.preview_token) return
   for (const item of resultItems.value.slice(0, 3)) {
     const image = await api.get_dataset_preview(catalog.preview_token, item.name)

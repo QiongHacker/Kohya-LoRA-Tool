@@ -97,6 +97,12 @@ export interface QwenModelSaveResult {
   setup?: QwenModelSetup
 }
 
+export interface H3DatasetSummary {
+  ok: boolean; error?: string; images?: number; videos?: number; audio?: number; total?: number;
+  captioned?: number; missing_captions?: string[]; missing_images?: string[];
+  missing_videos?: string[]; missing_audio?: string[]; missing_trigger?: string[];
+}
+
 export interface DatasetSummary {
   ok: boolean
   images?: number
@@ -230,7 +236,8 @@ export interface DesktopApi {
   export_slider_checkpoint(project_name: string, run_id: string, checkpoint: string): Promise<{ok: boolean; error?: string; message?: string}>
   get_slider_sample(project_name: string, run_id: string, name: string): Promise<{ok: boolean; error?: string; data_url?: string}>
   review_slider_result(project_name: string, run_id: string, review: SliderReview): Promise<{ok: boolean; error?: string}>
-  inspect_dataset(directory: string): Promise<DatasetSummary>
+  inspect_h3_dataset(directory: string, trigger?: string): Promise<H3DatasetSummary>
+  inspect_dataset(directory: string, recursive?: boolean, h3?: boolean): Promise<DatasetSummary>
   inspect_task_dataset(task_id: string): Promise<DatasetSummary>
   list_dataset_preview(token: string, offset?: number): Promise<{ ok: boolean; images?: string[]; next_offset?: number | null; error?: string }>
   get_dataset_preview(token: string, name: string): Promise<{ ok: boolean; data_url?: string; name?: string; width?: number; height?: number; caption?: string; error?: string }>

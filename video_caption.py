@@ -5,7 +5,7 @@
   python video_caption.py --video_dir <视频文件夹> [--trigger <触发词>] [--frames 6] [--overwrite]
 
 模型：Qwen/Qwen2.5-VL-3B-Instruct（约 6~7GB，首次使用自动下载，走 hf-mirror 国内镜像）。
-已存在同名 .txt 的视频默认跳过（避免重复打标/覆盖手写描述），--overwrite 可强制重写。
+已有非空同名 .txt 默认保留，空白文本会补齐；改写前备份原文本。--overwrite 可强制重写。
 """
 # ★ 2026-09-27 关键修复：剔除「本脚本所在目录」在 sys.path 中的条目 ✗
 #   打包版把 python312.dll / _socket.pyd 等 3.12 的 C 扩展与本脚本平铺在同一目录 ✗
@@ -29,22 +29,75 @@ if any(_glob2.glob(_os.path.join(_HERE, _p))
 import argparse
 import os
 import sys
+from pathlib import Path
+import re
+import tempfile
+import time
+import uuid
 
 # 默认模型：Qwen2.5-VL-3B-Instruct（约 6~7GB，首次使用自动下载，走 hf-mirror 国内镜像）
 MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 
-def find_videos(folder, recursive=False):
+def find_videos(folder, recursive=False, mp4_only=False):
+    folder = str(Path(folder).resolve())
     exts = (".mp4", ".avi", ".mov", ".webm", ".mkv", ".wmv", ".m4v", ".flv")
+    if mp4_only:
+        exts = (".mp4",)
     out = []
     folders = os.walk(folder) if recursive else [(folder, [], os.listdir(folder))]
     for root, dirs, files in folders:
-        dirs.sort()
+        dirs[:] = sorted(name for name in dirs if not name.startswith(".")
+                          and not _linked(Path(root) / name))
         for f in sorted(files):
             p = os.path.join(root, f)
-            if os.path.isfile(p) and f.lower().endswith(exts):
+            if os.path.isfile(p) and not _linked(Path(p)) and f.lower().endswith(exts):
                 out.append(p)
     return out
+
+
+def _linked(path):
+    return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
+
+
+def caption_snapshot(video):
+    path = Path(video).with_suffix(".txt")
+    if _linked(path):
+        raise ValueError("字幕文件是链接，请先改为本地文本：%s" % path.name)
+    if not path.exists():
+        return None, ""
+    if path.stat().st_size > 65536:
+        raise ValueError("字幕文件过大，请先检查：%s" % path.name)
+    content = path.read_bytes()
+    encoding = "utf-16" if content.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+    return content, content.decode(encoding, errors="replace").strip()
+
+
+def write_caption(video, text, previous, backup_root, dataset_root):
+    path = Path(video).with_suffix(".txt")
+    if caption_snapshot(video)[0] != previous:
+        raise RuntimeError("描述期间字幕已修改，保留最新文本，请重新检查")
+    data = (text.rstrip() + "\n").encode("utf-8")
+    if previous is None:
+        # Exclusive creation protects a newly added user caption.
+        with path.open("xb") as handle:
+            handle.write(data)
+        return
+    if _linked(backup_root.parent):
+        raise RuntimeError("字幕备份目录是链接，请先检查 .caption_backups")
+    backup = backup_root / path.relative_to(dataset_root)
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_bytes(previous)
+    fd, temporary = tempfile.mkstemp(prefix=".caption_", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        if caption_snapshot(video)[0] != previous:
+            raise RuntimeError("描述期间字幕已修改，保留最新文本，请重新检查")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def extract_frames(video_path, n=6, short=448):
@@ -82,17 +135,21 @@ def main():
     ap.add_argument("--frames", type=int, default=6)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--recursive", action="store_true", help="包含数据集子文件夹")
+    ap.add_argument("--mp4-only", action="store_true", help="H3 混合媒体只描述可训练的 MP4")
     ap.add_argument("--model", default=MODEL_ID, help="Qwen2.5-VL 模型 ID（默认 %s）" % MODEL_ID)
     args = ap.parse_args()
 
     if args.frames < 1:
         ap.error("--frames 必须大于 0")
-    videos = find_videos(args.video_dir, recursive=args.recursive)
+    videos = find_videos(args.video_dir, recursive=args.recursive, mp4_only=args.mp4_only)
     if not videos:
         print(f"[打标] 视频文件夹里没有找到视频：{args.video_dir}")
         return 1
 
-    pending = [vp for vp in videos if args.overwrite or not os.path.isfile(os.path.splitext(vp)[0] + ".txt")]
+    dataset_root = Path(args.video_dir).resolve()
+    snapshots = {vp: caption_snapshot(vp) for vp in videos}
+    pending = [vp for vp in videos if args.overwrite or not snapshots[vp][1]]
+    backup_root = dataset_root / ".caption_backups" / ("video_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8])
     n_ok, n_skip, n_fail = 0, len(videos) - len(pending), 0
     print(f"[打标] 找到 {len(videos)} 个视频，待描述 {len(pending)} 个，已有字幕跳过 {n_skip} 个。")
     if not pending:
@@ -111,9 +168,8 @@ def main():
     trig = (args.trigger or "").strip()
     prefix = f"<{trig}> " if trig else ""
     for index, vp in enumerate(pending, 1):
-        txt = os.path.splitext(vp)[0] + ".txt"
         try:
-            if os.path.isfile(txt) and not args.overwrite:
+            if caption_snapshot(vp)[1] and not args.overwrite:
                 print(f"[打标] 跳过（已有 txt）：{os.path.basename(vp)}")
                 n_skip += 1
                 continue
@@ -135,8 +191,9 @@ def main():
                                     skip_special_tokens=True)[0].strip()
             if not out:
                 raise RuntimeError("模型没有生成描述，未写入占位字幕")
-            with open(txt, "w" if args.overwrite else "x", encoding="utf-8") as f:
-                f.write(out + "\n")
+            if trig and not re.search(r"(^|[\s,，])" + re.escape(trig) + r"([\s,，.!?。！？]|$)", out, re.IGNORECASE):
+                out = trig + ", " + out
+            write_caption(vp, out, snapshots[vp][0], backup_root, dataset_root)
             print(f"[打标] OK {os.path.basename(vp)} -> {out[:90]}")
             n_ok += 1
         except FileExistsError:

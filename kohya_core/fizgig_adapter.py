@@ -108,7 +108,8 @@ def _helper_configs(core, family, logf):
 
 def _validate(core, family, files):
     required = ("dit", "te", "vae")
-    if family in ("qwen_image21", "zimage"): required += ("training_adapter",)
+    if family in ("qwen_image21", "zimage") or (family == "minimax" and files.get("training_adapter")):
+        required += ("training_adapter",)
     for key in required:
         path = files.get(key)
         if not path or not Path(path).is_file(): raise RuntimeError("缺少 %s 的 %s 模型，请先准备模型文件。" % (family, key))
@@ -142,7 +143,7 @@ def validate_base(core, family, checkpoint):
         raise RuntimeError("Fizgig SDXL 需要包含 UNet、双 CLIP 和 VAE 的完整 SDXL safetensors 底模。")
 
 
-def _cache_identity(core, family, files, subsets, resolution, commit=COMMIT):
+def _cache_identity(core, family, files, subsets, resolution, commit=COMMIT, training_type=None):
     def stat(path):
         p = Path(path); st = p.stat()
         return [str(p.resolve()), st.st_size, st.st_mtime_ns]
@@ -153,6 +154,9 @@ def _cache_identity(core, family, files, subsets, resolution, commit=COMMIT):
             if path.is_file() and path.suffix.lower() in core.FIZGIG_IMAGE_EXTS | {".mp4", ".wav", ".mp3", ".flac", ".m4a", ".txt"}:
                 images.append(stat(path))
     signature = {"commit": commit, "family": family, "resolution": resolution, "models": assets, "files": images}
+    if family == "minimax":
+        signature["training_type"] = training_type or "character"
+        signature["clip_still"] = training_type != "style"
     return hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:20], signature
 
 
@@ -193,8 +197,13 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         raise ValueError("新版 %s 支持 %s；当前精度 %s 不受支持，请重新选择。" % (family, "/".join(allowed), precision))
     train_dir = (params.get("train_data_dir") or params.get("raw_dir")) if family == "minimax" else core.dataset_train_dir("character", params.get("project"))
     if family == "minimax":
+        from .h3_dataset import validate_options
+        h3_training_type, _caption_method = validate_options(params)
         dataset, subsets = core._scan_fizgig_h3_subsets(train_dir, params.get("repeats", 1))
         count, captions = dataset["total"], dataset["missing_captions"]
+        if dataset["images"] and not files.get("training_adapter"):
+            raise RuntimeError("H3 图片训练需要 Circlestone 图片训练适配器；请在 H3 训练组件中下载或选择本地文件。")
+        logf("[Fizgig · H3] 图片训练适配器：%s" % (files.get("training_adapter") or "未使用（当前无图片素材）"))
         if dataset["audio"] and not files.get("audio_vae"):
             raise RuntimeError("音频素材需要 H3 音频 VAE，请先下载。")
         if dataset["videos"] and not files.get("audio_vae"):
@@ -238,15 +247,24 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
                     "model_mtime_ns": model_path.stat().st_mtime_ns,
                     "rank": rank, "alpha": alpha, "optimizer": optimizer,
                     "learning_rate": lr, "adaptive_lr": list(adaptive) if adaptive else None}
-    if family == "zimage":
+    if family == "zimage" or (family == "minimax" and files.get("training_adapter")):
         adapter_path = Path(files["training_adapter"])
         run_identity["training_adapter"] = [str(adapter_path.resolve()), adapter_path.stat().st_size, adapter_path.stat().st_mtime_ns]
+    if family == "minimax":
+        run_identity["training_type"] = h3_training_type
     marker = output / (output_name + ".fizgig-runtime.json")
     if resume_from:
+        from kohya_core.training_resume import require_state
+        resumed_step = require_state(resume_from, "fizgig")
+        core._record_effective(resume_step=resumed_step, resume_snapshot=Path(resume_from).name)
+        logf("[续训] 使用完整 Fizgig 状态：已完成 %d 步；权重、优化器和随机数状态由引擎恢复。" % resumed_step)
         state_file = Path(resume_from) / "training_state.json"
         previous = json.loads(state_file.read_text(encoding="utf-8")).get("kohya_runtime", {}) if state_file.is_file() else {}
+        if family == "minimax" and previous.get("family") == "minimax" and "training_type" not in previous:
+            # Old H3 runs always enabled clip stills, matching the character strategy.
+            previous["training_type"] = "character"
         if previous != run_identity:
-            raise RuntimeError("续训快照的引擎、底模、rank、优化器或学习率计划与当前选择不同，或缺少版本记录。请用原配置续训；新版可从头训练。")
+            raise RuntimeError("续训快照的引擎、底模、训练适配器、训练类型、rank、优化器或学习率计划与当前选择不同，或缺少版本记录。请用原配置续训；添加适配器后请从头训练。")
     swap_text = str(numeric("blocks_to_swap", "auto")).strip().lower()
     swap = -1 if swap_text in ("auto", "自动", "") else int(swap_text)
     if swap < -1: raise ValueError("块交换应为自动或非负整数。")
@@ -270,7 +288,8 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         if family == "sdxl": env["FIZGIG_SDXL_CONFIG_DIR"] = folder
     if family == "qwen_image21":
         env["FIZGIG_QWEN21_PROCESSOR_DIR"] = str(Path(core._ensure_at_image_qwen21_assets(logf)) / "processor")
-    fingerprint, identity = _cache_identity(core, family, files, subsets, resolution, commit)
+    fingerprint, identity = _cache_identity(core, family, files, subsets, resolution, commit,
+                                            training_type=h3_training_type if family == "minimax" else None)
     cache = Path(core.data_sub("dataset", proj, "fizgig_v7_cache", family, fingerprint))
     cache.mkdir(parents=True, exist_ok=True)
     _write(cache / "identity.json", identity)
@@ -285,7 +304,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
                "--skip_existing", "--batch_size", "1", "--num_workers", "2"]
         if family == "minimax" and stage == "latents":
             if files.get("audio_vae"): cmd += ["--aux", "audio_vae=" + files["audio_vae"]]
-            if dataset["videos"]: cmd += ["--aux", "clip_still=1"]
+            if dataset["videos"] and h3_training_type != "style": cmd += ["--aux", "clip_still=1"]
         if core.run_stream(cmd, cwd=source, env=env, logf=logf): raise RuntimeError("%s %s 缓存失败，请查看日志。" % (family, stage))
     cmd = [python, str(Path(source) / "src/fizgig/families/train.py"), "--family", family,
            "--network_type", "lora", "--dit", files["dit"], "--dataset_config", str(config),
@@ -306,7 +325,10 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if family == "minimax":
         options += ["photo_blocks=20-49", "clip_blocks=20-49", "audio_blocks=20-49", "caption_dropout=0.05",
                     "tread=0.5@2-47", "shift=0.666667"]
-        if dataset["videos"]: options += ["clip_still_as_photo=1"]
+        if dataset["videos"] and h3_training_type != "style": options += ["clip_still_as_photo=1"]
+        logf("[Fizgig · H3] 训练类型：%s；视频静帧增强：%s。" % (h3_training_type, "开启" if dataset["videos"] and h3_training_type != "style" else "关闭"))
+        core._record_effective(training_type=h3_training_type, caption_method=params.get("caption_method") or "wd14",
+                               clip_still_as_photo=bool(dataset["videos"] and h3_training_type != "style"))
         if files.get("audio_vae"): options += ["audio_vae=" + files["audio_vae"]]
     if family == "sdxl": options += ["prediction=" + ("v" if core._looks_like_vpred(files["dit"]) else "epsilon")]
     total = sum(r * n for _, r, n in subsets) * epochs
@@ -342,6 +364,9 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         sample_at_first=False, sample_width=resolution if enabled else None,
         sample_height=resolution if enabled else None, sample_steps=steps if enabled else None,
         sample_cfg_scale=cfg if enabled else None, sample_at_end=False)
+    if family == "minimax":
+        core._record_effective(training_adapter=files.get("training_adapter") or "未使用",
+                               training_adapter_loaded=False)
     monitored("[Fizgig] %s · %s · 普通 LoRA；%s 个素材，%s 轮。" % (version, family, count, epochs))
     def runtime_log(line):
         text = str(line)
@@ -351,6 +376,8 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         loaded = re.search(r"Loading .+ DiT \((bf16|int8|nf4|hqq)\)", text)
         if loaded:
             core._record_effective(quant_mode=loaded.group(1))
+        if family == "minimax" and "[adapter] training adapter ON" in text:
+            core._record_effective(training_adapter_loaded=True)
         monitored(line)
     if core.run_stream(cmd, cwd=source, env=env, logf=core._fizgig_warmup_log_filter(runtime_log)):
         raise RuntimeError("Fizgig %s LoRA 训练失败，请查看日志。" % family)

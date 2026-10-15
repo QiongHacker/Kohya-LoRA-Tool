@@ -301,15 +301,9 @@ PARAM_SCOPE = {
     # 量化适用于 Krea2 / FLUX.2 系及 Fizgig Qwen 2.1 / H3；块交换仅适用于前两系。
     "quant_mode": ("anima_fz", "sdxl_fz", "krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz"),
     "blocks_to_swap": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
-    # ★ 2026-09-27 新增（用户诉求：训练器能改 bs 与梯度检查点）✗
-    #   batch_size：留空 = 自动 1 ✓
-    #     · 第一引擎(kohya) 画风/人物/概念：`train()` 里本就 `params.get("batch_size", 1)` ✓
-    #     · 第二引擎(musubi) Krea2 / FLUX.2：写进 dataset_config.toml ✓
-    #       （musubi 的训练批大小只认该配置 ✗，命令行没有 --batch_size ✓）
+    # Training batch size is written into each engine's dataset config; cache batches are independent.
     "batch_size": ("style", "character", "concept", "krea2", "flux2"),
-    #   gc（梯度检查点）：自动 = 显存未知或 <16G 时开启；可手动「开启 / 关闭」✓
-    #     · 第一引擎(kohya) 与 第二引擎(musubi) 的 Krea2 / FLUX.2 都真读它 ✓
-    #     · Fizgig（第四引擎）走 yaml 且固定开启 ✗ → 本参数对它不生效 ✓
+    # Explicit on/off is supported by Kohya and Musubi; other routes manage checkpointing internally.
     "gc": ("style", "character", "concept", "krea2", "flux2"),
     # 优化器：两个 Fizgig 引擎不读（用引擎自己的默认）
     "optimizer": ("anima_fz", "sdxl_fz", "style", "character", "concept", "krea2", "flux2",
@@ -393,7 +387,7 @@ DATASET_TIPS = {
     "krea2_at": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前把 Krea 2 RAW 底模放进 models/krea2/（26GB，bf16 原版），文本编码器/VAE 首次训练自动下载。推荐 16G+ 显存；新项目默认 512px。",
     "krea2_fz": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。NVIDIA/AMD 双平台，8G 显存自动 NF4、12G+ 用 fp8。",
     "qwen21_fz": "📌 Fizgig Qwen-Image-2.1：准备至少 5 张清晰图片，放在原始图片文件夹；选择人物、画风或概念子模式。使用官方 Fizgig 预设，默认 512px，可自行调高。",
-    "h3_fz": "📌 MiniMax H3 全模态：图片、视频、音频可放在同一目录或其子目录，每个文件配同名 .txt。准备至少 1 个样本；预处理只扫描，不会移动、转码或生成字幕。",
+    "h3_fz": "📌 MiniMax H3 全模态：图片、视频、音频可放在同一目录或其子目录，每个文件配同名 .txt。准备至少 1 个样本；图片可自动打标，视频可 AI 描述；准备数据时检查同名文本与触发词，保留原始媒体。",
     "flux2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 FLUX.2 模型放进 models/flux2/（DiT+Qwen3 文本编码器+VAE，约 16GB，国内镜像）。8G 显存可跑（自动开省显存），推荐 12G+。",
     "flux2_fz": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Klein 9B 模型放进 models/flux2/（fp8 DiT + Qwen3-8B 文本编码器 + VAE）。推荐 16G+ 显存（12G 自动 NF4）。",
     "video": "📌 视频数据集提示：准备 3~10 段 3~10 秒的同角色/同风格视频（mp4），每段配一个同名 .txt 字幕描述内容。H3 模型 40GB+，训练推荐 24G 显存（NVIDIA）。",
@@ -506,9 +500,9 @@ GUIDE_STEPS = {
         {"id": "fizgig", "label": "② 安装第四引擎", "btn": "去安装", "check": "fizgig", "act": "cmd_install_fizgig",
          "tip": "安装第四引擎 Fizgig（MiniMax H3 图像/视频/音频混合 LoRA）。"},
         {"id": "h3_fz_models", "label": "③ 下载 H3 Fizgig 模型", "btn": "去下载", "check": "h3_fz_models", "act": "cmd_dl_h3_fz_models",
-         "tip": "下载官方 int8 DiT、文本编码器和视频 VAE；音频 VAE 按数据集需要，可选适配器和 Turbo LoRA。"},
+         "tip": "下载官方 int8 DiT、文本编码器和视频 VAE；图片训练需准备 Circlestone 适配器，音频 VAE 按需准备，Turbo LoRA 可选。"},
         {"id": "raw", "label": "④ 选择混合媒体文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
-         "tip": "图片、视频和音频可混放；每个媒体文件需配同名 .txt，预处理按钮只扫描。"},
+         "tip": "图片、视频和音频可混放。图片可自动打标，视频可 AI 描述；准备标签后检查再训练。"},
     ],
     "video": [
         {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",

@@ -13,6 +13,7 @@ import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
 import { useTrainingProfiles } from '../useTrainingProfiles'
+import { normalizeGradientCheckpointing } from '../trainingParameters'
 
 type BrowseKind = 'folder' | 'model'
 const props = defineProps<{
@@ -116,7 +117,7 @@ function hydrate(config?: ProjectConfig | null) {
   for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_seed', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
     const presetValue = preset[key] === undefined ? '' : key === 'unet_lr' || key === 'te_lr' ? styledPresetValue(key, currentModeKey.value, draft.base_type, get(config?.style_preset) || '自定义') : String(preset[key])
     const value = get(params[key]) || presetValue || (demo ? demoValues[key] ?? (key === 'optimizer' || key === 'gc' ? 'auto' : '') : key === 'optimizer' || key === 'gc' ? 'auto' : '')
-    draft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'sample_seed' ? value || '1234' : value
+    draft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'gc' ? normalizeGradientCheckpointing(value) : key === 'sample_seed' ? value || '1234' : value
   }
   draft.pixai_threshold = String(params.pixai_threshold ?? '.17')
   for (const key of ['pixai_character', 'pixai_copyright', 'pixai_style'] as const) draft[key] = Boolean(params[key])

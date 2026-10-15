@@ -8,12 +8,14 @@ import CropRatioField from './CropRatioField.vue'
 import Krea2ComponentsPanel from './Krea2ComponentsPanel.vue'
 import DatasetInspection from './DatasetInspection.vue'
 import CaptionControls from './CaptionControls.vue'
+import H3DataControls from './H3DataControls.vue'
 import PixaiTagOptions from './PixaiTagOptions.vue'
 import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
 import { useTrainingProfiles } from '../useTrainingProfiles'
+import { normalizeGradientCheckpointing } from '../trainingParameters'
 
 type BrowseKind = 'folder' | 'model'
 const props = defineProps<{
@@ -44,7 +46,7 @@ const draft = reactive({
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
   caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
   batch_size: '', gc: 'auto',
-  strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
+  h3_caption_replace: false, h3_sync_trigger: true, strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
 })
 
 const isKrea2 = computed(() => props.mode === 'krea2_fz')
@@ -118,7 +120,7 @@ function hydrate(config?: ProjectConfig | null) {
     const defaultValue = preset[key] === undefined ? defaults.value[key] : preset[key]
     const styledDefault = key === 'unet_lr' || key === 'te_lr' ? styledPresetValue(key, draft.style_preset) : defaultValue
     const hydratedValue = value(params[key], styledDefault === undefined ? (key === 'optimizer' || key === 'quant_mode' || key === 'gc' ? 'auto' : '') : String(styledDefault))
-    draft[key] = (key === 'wd14_model' ? normalizeWd14Model(hydratedValue) : key === 'sample_seed' ? hydratedValue || '1234' : hydratedValue) as never
+    draft[key] = (key === 'wd14_model' ? normalizeWd14Model(hydratedValue) : key === 'gc' ? normalizeGradientCheckpointing(hydratedValue) : key === 'sample_seed' ? hydratedValue || '1234' : hydratedValue) as never
   }
   draft.pixai_threshold = String(params.pixai_threshold ?? '.17')
   for (const key of ['pixai_character', 'pixai_copyright', 'pixai_style'] as const) draft[key] = Boolean(params[key])
@@ -131,6 +133,8 @@ function hydrate(config?: ProjectConfig | null) {
   draft.compile = Boolean(params.compile)
   draft.overwrite = Boolean(params.overwrite)
   draft.keep_user_captions = Boolean(params.keep_user_captions)
+  draft.h3_caption_replace = Boolean(params.h3_caption_replace)
+  draft.h3_sync_trigger = params.h3_sync_trigger === undefined ? true : Boolean(params.h3_sync_trigger)
   draft.amd_mode = Boolean(params.amd_mode)
   dirty.clear()
 }
@@ -189,7 +193,7 @@ function makePatch(): ProjectConfig {
   for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
-  for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'keep_user_captions', 'amd_mode'] as const) {
+  for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'keep_user_captions', 'amd_mode', 'h3_caption_replace', 'h3_sync_trigger'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   if (dirty.has('params.sample_preview')) params.sample_preview = draft.sample_preview_mode === 'auto' ? null : draft.sample_preview_mode === 'on'
@@ -327,26 +331,28 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <section v-if="!isMulti" class="engine-card">
             <header class="engine-card-heading"><span>{{ isKrea2 ? '02' : '01' }}</span><div><h2>{{ isKrea2 ? '图集、标签与训练方式' : '数据与训练方式' }}</h2><small>按当前模式显示适用项目</small></div></header>
             <div v-if="details.has_training_submode" class="engine-fields two-columns">
-              <label class="engine-field" :title="legacyTooltips.atSubMode"><span>训练类型</span><select v-model="draft.at_sub_mode" class="engine-select" @change="markRoot('at_sub_mode')"><option value="character">人物（保留全部标签）</option><option value="style">画风（过滤人物标签）</option><option value="concept">概念</option></select></label>
+              <label class="engine-field" :title="legacyTooltips.atSubMode"><span>训练类型</span><select v-model="draft.at_sub_mode" class="engine-select" @change="markRoot('at_sub_mode')"><option value="character">人物（保留全部标签）</option><option value="style">{{ isH3Fizgig ? '画风（过滤新标签中的人物特征）' : '画风（过滤人物标签）' }}</option><option value="concept">概念</option></select></label>
               <label v-if="isConcept" class="engine-field" :title="details.concept_type_hints?.[draft.concept_type] || legacyTooltips.conceptType"><span>概念类型</span><select v-model="draft.concept_type" class="engine-select" @change="markRoot('concept_type')"><option value="form">形态/种族（美人鱼·半人马）</option><option value="outfit">服装（同款衣服）</option><option value="object">物品（道具/武器）</option><option value="bodypart">身体部位（异色瞳/翅膀）</option></select></label>
             </div>
             <div class="engine-fields two-columns spaced">
               <label v-if="!isVideo" class="engine-field" :title="legacyTooltips.stylePreset"><span>素材风格 / 学习率微调</span><select v-model="draft.style_preset" :disabled="officialQwenPreset" class="engine-select" @change="onStylePresetChange"><option value="自定义">不调整（自定义）</option><option value="动漫">动漫（预设学习率 −15%）</option><option value="写实">写实（预设学习率 +15%）</option></select></label>
               <label class="engine-field" :title="legacyTooltips.trigger"><span>Trigger 触发词</span><input v-model="draft.trigger" class="engine-input" placeholder="可留空；建议使用少见的英文词" @input="markRoot('trigger')" /></label>
-              <label v-if="isStyle" class="engine-field" :title="legacyTooltips.styleCaption"><span>画风描述词（可选）</span><input v-model="draft.style_caption" class="engine-input" placeholder="留空使用自动打标" @input="markRoot('style_caption')" /></label>
-              <label v-if="supported('crop_ratio')" class="engine-field" :title="legacyTooltips.cropRatio"><span>预处理裁切比例</span><CropRatioField v-model="draft.crop_ratio" input-class="engine-input" @update:model-value="markParam('crop_ratio')" /></label>
+              <label v-if="isStyle && (!isH3Fizgig || draft.caption_method === 'wd14')" class="engine-field" :title="legacyTooltips.styleCaption"><span>画风描述词（可选）</span><input v-model="draft.style_caption" class="engine-input" :placeholder="isH3Fizgig ? '添加到新生成的关键词标签' : '留空使用自动打标'" @input="markRoot('style_caption')" /></label>
+              <label v-if="supported('crop_ratio') && !isH3Fizgig" class="engine-field" :title="legacyTooltips.cropRatio"><span>预处理裁切比例</span><CropRatioField v-model="draft.crop_ratio" input-class="engine-input" @update:model-value="markParam('crop_ratio')" /></label>
               <label v-if="supported('reg_dir')" class="engine-field" :title="legacyTooltips.regDir"><span>正则数据集（可选）</span><input v-model="draft.reg_dir" class="engine-input" placeholder="选择正则图片文件夹" @input="markRoot('reg_dir')" /></label>
             </div>
             <p v-if="officialQwenPreset" class="engine-hint">本模式 rank、alpha 和学习率由下方官方预设接管；页面保留的旧值不参与训练。</p>
             <p v-else-if="!isVideo" class="engine-hint">选择后从当前模式预设重算学习率：动漫降低 15%，写实提高 15%；不保证更清晰或更自然。</p>
-            <button v-if="details.has_training_submode && !isStyle" class="engine-switch" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.strongBind" :class="{ active: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')"><i></i><span><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
-            <button v-if="isConcept" class="engine-check" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
-            <label v-if="supported('wd14_model') && !isVideo && draft.caption_method === 'wd14'" class="engine-field spaced" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="engine-select" @change="markParam('wd14_model')"><option value="swinv2-v3">WD14 swinv2-v3（默认）</option><option value="moat-v2">WD14 moat-v2（旧版）</option><option value="pixai-v1">PixAI v1.0（内容 / 角色 / 画风）</option></select></label>
+            <button v-if="details.has_training_submode && !isStyle && !isH3Fizgig" class="engine-switch" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.strongBind" :class="{ active: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')"><i></i><span><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
+            <button v-if="isConcept && (!isH3Fizgig || (draft.caption_method === 'wd14' && ['form', 'outfit'].includes(draft.concept_type)))" class="engine-check" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>{{ isH3Fizgig ? '清洗新生成标签中的概念特征' : '自动清洗概念标签（推荐）' }}</span></button>
+            <label v-if="supported('wd14_model') && (!isVideo || isH3Fizgig) && draft.caption_method === 'wd14'" class="engine-field spaced" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="engine-select" @change="markParam('wd14_model')"><option value="swinv2-v3">WD14 swinv2-v3（默认）</option><option value="moat-v2">WD14 moat-v2（旧版）</option><option value="pixai-v1">PixAI v1.0（内容 / 角色 / 画风）</option></select></label>
             <button v-if="!isVideo && draft.caption_method === 'wd14'" class="engine-check" :class="{ checked: draft.keep_user_captions }" type="button" role="checkbox" :aria-checked="draft.keep_user_captions" @click="draft.keep_user_captions = !draft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
               <PixaiTagOptions v-if="draft.caption_method === 'wd14' && draft.wd14_model === 'pixai-v1'" :options="draft" :desktop="desktop" @change="(key, value) => { Object.assign(draft, { [key]: value }); markParam(key) }" />
-              <CaptionControls v-if="!isVideo" :project-name="project.name" :directory="draft.raw_dir" :desktop="desktop" :method="draft.caption_method" :language="draft.caption_language" :length="draft.caption_length" @update:method="draft.caption_method = $event; markParam('caption_method')" @update:language="draft.caption_language = $event; markParam('caption_language')" @update:length="draft.caption_length = $event; markParam('caption_length')" />
+              <CaptionControls v-if="!isVideo || isH3Fizgig" :recursive="isH3Fizgig" :project-name="project.name" :directory="draft.raw_dir" :desktop="desktop" :method="draft.caption_method" :language="draft.caption_language" :length="draft.caption_length" @update:method="draft.caption_method = $event; markParam('caption_method')" @update:language="draft.caption_language = $event; markParam('caption_language')" @update:length="draft.caption_length = $event; markParam('caption_length')" />
+              <H3DataControls v-if="isH3Fizgig" :directory="draft.raw_dir" :trigger="draft.trigger" :desktop="desktop" :method="draft.caption_method" :sync-trigger="draft.h3_sync_trigger" :replace="draft.h3_caption_replace" @update:sync-trigger="draft.h3_sync_trigger = $event; markParam('h3_sync_trigger')" @update:replace="draft.h3_caption_replace = $event; markParam('h3_caption_replace')" @action="requestAction" />
               <DatasetInspection v-if="!isVideo" :directory="draft.raw_dir" :desktop="desktop" :natural="draft.caption_method === 'natural'" :keep-captions="draft.keep_user_captions || draft.caption_method !== 'wd14'" @preserve="draft.keep_user_captions = true; markParam('keep_user_captions')" />
               <button v-if="supported('overwrite') && !isVideo" class="engine-check" :title="legacyTooltips.overwrite" :class="{ checked: draft.overwrite }" type="button" role="checkbox" :aria-checked="draft.overwrite" @click="draft.overwrite = !draft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
+            <p v-if="isH3Fizgig && isConcept && ['object', 'bodypart'].includes(draft.concept_type)" class="engine-hint">物品与身体部位的标签请在标签编辑器中手动检查。</p>
             <p v-if="currentTriggerHint" class="engine-hint">{{ currentTriggerHint }}</p>
           </section>
 
@@ -369,7 +375,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             <label v-if="mode === 'qwen21_fz'" class="engine-field spaced" :title="legacyTooltips.fizgigQwenPreset"><span>Fizgig 官方预设</span><select v-model="draft.fizgig_qwen_preset" class="engine-select" @change="markParam('fizgig_qwen_preset')"><option value="auto">自动（人物/概念 Fast，画风 Style）</option><option value="fast">Fast · rank 8 · 学习率自适应 2e-4~4e-4</option><option value="standard">Standard · rank 16 · 学习率 1e-4~2e-4</option><option value="style">Style · rank 16 · flat 1.5e-4</option></select></label>
             <p v-if="mode === 'qwen21_fz'" class="engine-hint">Fizgig 官方预设控制 rank、alpha 和学习率；底模量化精度可独立选择。默认分辨率 512px，可自行调高。</p>
             <p v-if="isVideo && !isH3Fizgig" class="engine-hint">H3 AI Toolkit 输入视频和同名 .txt 字幕；视频帧数需符合 17n+5 格式。</p>
-            <p v-if="isH3Fizgig" class="engine-hint">图片、视频和音频可放在同一目录或子目录，每个媒体都需同名 .txt。MP4 必须为 24fps、帧数符合 17n+5、宽高为 32 的倍数；带音轨时必须为 32kHz 立体声。扫描仅检查媒体与字幕；Fizgig 缓存阶段才会校验格式。无 audio VAE 时视频音轨会忽略。56 帧只用于预览，不裁剪训练视频。AMD ROCm 为实验性路径，训练兼容性尚未验证。</p>
+            <p v-if="isH3Fizgig" class="engine-hint">图片、视频和音频可放在同一目录或子目录，每个媒体都需同名 .txt。MP4 必须为 24fps、帧数符合 17n+5、宽高为 32 的倍数；带音轨时必须为 32kHz 立体声。图片可自动打标，视频可 AI 描述；缓存阶段校验媒体格式。无 audio VAE 时视频音轨会忽略。56 帧只用于预览，不裁剪训练视频。AMD ROCm 为实验性路径，训练兼容性尚未验证。</p>
           </section>
         </div>
 
@@ -395,8 +401,8 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
         </section>
 
         <div class="engine-utility-row">
-          <button class="engine-utility" type="button" :title="legacyTooltips.preprocess" @click="requestAction('preprocess')">{{ isH3Fizgig ? '扫描媒体和字幕' : '数据预处理' }}</button>
-          <button v-if="!isVideo" class="engine-utility" type="button" :title="legacyTooltips.labelEditor" @click="requestAction('label_editor')">标签编辑器</button>
+          <button v-if="!isH3Fizgig" class="engine-utility" type="button" :title="legacyTooltips.preprocess" @click="requestAction('preprocess')">数据预处理</button>
+          <button v-if="!isVideo || isH3Fizgig" class="engine-utility" type="button" :title="legacyTooltips.labelEditor" @click="requestAction('label_editor')">标签编辑器</button>
           <button class="engine-utility" type="button" :title="legacyTooltips.openOutput" @click="requestAction('output_dir')">打开输出目录</button>
           <button class="engine-utility" type="button" @click="requestAction('training_history')">训练记录</button>
           <button class="engine-utility" type="button" @click="requestAction('export_config')">导出配置</button>

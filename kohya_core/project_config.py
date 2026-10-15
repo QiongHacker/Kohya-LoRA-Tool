@@ -12,10 +12,12 @@ WORKSPACE_PARAM_KEYS = (
     'batch_size', 'gc', 'global_pos', 'global_neg',
     'caption_method', 'caption_language', 'caption_length',
     'pixai_character', 'pixai_copyright', 'pixai_style', 'pixai_threshold',
+    'h3_caption_replace', 'h3_sync_trigger',
 )
 BOOL_PARAM_KEYS = frozenset(('strong_bind', 'clean_concept', 'sample_preview',
                             'compile', 'overwrite', 'keep_user_captions', 'amd_mode',
-                            'pixai_character', 'pixai_copyright', 'pixai_style'))
+                            'pixai_character', 'pixai_copyright', 'pixai_style',
+                            'h3_caption_replace', 'h3_sync_trigger'))
 
 
 def normalize_learning_rate(value):
@@ -23,6 +25,30 @@ def normalize_learning_rate(value):
     if isinstance(value, str) and re.fullmatch(r'[+-]?0+(?:\.0+)?[eE][+-]', value.strip()):
         return '0'
     return value
+
+
+def normalize_batch_size(value):
+    """Accept the shared UI's integer batch size without silently truncating edits."""
+    text = str(value if value is not None else '').strip().lower()
+    if text in ('', 'auto', '自动'):
+        return 1
+    if not isinstance(value, bool) and re.fullmatch(r'[0-9]+(?:\.0+)?', text):
+        batch = int(text.split('.')[0])
+        if 1 <= batch <= 8:
+            return batch
+    raise ValueError('批大小需要为 1 到 8 的整数；留空或自动使用 1。')
+
+
+def normalize_gradient_checkpointing(value):
+    """Keep old English/boolean values compatible with both training interfaces."""
+    choice = str(value if value is not None else 'auto').strip().lower()
+    if choice in ('开启', 'on', 'true', '1'):
+        return '开启'
+    if choice in ('关闭', 'off', 'false', '0'):
+        return '关闭'
+    if choice in ('', 'auto', '自动'):
+        return 'auto'
+    raise ValueError('梯度检查点请选择自动、开启或关闭。')
 
 
 def training_params(core, config, project_name):
@@ -74,14 +100,15 @@ def training_params(core, config, project_name):
         'resolution': integer('resolution', 512),
         'video_steps': integer('video_steps', 2000),
         'video_frames': integer('video_frames', getattr(core, 'H3_FRAMES', 73)),
-        'batch_size': integer('batch_size', 1),
+        'batch_size': normalize_batch_size(value('batch_size', 1)),
         'sample_interval': integer('sample_interval', 0),
         'sample_seed': str(value('sample_seed', 1234)),
         'unet_lr': str(normalize_learning_rate(value('unet_lr', '3e-4' if kohya else '1e-4'))),
         'te_lr': str(normalize_learning_rate(value('te_lr', '1.5e-4' if kohya else '1e-4'))),
         'crop_ratio': core.normalize_crop_ratio(value('crop_ratio', '')),
     }
-    for key in ('optimizer', 'quant_mode', 'gc', 'fizgig_qwen_preset'):
+    params['gc'] = normalize_gradient_checkpointing(value('gc', 'auto'))
+    for key in ('optimizer', 'quant_mode', 'fizgig_qwen_preset'):
         params[key] = str(value(key, 'auto') or 'auto')
     for key in ('sample_prompt', 'blocks_to_swap', 'noise_offset', 'min_snr_gamma'):
         params[key] = value(key, '')
@@ -119,26 +146,35 @@ def training_params(core, config, project_name):
     if mode == "h3_fz":
         from .h3_models import settings
         params["h3_models"] = settings(config)
+        # Older hidden overwrite/keep flags must not overwrite H3 source captions.
+        params["keep_user_captions"] = True
+        params["strong_bind"] = False
+        params["h3_caption_replace"] = bool(stored.get("h3_caption_replace", False))
+        params["h3_sync_trigger"] = bool(stored.get("h3_sync_trigger", True))
     if config.get('training_kind') == 'multi_character':
         from .multi_character import parameters
         params = parameters(core, config, params)
     return params
 
 
-def dataset_images(directory):
+def dataset_images(directory, recursive=False, image_extensions=None):
     """Match the preprocessor's root-first scan without following image or directory links."""
     from preprocess import IMAGE_EXTS
+    extensions = set(IMAGE_EXTS if image_extensions is None else image_extensions)
+    def linked(path):
+        return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
     root = Path(directory)
     if not root.is_dir():
         raise OSError("图片文件夹不存在。")
-    images = [path for path in root.iterdir() if path.is_file() and not path.is_symlink() and path.suffix.lower() in IMAGE_EXTS]
-    if not images:
+    images = [path for path in root.iterdir() if path.is_file() and not linked(path) and path.suffix.lower() in extensions]
+    if recursive or not images:
+        images = []
         import os
         errors = []
         for folder, dirs, files in os.walk(root, onerror=errors.append):
             parent = Path(folder)
-            dirs[:] = [name for name in dirs if not name.startswith('.') and not (parent / name).is_symlink()]
-            images.extend(parent / name for name in files if (parent / name).is_file() and not (parent / name).is_symlink() and Path(name).suffix.lower() in IMAGE_EXTS)
+            dirs[:] = [name for name in dirs if not name.startswith('.') and not linked(parent / name)]
+            images.extend(parent / name for name in files if (parent / name).is_file() and not linked(parent / name) and Path(name).suffix.lower() in extensions)
         if errors:
             raise errors[0]
     return sorted(images, key=lambda path: path.relative_to(root).as_posix().casefold())

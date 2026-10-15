@@ -13,7 +13,7 @@ import functools
 import traceback
 from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bundle
 import re
-from kohya_core.project_config import normalize_learning_rate
+from kohya_core.project_config import normalize_learning_rate, normalize_gradient_checkpointing
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -2621,7 +2621,8 @@ class App:
             if not isinstance(p, dict):
                 p = {}
             self._caption_options = {key: p.get(key, default) for key, default in
-                                     (("caption_method", "wd14"), ("caption_language", "zh"), ("caption_length", "brief"))}
+                                     (("caption_method", "wd14"), ("caption_language", "zh"), ("caption_length", "brief"),
+                                      ("pixai_character", False), ("pixai_copyright", False), ("pixai_style", False), ("pixai_threshold", ".17"))}
             # 清掉上一个项目遗留的共享输入；旧项目再从它当前模式迁移到对应单位桶。
             for _key in ("save_every", "sample_interval"):
                 self._set_param_value(_key, "")
@@ -2656,7 +2657,8 @@ class App:
             except Exception:
                 pass
             try:
-                self.gc_var.set(str(p.get("gc") or "自动"))
+                _gc_gui = normalize_gradient_checkpointing(p.get("gc"))
+                self.gc_var.set("自动" if _gc_gui == "auto" else _gc_gui)
             except Exception:
                 pass
             try:
@@ -3766,7 +3768,7 @@ class App:
         try:
             if self.mode == "concept":
                 return True
-            if self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz"):
+            if self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "h3_fz"):
                 return self._at_sub_label() == "concept"
         except Exception:
             pass
@@ -3915,7 +3917,7 @@ class App:
         # 训练类型（画风/人物/概念）：第一引擎 与 Krea2/FLUX.2/Qwen/Z-Image 都显示
         try:
             _is_at = self.mode in ("style", "character", "concept",
-                                   "qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "qwen21_fz")
+                                   "qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "qwen21_fz", "h3_fz")
             if _is_at:
                 # 第一引擎的左侧入口不带子模式，下拉要反映当前子模式
                 if self.mode in KOHYA_SUB_MODES:
@@ -3923,6 +3925,7 @@ class App:
                         self.at_sub_var.set(core.AT_SUB_LABELS.get(self.mode, core.AT_SUB_LABELS["character"]))
                     except Exception:
                         pass
+                self.at_sub_hint.configure(text="仅处理新生成的关键词；已有描述保留正文。" if self.mode == "h3_fz" else "人物=保留全部标签；画风=过滤人物标签；概念=形态/种族（trigger 吸收原型）")
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
                 self.at_sub_row.pack_forget()
@@ -3941,7 +3944,7 @@ class App:
                         _ctr.pack_forget()
                 _ccr = getattr(self, "clean_concept_row", None)
                 if _ccr is not None:
-                    if self._is_concept_ctx():
+                    if self._is_concept_ctx() and (self.mode != "h3_fz" or (self._concept_type_key() in ("form", "outfit") and self._caption_options.get("caption_method", "wd14") == "wd14")):
                         _ccr.pack(fill="x", padx=22, pady=(0, 6))
                     else:
                         _ccr.pack_forget()
@@ -6158,7 +6161,7 @@ class App:
         #   · 梯度检查点后端早有「自动/开启/关闭」逻辑 ✓，只是界面没放出来 ✗
         #   两行都只对 Krea2 / FLUX.2（第二引擎 musubi）生效 ✓
         cb = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cb.pack(anchor="w", pady=(6, 0))
-        ctk.CTkLabel(cb, text="批大小（Krea2/FLUX.2）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        ctk.CTkLabel(cb, text="批大小", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self.batch_var = tk.StringVar(value="自动")
         try:
             self.batch_var.trace_add("write", lambda *a: self._schedule_autosave())
@@ -6174,7 +6177,7 @@ class App:
         ctk.CTkLabel(cb, text="（自动=1；调大后每轮步数减少、显存占用上升）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         gw = ctk.CTkFrame(self.adv_body, fg_color="transparent"); gw.pack(anchor="w", pady=(6, 0))
-        ctk.CTkLabel(gw, text="梯度检查点（Krea2/FLUX.2）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        ctk.CTkLabel(gw, text="梯度检查点", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self.gc_var = tk.StringVar(value="自动")
         try:
             self.gc_var.trace_add("write", lambda *a: self._schedule_autosave())
@@ -6416,6 +6419,8 @@ class App:
             **({"at_model": _saved_project["at_model"]} if self.mode == "zimage" and isinstance((_saved_project or {}).get("at_model"), dict) else {}),
             **({"h3_models": _saved_project["h3_models"]} if self.mode == "h3_fz" and isinstance((_saved_project or {}).get("h3_models"), dict) else {}),
             "mode": self.mode,
+            "h3_caption_replace": bool(_saved_params.get("h3_caption_replace", False)),
+            "h3_sync_trigger": bool(_saved_params.get("h3_sync_trigger", True)),
             "fizgig_version": _fizgig_version,
             "base_type": self.base_type,
             "at_sub_mode": self._at_sub_label(),
@@ -7364,7 +7369,7 @@ class App:
         return True
 
     def _ensure_h3_fz_ready(self):
-        """H3 Fizgig：原始混合媒体目录只扫描，不依赖图片预处理缓存。"""
+        """H3 Fizgig：检查原始媒体；缺失图片标签可在准备阶段补齐。"""
         try:
             ok, detail, _vpy, _backend = core.fizgig_engine_status()
         except Exception as exc:
@@ -7378,6 +7383,8 @@ class App:
             messagebox.showwarning(core.APP_NAME, "请先选择有效的混合媒体原始目录。")
             return False
         try:
+            from kohya_core.h3_dataset import validate_options
+            _kind, method = validate_options(params)
             summary = core.scan_fizgig_h3_dataset(raw_dir)
         except Exception as exc:
             messagebox.showwarning(core.APP_NAME, "H3 Fizgig 数据集扫描失败：\n\n%s" % exc)
@@ -7388,19 +7395,22 @@ class App:
         if total < 1:
             messagebox.showwarning(core.APP_NAME, "目录中没有可训练的图片、视频或音频样本。")
             return False
-        if missing_count:
-            messagebox.showwarning(core.APP_NAME, "有 %d 个媒体文件缺少同名 .txt 字幕。\n\n请补齐字幕后重新扫描；此模式不会自动生成字幕。" % missing_count)
+        if summary.get("missing_videos") or summary.get("missing_audio") or (method != "wd14" and summary.get("missing_images")):
+            messagebox.showwarning(core.APP_NAME, "有 %d 个媒体缺少描述。请先生成视频 AI 描述、补齐音频文本；自然语言图片描述需先生成。" % missing_count)
             return False
         has_audio = int(summary.get("audio", 0) or 0) > 0
         try:
-            missing = core.h3_fz_missing_models(require_audio=has_audio, model_settings=self._collect_params().get("h3_models"))
+            missing = core.h3_fz_missing_models(require_audio=has_audio, model_settings=params.get("h3_models"),
+                                                  require_adapter=bool(summary.get("images")))
         except TypeError:
             missing = core.h3_fz_missing_models()
         if missing:
             if messagebox.askyesno(core.APP_NAME, "H3 Fizgig 还缺少当前数据集所需模型：\n\n" + "\n".join(missing) + "\n\n现在打开模型下载页？"):
                 self.cmd_dl_h3_fz_models()
             return False
-        self._log("[预检] H3 Fizgig：图片 %d、视频 %d、音频 %d，字幕齐全。" % (
+        if summary.get("missing_images"):
+            self._log("[预检] %d 张图片将在数据准备阶段自动补齐标签。" % len(summary["missing_images"]))
+        self._log("[预检] H3 Fizgig：图片 %d、视频 %d、音频 %d。" % (
             int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
             int(summary.get("audio", 0) or 0)))
         if int(summary.get("videos", 0) or 0) and not core.h3_fz_model_files(self._collect_params().get("h3_models")).get("audio_vae"):
@@ -7548,19 +7558,9 @@ class App:
                               "视频无需图片预处理；字幕请用「AI 视频自动打标」或放同名 .txt，然后直接点【一键训练】。")
                 return
             if params.get("mode") == "h3_fz":
-                summary = core.scan_fizgig_h3_dataset(params.get("raw_dir"))
-                total = int(summary.get("total", 0) or 0)
-                missing = summary.get("missing_captions", 0)
-                missing = len(missing) if isinstance(missing, (list, tuple, set)) else int(missing or 0)
-                self._log("[预处理] H3 Fizgig 混合媒体扫描：图片 %d，视频 %d，音频 %d，总计 %d，缺字幕 %d。" % (
-                    int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
-                    int(summary.get("audio", 0) or 0), total, missing))
-                if total <= 0:
-                    self._log("[ERROR] 目录中没有可训练的图片、视频或音频样本。")
-                elif missing:
-                    self._log("[ERROR] 有媒体缺少同名 .txt 字幕；请补齐后重新扫描。")
-                else:
-                    self._log("[预处理] 扫描完成；未整理、移动或转码任何文件。")
+                report = core.data_sub("logs", "h3_preparation_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+                core.prepare_h3_dataset(params, self._log, report=report)
+                self._log("[OK] H3 标签与媒体描述检查完成")
                 return
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             _pp_log = self._begin_preprocess_progress()
@@ -7793,15 +7793,9 @@ class App:
             except Exception:
                 pass
             if params.get("mode") == "h3_fz":
-                summary = core.scan_fizgig_h3_dataset(params.get("raw_dir"))
-                total = int(summary.get("total", 0) or 0)
-                missing = summary.get("missing_captions", 0)
-                missing = len(missing) if isinstance(missing, (list, tuple, set)) else int(missing or 0)
-                self._log("[预检] H3 Fizgig 混合媒体：图片 %d、视频 %d、音频 %d，总计 %d、缺字幕 %d。" % (
-                    int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
-                    int(summary.get("audio", 0) or 0), total, missing))
-                if total < 1 or missing:
-                    raise RuntimeError("H3 Fizgig 需要至少一个媒体样本，且每个媒体都有同名 .txt 字幕。")
+                report = core.data_sub("logs", "h3_preparation_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+                prepared = core.prepare_h3_dataset(params, self._log, report=report)
+                total = int(prepared["summary"]["total"])
                 self.q.put(("AUTO_CONFIRM", params, {"ok": total}, total))
                 return
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
@@ -9840,7 +9834,7 @@ class LabelEditorWindow:
         self.win.transient(master)
         self.win.configure(fg_color=BG)
         # 每个项目独立数据集：dataset/<项目名>/train_character（不混用其他项目的数据）
-        self.train_dir = core.dataset_train_dir(self.mode, self.project)
+        self.train_dir = (params.get("raw_dir") or "") if self.mode == "h3_fz" else core.dataset_train_dir(self.mode, self.project)
         self.records = []
         self._thumbs = {}
         self._current = None      # 当前选中的 record 下标
@@ -9984,7 +9978,8 @@ class LabelEditorWindow:
         self.btn_pin = ctk.CTkButton(r2, text="📌 置顶 Trigger", width=120, height=30, fg_color=CARD2, hover_color="#343a46",
                                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                                      font=ui_font(FONT_HINT), command=self._do_pin)
-        self.btn_pin.pack(side="left")
+        if self.mode != "h3_fz":
+            self.btn_pin.pack(side="left")
         self.btn_stats = ctk.CTkButton(r2, text="📊 标签统计", width=100, height=30, fg_color=CARD2, hover_color="#343a46",
                                        border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                                        font=ui_font(FONT_HINT), command=self._show_stats)
@@ -9996,7 +9991,8 @@ class LabelEditorWindow:
         self.btn_organize = ctk.CTkButton(r2, text="📁 整理为 repeats_名称", width=156, height=30, fg_color=CARD2,
                                           hover_color="#343a46", border_width=1, border_color=BORDER, text_color=TXT,
                                           corner_radius=6, font=ui_font(FONT_HINT), command=self._do_organize)
-        self.btn_organize.pack(side="left", padx=(8, 0))
+        if self.mode != "h3_fz":
+            self.btn_organize.pack(side="left", padx=(8, 0))
         self.btn_undo = ctk.CTkButton(r2, text="↩ 撤销上次修改", width=128, height=30, fg_color=CARD2, hover_color="#343a46",
                                       border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                                       font=ui_font(FONT_HINT), state="disabled", command=self._do_undo)
@@ -10004,7 +10000,8 @@ class LabelEditorWindow:
         self.btn_del_img = ctk.CTkButton(r2, text="🗑 删除选中图片", width=116, height=30, fg_color="#4a3535", hover_color="#5a4141",
                                          border_width=1, border_color="#5a4141", text_color="#e0b0b0", corner_radius=6,
                                          font=ui_font(FONT_HINT), command=self._do_delete_image)
-        self.btn_del_img.pack(side="left", padx=(8, 0))
+        if self.mode != "h3_fz":
+            self.btn_del_img.pack(side="left", padx=(8, 0))
         self.status_var = tk.StringVar(value="就绪")
         ctk.CTkLabel(tools, textvariable=self.status_var, font=ui_font(FONT_HINT), text_color=HINT, anchor="w").pack(fill="x", padx=12, pady=(0, 8))
 
@@ -10017,7 +10014,7 @@ class LabelEditorWindow:
                 self._save_current(quiet=True)
             else:
                 self._dirty.discard(self._current)
-        self.records = core.list_dataset_images(self.train_dir)
+        self.records = core.list_dataset_images(self.train_dir, image_extensions=core.FIZGIG_IMAGE_EXTS if self.mode == "h3_fz" else None)
         self._ver = getattr(self, "_ver", 0) + 1
         self._thumbs = {}
         self._dirty = set()
@@ -10325,6 +10322,8 @@ class LabelEditorWindow:
 
     def _do_delete_image(self):
         """删除选中的一张或多张图片（多选需先勾「多选模式」），连同同名 txt/npz。"""
+        if self.mode == "h3_fz":
+            return
         try:
             sel = [int(i) for i in self.listbox.curselection() if 0 <= int(i) < len(self.records)]
         except Exception:
@@ -10455,6 +10454,8 @@ class LabelEditorWindow:
             self._end_batch()
 
     def _do_pin(self):
+        if self.mode == "h3_fz":
+            return
         params = self.app._collect_params()
         trigger = (params.get("trigger") or "").strip()
         if not trigger:
@@ -10472,6 +10473,8 @@ class LabelEditorWindow:
             self._end_batch()
 
     def _do_organize(self):
+        if self.mode == "h3_fz":
+            return
         params = self.app._collect_params()
         repeats = params.get("repeats", 5)
         default_name = (params.get("trigger") or "").strip() or "dataset"
@@ -10518,8 +10521,9 @@ class LabelEditorWindow:
                                     border_width=1, border_color=ACC, text_color=ACC, corner_radius=6,
                                     font=ui_font(FONT_HINT),
                                     command=lambda: self._stats_lock_to_prefix(w))
-        w._btn_lock.pack(side="right", padx=(0, 8))
-        ctk.CTkLabel(w, text="★ = 高覆盖率但没到 100%（强绑定只锁 100% 的词）。"
+        if self.mode != "h3_fz":
+            w._btn_lock.pack(side="right", padx=(0, 8))
+        ctk.CTkLabel(w, text="H3 直接读取完整描述；检查目标特征是否准确，避免写入图片中没有的内容。" if self.mode == "h3_fz" else "★ = 高覆盖率但没到 100%（强绑定只锁 100% 的词）。"
                              "侧身 / 背面图容易让自动打标漏标，属于正常现象，不一定是数据集不一致；"
                              "若该特征确实是这个角色的固定特征，选中后点「★ 锁进固定前缀」手动锁定"
                              "（下次预处理生效）。",
@@ -10627,6 +10631,9 @@ class LabelEditorWindow:
           ① 锁进前缀 = 该特征在出图时**固定出现**（锁了帽子就再也脱不掉）；
           ② 需要**重跑预处理**才生效（强绑定在预处理阶段消费 `|||`）。
         """
+        if self.mode == "h3_fz":
+            messagebox.showinfo("H3 标签", "H3 直接读取完整文本；请直接编辑描述，不使用固定前缀语法。")
+            return
         try:
             tags = [win._tags[i] for i in win._lb.curselection()]
         except Exception:

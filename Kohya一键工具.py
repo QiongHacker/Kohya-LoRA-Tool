@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.10"
+APP_VERSION = "0.19.11"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2887,52 +2887,13 @@ def _patch_musubi_int8_weight_dtype(kdir, logf=print):
 
 
 def _patch_musubi_resume_epoch(kdir, logf=print):
-    """让 musubi 的 epoch 快照续训从下一轮和原有总步数继续。
-
-    原版 load_state 只恢复模型、优化器等状态，训练循环仍将 epoch/global_step
-    置零，导致已经完成的轮次再次训练。仅针对工具生成的六位 epoch 快照。
-    """
-    fp = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", "training", "trainer_base.py")
-    if not os.path.isfile(fp):
-        return False
+    """Upgrade both the old epoch-only patch and an unpatched Musubi trainer."""
+    from kohya_core.training_resume import patch_musubi_resume
     try:
-        with open(fp, "r", encoding="utf-8") as handle:
-            source = handle.read()
-        marker = "KOHYA_TOOL_PATCH: musubi resume epoch"
-        if marker in source:
-            return True
-        old = (
-            "        # TODO skip until initial step\n"
-            '        progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")\n'
-            "\n"
-            "        epoch_to_start = 0\n"
-            "        global_step = 0"
-        )
-        if old not in source:
-            logf("[musubi] 训练循环结构已变化，无法确认断点轮次；本次不会冒险从头续训。")
-            return False
-        new = (
-            "        # KOHYA_TOOL_PATCH: musubi resume epoch\n"
-            "        epoch_to_start = 0\n"
-            "        global_step = 0\n"
-            "        if args.resume:\n"
-            "            import re as _kohya_resume_re\n"
-            "            _resume_name = os.path.basename(os.path.normpath(args.resume))\n"
-            '            _resume_match = _kohya_resume_re.search(r"-(\\d{6})-state$", _resume_name)\n'
-            "            if _resume_match:\n"
-            "                epoch_to_start = min(int(_resume_match.group(1)), num_train_epochs)\n"
-            "                global_step = min(args.max_train_steps, epoch_to_start * num_update_steps_per_epoch)\n"
-            '                logger.info("resume at epoch %s, global step %s", epoch_to_start + 1, global_step)\n'
-            '        progress_bar = tqdm(total=args.max_train_steps, initial=global_step, smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")'
-        )
-        source = source.replace(old, new, 1)
-        compile(source, fp, "exec")
-        with open(fp, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(source)
-        logf("[musubi] 已修复 epoch 快照续训的轮次和总步数")
+        patch_musubi_resume(kdir, logf)
         return True
-    except Exception as exc:
-        logf(f"[musubi] 断点轮次补丁失败：{exc}")
+    except (OSError, ValueError, SyntaxError) as exc:
+        logf("[musubi] 无法安全恢复断点轮次：%s" % exc)
         return False
 
 
@@ -3332,6 +3293,8 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
+    if not _patch_musubi_resume_epoch(kdir, logf) and resume_from:
+        raise RuntimeError("当前第二引擎无法安全恢复训练位置，请更新第二引擎；原有快照保留。")
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(mvpy)), logf)
     # 自愈防线：musubi 版本过旧会以 float32 训练（300s/步），阻止并提示重装第二引擎
     _check_musubi_krea2_version(kdir, logf)
@@ -3467,7 +3430,8 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
     logf(f"[Krea2] 优化器: {opt_k}")
     # 提前记录生效值（界面差异行要能在训练开始时就看到），训练结束那次调用会补上其余项
-    _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k)
+    _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k,
+                      batch_size=bs, gradient_checkpointing=gc_on)
     cmd = [
         *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", _mp,
         os.path.join(mt_dir, "krea2_train_network.py"),
@@ -3487,6 +3451,9 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     if resume_from:
         if not _patch_musubi_resume_epoch(get_kohya_dir(), logf):
             raise RuntimeError("当前 musubi 版本无法安全恢复训练轮次；请先更新第二引擎，原有断点不会删除。")
+        from kohya_core.training_resume import require_state
+        _resume_step = require_state(resume_from, "musubi", per_epoch)
+        _record_effective(resume_step=_resume_step, resume_snapshot=os.path.basename(resume_from))
         cmd.append(f"--resume={resume_from}")
         logf(f"[Krea2] 断点续训：从 {resume_from} 继续")
         if progress is not None:
@@ -3604,6 +3571,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
+    if not _patch_musubi_resume_epoch(kdir, logf) and resume_from:
+        raise RuntimeError("当前第二引擎无法安全恢复训练位置，请更新第二引擎；原有快照保留。")
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(mvpy)), logf)
     # 自愈防线：musubi 版本过旧会以 float32 训练（300s/步），阻止并提示重装第二引擎
     _check_musubi_krea2_version(kdir, logf)
@@ -3710,7 +3679,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
     logf(f"[FLUX.2] 优化器: {opt_k}")
     # 提前记录生效值（界面差异行要能在训练开始时就看到），训练结束那次调用会补上其余项
-    _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k)
+    _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k,
+                      batch_size=bs, gradient_checkpointing=gc_on)
     cmd = [
         *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", _mp,
         os.path.join(mt_dir, "flux_2_train_network.py"),
@@ -3731,6 +3701,9 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     if resume_from:
         if not _patch_musubi_resume_epoch(get_kohya_dir(), logf):
             raise RuntimeError("当前 musubi 版本无法安全恢复训练轮次；请先更新第二引擎，原有断点不会删除。")
+        from kohya_core.training_resume import require_state
+        _resume_step = require_state(resume_from, "musubi", per_epoch)
+        _record_effective(resume_step=_resume_step, resume_snapshot=os.path.basename(resume_from))
         cmd.append(f"--resume={resume_from}")
         logf(f"[FLUX.2] 断点续训：从 {resume_from} 继续")
         if progress is not None:
@@ -3888,11 +3861,15 @@ H3_MODEL_LINKS = {
 
 # Fizgig recommends the official int8 H3 base; v7 also loads full floating H3.
 # The third engine's Abiray NVFP4 checkpoint is not supported by this loader.
+from kohya_core.h3_models import TRAINING_ADAPTER_ID as H3_TRAINING_ADAPTER
+
 H3_FZ_MODEL_LINKS = {
     **{key: H3_MODEL_LINKS[key] for key in ("dit", "te", "video_vae", "audio_vae")},
     "training_adapter": (
-        "minimax_h3_image_training_adapter.safetensors", "H3 训练适配器（推荐）",
-        "https://modelscope.cn/models/circlestone-labs/MiniMax-H3-Image-Training-Adapter/resolve/master/minimax_h3_image_training_adapter.safetensors"),
+        H3_TRAINING_ADAPTER["filename"], "H3 图片训练适配器（Circlestone）",
+        ("https://modelscope.cn/models/%s/resolve/master/%s" % (H3_TRAINING_ADAPTER["repo"], H3_TRAINING_ADAPTER["filename"]),
+         "https://hf-mirror.com/%s/resolve/%s/%s" % (H3_TRAINING_ADAPTER["repo"], H3_TRAINING_ADAPTER["revision"], H3_TRAINING_ADAPTER["filename"]),
+         "https://huggingface.co/%s/resolve/%s/%s" % (H3_TRAINING_ADAPTER["repo"], H3_TRAINING_ADAPTER["revision"], H3_TRAINING_ADAPTER["filename"]))),
     "turbo_lora": (
         "minimax_h3_turbo_v4_step600.safetensors", "H3 Turbo 预览 LoRA（可选）",
         "https://modelscope.cn/models/larryvrh/MiniMax-H3-Turbo-Lora/resolve/master/minimax_h3_turbo_v4_step600.safetensors"),
@@ -4109,9 +4086,9 @@ def h3_fz_model_files(model_settings=None):
     return files(sys.modules[__name__], model_settings)
 
 
-def h3_fz_missing_models(require_audio=False, model_settings=None):
+def h3_fz_missing_models(require_audio=False, model_settings=None, require_adapter=False):
     from kohya_core.h3_models import missing
-    return missing(sys.modules[__name__], model_settings, require_audio)
+    return missing(sys.modules[__name__], model_settings, require_audio, require_adapter)
 
 
 FIZGIG_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif"}
@@ -4134,32 +4111,16 @@ def _fizgig_caption_nonempty(path):
 
 
 def _scan_fizgig_h3_subsets(folder, fallback_repeats=1):
-    """Inspect H3 media recursively, grouping each physical folder for Fizgig TOML."""
-    audio_exts = {".wav", ".mp3", ".flac", ".m4a"}
-    result = {"images": 0, "videos": 0, "audio": 0, "missing_captions": [], "total": 0}
-    subsets = []
+    """Share H3 recursive media and caption checks with data preparation."""
     if not folder or not os.path.isdir(folder):
-        return result, subsets
-    for current, dirs, names in os.walk(folder):
-        dirs[:] = [name for name in dirs if not name.startswith(".")]
-        local_count = 0
-        for name in names:
-            path = os.path.join(current, name)
-            ext = os.path.splitext(name)[1].lower()
-            key = "images" if ext in FIZGIG_IMAGE_EXTS else "videos" if ext == ".mp4" else "audio" if ext in audio_exts else None
-            if key is None:
-                continue
-            result[key] += 1
-            result["total"] += 1
-            local_count += 1
-            caption = os.path.splitext(path)[0] + ".txt"
-            if not _fizgig_caption_nonempty(caption):
-                result["missing_captions"].append(os.path.relpath(path, folder))
-        if local_count:
-            match = re.match(r"^(\d+)[_-]", os.path.basename(current)) if current != folder else None
-            repeats = int(match.group(1)) if match else int(fallback_repeats)
-            subsets.append((current, max(1, repeats), local_count))
-    return result, subsets
+        return {"images": 0, "videos": 0, "audio": 0, "missing_captions": [], "total": 0}, []
+    from kohya_core.h3_dataset import scan
+    return scan(sys.modules[__name__], folder, fallback_repeats)
+
+
+def prepare_h3_dataset(params, logf=print, report=None):
+    from kohya_core.h3_dataset import prepare
+    return prepare(sys.modules[__name__], params, logf, report)
 
 
 def scan_fizgig_h3_dataset(folder):
@@ -6672,6 +6633,8 @@ def _train_qwen21_fizgig_legacy(logf=print, mode="qwen21_fz", params=None, vram_
 def _train_h3_fizgig_legacy(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_from=None, progress=None):
     """Train H3 on a shared photo, MP4 and/or audio folder with Fizgig v6.5.0."""
     params = params or {}
+    from kohya_core.h3_dataset import validate_options
+    h3_training_type, _caption_method = validate_options(params)
     quant_mode = str(params.get("quant_mode") or "auto").strip().lower()
     if quant_mode not in QUANT_MODE_OPTIONS["h3_fz"]:
         raise ValueError("MiniMax H3(Fizgig) 不支持量化精度：%s" % quant_mode)
@@ -6696,7 +6659,8 @@ def _train_h3_fizgig_legacy(logf=print, mode="h3_fz", params=None, vram_gb=None,
     from kohya_core.h3_models import validate_selected
     validate_selected(sys.modules[__name__], selection)
     files = h3_fz_model_files(selection)
-    missing = h3_fz_missing_models(require_audio=need_audio, model_settings=selection)
+    missing = h3_fz_missing_models(require_audio=need_audio, model_settings=selection,
+                                  require_adapter=dataset["images"] > 0)
     if missing:
         raise RuntimeError("MiniMax H3 缺少 Fizgig 所需模型，请下载到 models/minimax_h3/：\n\n" + "\n".join(missing))
     from kohya_core.h3_models import training_precision
@@ -6705,10 +6669,14 @@ def _train_h3_fizgig_legacy(logf=print, mode="h3_fz", params=None, vram_gb=None,
         logf("[MiniMax H3(Fizgig)] ⚠ 未安装音频 VAE：MP4 仍可训练画面，但片段声音会被忽略。")
     proj = _sanitize_dirname(params.get("project")) or "h3_fz"
     cfg_path = os.path.join(KIT_DIR, "configs", f"fizgig_h3_{proj}.toml")
-    cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_h3_cache")
+    resolution = int(params.get("resolution") or H3_FZ_RESOLUTION)
+    from kohya_core.fizgig_adapter import _cache_identity
+    fingerprint, _identity = _cache_identity(sys.modules[__name__], "minimax", dict(files, vae=files["video_vae"]),
+                                          subsets, resolution, commit=str(params.get("fizgig_version") or "legacy-h3"),
+                                          training_type=h3_training_type)
+    cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_h3_cache", h3_training_type, fingerprint)
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
-    resolution = int(params.get("resolution") or H3_FZ_RESOLUTION)
     _write_fizgig_subset_config(subsets, cache_dir, cfg_path, resolution)
     audio_marker = os.path.join(cache_dir, ".audio_vae_signature")
     audio_signature = None
@@ -6730,7 +6698,7 @@ def _train_h3_fizgig_legacy(logf=print, mode="h3_fz", params=None, vram_gb=None,
         cache_cmd += ["--skip_existing"]
     if files["audio_vae"] and (dataset["videos"] or dataset["audio"]):
         cache_cmd += ["--audio_vae", files["audio_vae"]]
-    if dataset["videos"]:
+    if dataset["videos"] and h3_training_type != "style":
         cache_cmd += ["--clip_still"]
     logf(f"[MiniMax H3(Fizgig)] 缓存素材：图片 {dataset['images']}、视频 {dataset['videos']}、音频 {dataset['audio']}")
     if run_stream(cache_cmd, cwd=fz_dir, env=env, logf=logf) != 0:
@@ -6752,7 +6720,9 @@ def _train_h3_fizgig_legacy(logf=print, mode="h3_fz", params=None, vram_gb=None,
     _record_effective(engine="Fizgig", rank=rank, alpha=alpha, epochs=epochs, unet_lr=lr,
                       train_text_encoder=False, te_lr="不参与训练", resolution=resolution,
                       total_steps=sum(repeats * count for _folder, repeats, count in subsets) * epochs,
-                      optimizer="adamw（入口指定）", quant_mode=quant_mode, batch_size=1)
+                      optimizer="adamw（入口指定）", quant_mode=quant_mode, batch_size=1,
+                      training_adapter=files["training_adapter"] or "未使用",
+                      training_adapter_loaded=False)
     cmd = [vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "minimax_train.py"),
            "--dataset_config", cfg_path, "--dit", files["dit"],
            "--output_dir", out_dir, "--output_name", output_name,
@@ -6766,10 +6736,16 @@ def _train_h3_fizgig_legacy(logf=print, mode="h3_fz", params=None, vram_gb=None,
            "--no_train_adaln", "--tread_ratio", "0.5", "--tread_start", "2", "--tread_end", "47",
            "--save_state", "--save_state_on_train_end", "--keep_last_n_states", "2",
            "--text_encoder", files["te"], "--vae", files["video_vae"]]
-    if dataset["videos"]:
+    if dataset["videos"] and h3_training_type != "style":
         cmd += ["--clip_still_as_photo"]
+    _record_effective(training_type=h3_training_type, caption_method=params.get("caption_method") or "wd14",
+                      clip_still_as_photo=bool(dataset["videos"] and h3_training_type != "style"))
+    logf("[MiniMax H3(Fizgig)] 训练类型：%s；视频静帧增强：%s。" % (h3_training_type, "开启" if dataset["videos"] and h3_training_type != "style" else "关闭"))
     if files["training_adapter"]:
         cmd += ["--training_adapter_path", files["training_adapter"]]
+        logf("[MiniMax H3(Fizgig)] 图片训练适配器：" + files["training_adapter"])
+    else:
+        logf("[MiniMax H3(Fizgig)] 当前无图片素材，未使用图片训练适配器。")
     if resume_from:
         cmd += ["--resume", resume_from]
         if progress is not None:
@@ -7349,6 +7325,8 @@ def run_video_caption(logf=print, video_dir="", trigger="", frames=6, overwrite=
         cmd += ["--overwrite"]
     if recursive:
         cmd += ["--recursive"]
+    if mode == "h3_fz":
+        cmd += ["--mp4-only"]
     logf("[打标] 启动 Qwen2.5-VL 自动描述：%s（首次会下载模型约 6~7GB）" % video_dir)
     rc = run_stream(cmd, cwd=KIT_DIR, env=env, logf=logf)
     check_stop()
@@ -10240,7 +10218,7 @@ def gpu_status_text():
 # ---------- 配置导出 / 导入（可分享；不含本机路径与提示词，提示词可选） ----------
 _CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps", "video_frames", "batch_size", "sample_interval", "sample_seed")
 _CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
-_CFG_PARAM_BOOL_KEYS = ("pixai_character", "pixai_copyright", "pixai_style", "strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode")
+_CFG_PARAM_BOOL_KEYS = ("pixai_character", "pixai_copyright", "pixai_style", "strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode", "h3_caption_replace", "h3_sync_trigger")
 _CFG_PARAM_STR_KEYS = ("pixai_threshold", "fizgig_version", "optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma", "caption_method", "caption_language", "caption_length")
 _CFG_PROMPT_KEYS = ("trigger", "style_caption", "sample_prompt", "global_pos", "global_neg")
 _CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
@@ -12149,38 +12127,21 @@ def amd_env_status(vpy=None):
 
 
 def resolve_batch_size(params, label="训练", logf=print):
-    """训练批大小：留空 = 自动（1）；支持 1~8；非法值提示并回落 1。
-
-    ★ 2026-09-27 新增 ✗ —— 用户诉求：「训练器可以改 bs 和梯度检查点吗，
-      现在好像不能手动改 AI」
-      以前 batch_size 在数据集配置里**写死为 1** ✗（musubi 的训练批大小只认
-      dataset_config ✓，命令行没有 --batch_size ✓）→ 用户完全无法调整 ✓
-      现在：留空（默认）走 1 ✓；填 1~8 生效 ✓；越界/非数字 → 提示后按 1 ✓
-
-    ⚠️ 连带影响（调用处都已一并处理 ✓）：
-      · **每轮步数 = repeats × 图片数 ÷ bs** ✗ → 进度条 / ETA / 断点续训步数随之变化 ✓
-      · 显存占用随 bs 近线性上升 ✗ → 显存吃紧的卡建议保持 1 ✓
-      · 调大 bs 通常等价于「每步看更多样本」→ 学习率与 epochs 需相应斟酌 ✓
-    """
-    _raw = str((params or {}).get("batch_size") or "").strip()
-    if not _raw:
-        return 1
-    if _raw.isdigit() and 1 <= int(_raw) <= 8:
-        _bs = int(_raw)
-        if _bs != 1:
-            logf("[%s] 已按手动指定的 batch_size=%s 训练"
-                 "（每轮步数 = repeats × 图片数 ÷ %s；显存占用会上升）" % (label, _bs, _bs))
-        return _bs
-    logf("[%s] ⚠ batch_size=%s 无效（支持 1~8 的整数），已按 1 处理 ✗" % (label, _raw))
-    return 1
+    """Resolve the training batch size; invalid edits stop instead of reverting to 1."""
+    from kohya_core.project_config import normalize_batch_size
+    batch_size = normalize_batch_size((params or {}).get("batch_size"))
+    if batch_size != 1:
+        logf(f"[{label}] 训练批大小={batch_size}（每步同时处理的图片上限）")
+    return batch_size
 
 
 def decide_gradient_checkpointing(gc_choice, vram_gb):
-    """梯度检查点开关：自动 = 显存未知或 <16GB 时开启；否则跟随手动选择。"""
-    gc_choice = str(gc_choice or "自动").strip().lower()
-    if gc_choice in ("开启", "on", "true", "1"):
+    """Only auto uses the VRAM policy; explicit on/off must be preserved."""
+    from kohya_core.project_config import normalize_gradient_checkpointing
+    choice = normalize_gradient_checkpointing(gc_choice)
+    if choice == "开启":
         return True
-    if gc_choice in ("关闭", "off", "false", "0"):
+    if choice == "关闭":
         return False
     return (vram_gb is None) or (vram_gb < 16.0)
 
@@ -12292,20 +12253,24 @@ def dataset_per_epoch_steps(train_dir, fallback_repeats=1, batch_size=1):
 # 供 kohya_gui.py 的「标签编辑器」窗口调用，也便于命令行/脚本复用。
 # ============================================================
 
-def list_dataset_images(train_dir):
+def list_dataset_images(train_dir, image_extensions=None):
     """递归列出数据集内全部图片及其同名 txt 标签。
 
     返回 [{rel, img, txt, caption}]，按路径排序；rel 为空串表示根目录。
     """
     out = []
+    extensions = tuple(IMAGE_EXTS if image_extensions is None else image_extensions)
     if not os.path.isdir(train_dir):
         return out
     for root, dirs, files in os.walk(train_dir):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not os.path.islink(os.path.join(root, d))
+                   and not getattr(os.path, "isjunction", lambda _: False)(os.path.join(root, d))]
         for f in sorted(files):
-            if not f.lower().endswith(IMAGE_EXTS):
+            if not f.lower().endswith(extensions):
                 continue
             img = os.path.join(root, f)
+            if os.path.islink(img):
+                continue
             stem = os.path.splitext(f)[0]
             txt = os.path.join(root, stem + ".txt")
             cap = ""
@@ -12561,75 +12526,15 @@ def organize_dataset_repeats(train_dir, repeats, name):
 
 
 def find_latest_state(output_dir, output_name):
-    """在输出目录找最新的 Kohya 按步数保存的训练状态目录（断点续训用）。
-
-    只找带 step 的目录（如 character_lora-step00000200-state），这些才是中断点；
-    纯 '<name>-state' 是训练正常完成时保存的最终状态，不代表中断，不用于续训提示。
-
-    完成判定（2026-09-08 修）：只看【最终成品 {name}.safetensors】与最新断点的修改时间——
-    - 成品比断点新/相等 → 上次已正常跑完，不提示续训；
-    - 成品比断点旧（旧完成 + 新一次中断；或中断后还没写过成品）→ 仍提示续训。
-    注意不能拿“任一顶层 .safetensors”判断：中间 step/epoch 模型文件也会让中断误判成已完成。
-    """
-    if not os.path.isdir(output_dir):
-        return None
-    cands = []
-    search_dirs = [output_dir, os.path.join(output_dir, "snapshots")]
-    for d in search_dirs:
-        if not os.path.isdir(d):
-            continue
-        for f in os.listdir(d):
-            p = os.path.join(d, f)
-            if not os.path.isdir(p) or not f.startswith(output_name):
-                continue
-            if "-step" in f and f.endswith("-state"):
-                cands.append(p)
-    if not cands:
-        return None
-
-    try:
-        final = os.path.join(output_dir, output_name + ".safetensors")
-        if os.path.isfile(final):
-            final_mtime = os.path.getmtime(final)
-            cands = [path for path in cands if os.path.getmtime(os.path.join(path, "training_state.json")) > final_mtime]
-    except OSError:
-        pass
-    if not cands:
-        return None
-
-    # 按 step 号取最大（比 mtime 可靠）
-    def _step_no(p):
-        m = re.search(r"-step(\d+)-state", os.path.basename(p))
-        return int(m.group(1)) if m else -1
-    return max(cands, key=_step_no)
+    """Find the newest complete, unfinished Kohya step snapshot."""
+    from kohya_core.training_resume import find_accelerate_state
+    return find_accelerate_state(output_dir, output_name, "kohya")
 
 
 def find_musubi_state(output_dir, output_name):
-    """Find the latest Musubi epoch state ({name}-000001-state)."""
-    if not os.path.isdir(output_dir):
-        return None
-    pattern = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
-    candidates = []
-    for directory in (output_dir, os.path.join(output_dir, "snapshots")):
-        if not os.path.isdir(directory):
-            continue
-        for name in os.listdir(directory):
-            match = pattern.match(name)
-            if not match:
-                continue
-            path = os.path.join(directory, name)
-            if not os.path.isdir(path) or not os.listdir(path):
-                continue
-            candidates.append((int(match.group(1)), path))
-    try:
-        final = os.path.join(output_dir, output_name + ".safetensors")
-        if os.path.isfile(final):
-            final_mtime = os.path.getmtime(final)
-            candidates = [(epoch, path) for epoch, path in candidates
-                          if os.path.getmtime(os.path.join(path, "training_state.json")) > final_mtime]
-    except OSError:
-        pass
-    return max(candidates)[1] if candidates else None
+    """Find complete Musubi states, including native counter and old epoch saves."""
+    from kohya_core.training_resume import find_accelerate_state
+    return find_accelerate_state(output_dir, output_name, "musubi")
 
 def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs=None):
     """找 Fizgig 断点状态目录（{name}-NNNNNN-state，按 epoch 命名，内含 training_state.json）。
@@ -12639,6 +12544,7 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
     改为：成品比最新断点新/相等 → 已跑完不提示；成品比断点旧 → 仍提示（新中断）。
     找不到断点返回 None。
     """
+    from kohya_core.training_resume import state_missing, state_timestamp
     if not os.path.isdir(output_dir):
         return None
     pat = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
@@ -12652,6 +12558,8 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
                 continue
             p = os.path.join(_d, f)
             if not os.path.isdir(p) or not os.path.isfile(os.path.join(p, "training_state.json")):
+                continue
+            if state_missing(p, "fizgig"):
                 continue
             if version:
                 try:
@@ -12667,43 +12575,24 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
                         continue
                 except (OSError, ValueError, AttributeError):
                     continue
-            candidates.append((int(m.group(1)), p))
+            candidates.append((state_timestamp(p), int(m.group(1)), p))
     try:
         final = os.path.join(output_dir, output_name + ".safetensors")
         if version not in ("v7.0.1", "v7.3.1") and os.path.isfile(final):
             final_mtime = os.path.getmtime(final)
-            candidates = [(epoch, path) for epoch, path in candidates
-                          if os.path.getmtime(os.path.join(path, "training_state.json")) > final_mtime]
+            candidates = [(stamp, epoch, path) for stamp, epoch, path in candidates
+                          if stamp > final_mtime]
     except OSError:
         pass
-    return max(candidates)[1] if candidates else None
+    return max(candidates)[2] if candidates else None
 
 def resume_step_from(resume_from, steps_per_epoch=None):
-    """从断点快照解析已完成步数；Musubi 按轮次保存时需传入每轮步数。
-
-    断点续训时监控从该步续上（而不是从 0 重新计数）；解析失败返回 0（监控照旧从日志里读）。"""
+    """Read actual saved counters before falling back to the snapshot name."""
+    from kohya_core.training_resume import resume_position
     try:
-        base = os.path.basename(os.path.normpath(str(resume_from or "")))
-        m = re.search(r"-step(\d+)-state", base)
-        if m:
-            return int(m.group(1))
-        if steps_per_epoch:
-            m = re.search(r"-(\d{6})-state$", base)
-            if m:
-                return int(m.group(1)) * int(steps_per_epoch)
-        # 兜底：状态目录内 training_state.json 的 global_step
-        j = os.path.join(str(resume_from or ""), "training_state.json")
-        if os.path.isfile(j):
-            try:
-                import json as _json
-                st = _json.load(open(j, encoding="utf-8"))
-                gs = st.get("global_step") or st.get("step") or 0
-                return int(gs)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return 0
+        return resume_position(resume_from, steps_per_epoch)
+    except (OSError, ValueError, TypeError):
+        return 0
 
 
 def auto_training_setup(vram_gb, base_type):
@@ -14308,9 +14197,10 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             reg_subsets = scan_dataset_subsets(params["reg_dir"], 1)
         except Exception:
             reg_subsets = None
+    batch_size = resolve_batch_size(params, "训练", logf)
     import preprocess as _pp
     _pp.write_dataset_config(
-        dataset_dir, cfg_path, resolution=resolution,
+        dataset_dir, cfg_path, resolution=resolution, batch_size=batch_size,
         num_repeats=params.get("repeats", 5),
         subsets=subsets,
         reg_dir=(params.get("reg_dir") if mode == "character" else None),
@@ -14331,10 +14221,6 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     epochs = params.get("max_epochs", 8)
     train_te = params.get("train_text_encoder", True)
     gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
-    # ★ 2026-09-27：改用统一解析 ✗ ——
-    #   原来 `int(params.get("batch_size", 1))` 在用户填了非数字时**直接 ValueError** ✗；
-    #   现在留空 = 1 ✓、1~8 生效 ✓、非法值提示后回落 1 ✓（与 Krea2/FLUX.2 完全一致 ✓）
-    batch_size = resolve_batch_size(params, "训练", logf)
     use_xformers = bool(params.get("use_xformers", False))
     # AdamW8bit 需要 bitsandbytes：缺失自动补装（失败仅降级不中断；AMD 兼容模式不用 bnb，跳过）
     if not amd_mode:
@@ -14383,7 +14269,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                       train_text_encoder=train_te and family != "anima", lr_scheduler="cosine", lr_warmup_steps=120,
                       repeats=params.get("repeats"), epochs=epochs,
                       resolution=params.get("resolution"), optimizer=optimizer_type,
-                      total_steps=total_steps, mixed_precision=mixed)
+                      total_steps=total_steps, mixed_precision=mixed,
+                      batch_size=batch_size, gradient_checkpointing=gc_on)
     if family == "sd":
         # 只有 SD 系真的会把这两项送进命令；留空时 param_float 返回 None，_record_effective 会跳过
         _record_effective(noise_offset=param_float(params.get("noise_offset")),
@@ -14547,11 +14434,15 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         if gc_on:
             cmd.append("--gradient_checkpointing")
     else:
-        # FLUX / Anima 固定用 sdpa + 梯度检查点（省显存）
         cmd.append("--sdpa")
-        if gc_on or vram_gb is None or vram_gb < 16:
+        if gc_on:
             cmd.append("--gradient_checkpointing")
     if resume_from:
+        from kohya_core.training_resume import require_state, patch_kohya_resume
+        _resume_step = require_state(resume_from, "kohya")
+        patch_kohya_resume(kdir, logf)
+        cmd += [f"--initial_step={_resume_step}", "--skip_until_initial_step"]
+        _record_effective(resume_step=_resume_step, resume_snapshot=os.path.basename(resume_from))
         cmd.append(f"--resume={resume_from}")
         logf(f"[训练] 断点续训：从 {resume_from} 继续")
         if progress is not None:
