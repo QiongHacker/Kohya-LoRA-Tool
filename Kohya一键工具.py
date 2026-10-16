@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.11"
+APP_VERSION = "0.19.12"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5529,22 +5529,70 @@ def _update_fizgig_engine_legacy(logf=print):
         _release_kohya_install_lock(lock_f)
 
 
-def _find_python312_exe():
-    """定位 Python 3.12 解释器路径；找不到返回 None（不安装）。"""
+def _python312_64bit(p):
+    """Check the interpreter itself, including existing venvs, without loading torch."""
+    if not p or not os.path.isfile(p):
+        return False
     try:
-        r = subprocess.run(["py", "-3.12", "-c", "import sys;print(sys.executable)"],
-                           capture_output=True, text=True, timeout=30)
-        p = (r.stdout or "").strip()
-        if r.returncode == 0 and p and os.path.isfile(p):
-            return p
-    except Exception:
+        result = subprocess.run(
+            [p, "-I", "-c", "import sys,struct,venv;print('%d.%d %d' % "
+             "(sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8))"],
+            capture_output=True, text=True, timeout=30)
+        return result.returncode == 0 and (result.stdout or "").strip() == "3.12 64"
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _find_python312_exe():
+    """Find a runnable 64-bit Python 3.12 with venv; a 32-bit install does not qualify."""
+    candidates = [custom_python_exe()]
+    try:
+        result = subprocess.run(["py", "-3.12", "-c", "import sys;print(sys.executable)"],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            candidates.append((result.stdout or "").strip())
+        result = subprocess.run(["py", "-0p"], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            for line in (result.stdout or "").splitlines():
+                match = re.search(r"((?:[A-Za-z]:\\|\\\\).+python\.exe)\s*$", line, re.I)
+                if match:
+                    candidates.append(match.group(1).strip('"'))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    candidates.extend([
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python312\python.exe"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), r"Python312\python.exe"),
+        r"C:\Python312\python.exe",
+    ])
+    try:
+        import winreg
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+                for version in ("3.12", "3.12-64"):
+                    try:
+                        with winreg.OpenKey(hive, r"Software\Python\PythonCore\%s\InstallPath" % version,
+                                            0, winreg.KEY_READ | view) as key:
+                            install_dir, _ = winreg.QueryValueEx(key, "")
+                            candidates.append(os.path.join(install_dir, "python.exe"))
+                    except OSError:
+                        pass
+    except ImportError:
         pass
     try:
         py, ver = find_python()
-        if py and str(ver or "").startswith("3.12"):
-            return py
+        if str(ver or "").startswith("3.12"):
+            candidates.append(py)
     except Exception:
         pass
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        identity = os.path.normcase(os.path.abspath(candidate))
+        if identity not in seen:
+            seen.add(identity)
+            if _python312_64bit(candidate):
+                return candidate
     return None
 
 
@@ -5554,17 +5602,17 @@ def _fizgig_ensure_python312(logf=print):
 
 
 def _engine_ensure_python312(label, logf=print):
-    """确保 Windows ROCm 引擎可使用的 Python 3.12 已安装。"""
+    """确保 Windows ROCm 引擎可使用的 64 位 Python 3.12 已安装。"""
     py312 = _find_python312_exe()
     if py312:
         return py312
-    logf(f"[{label}] 未检测到 Python 3.12（Windows ROCm 轮子仅 cp312），开始安装 Python 3.12…")
+    logf(f"[{label}] 未检测到 64 位 Python 3.12（Windows ROCm 需要 cp312 / win_amd64），开始安装…")
     ok, msg = install_python_312(logf)
     if not ok:
         raise RuntimeError(f"{label} 需要 Python 3.12，安装失败：" + msg)
     py312 = _find_python312_exe()
     if not py312:
-        raise RuntimeError("Python 3.12 安装完成但未定位到解释器，请重启软件后重试")
+        raise RuntimeError("安装后仍未找到可用的 64 位 Python 3.12；请检查 Python 安装路径后重试")
     return py312
 
 
@@ -5653,6 +5701,9 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
     复用 Fizgig 已在 AMD 用户环境中采用的 ROCm 7.15 wheel 组：优先魔搭断点续传，
     失败后回退 AMD nightly。调用方负责在随后安装引擎依赖时锁定匹配的 torch 版本。
     """
+    if not _python312_64bit(vpy):
+        raise RuntimeError("Windows ROCm 需要 64 位 Python 3.12；当前训练解释器不匹配：%s。"
+                           "请先用 64 位 Python 3.12 重建该虚拟环境，再重试安装。" % vpy)
     arch = _amd_gpu_arch(engine_dir, vpy, logf)
     logf(f"[{label}] AMD ROCm 路径：检测到 GPU 架构 {arch}，安装 Windows ROCm 7.15 栈…")
     rocm_dir = os.path.join(_engine_source_cache_dir(), "rocm")
@@ -10852,11 +10903,11 @@ def install_python_312(logf=print):
     """安装 Python 3.12：内置安装包优先（installers/python/python-3.12*.exe），
     没有则从国内镜像下载后静默安装。返回 (ok, msg)。"""
     try:
-        if "3.12" in detect_system_pythons():
-            logf("[AMD] Python 3.12 已安装，跳过。")
-            return True, "Python 3.12 已安装"
+        if _find_python312_exe():
+            logf("[AMD] 64 位 Python 3.12 已安装，跳过。")
+            return True, "64 位 Python 3.12 已安装"
         import glob
-        builtin = glob.glob(os.path.join(KIT_DIR, "installers", "python", "python-3.12*.exe"))
+        builtin = glob.glob(os.path.join(KIT_DIR, "installers", "python", "python-3.12*-amd64.exe"))
         exe = builtin[0] if builtin else None
         if not exe:
             exe = os.path.join(KIT_DIR, "installers", "python", "python-3.12.10-amd64.exe")
@@ -10884,24 +10935,15 @@ def install_python_312(logf=print):
             capture_output=True, text=True, timeout=1800)
         # 安装程序退出码 0 表示成功；此时 py launcher 可能缓存未刷新，
         # 用「检测 + 已知路径 + 注册表」综合判断，避免误报失败。
-        ok312 = ("3.12" in detect_system_pythons())
-        if not ok312:
-            # 用户级安装默认路径
-            user_py = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python312\python.exe")
-            for c in (user_py, r"C:\Python312\python.exe", r"C:\Program Files\Python312\python.exe"):
-                if os.path.isfile(c):
-                    s, parts = _py_version(c)
-                    if s and parts[:2] == (3, 12):
-                        ok312 = True
-                        break
+        ok312 = bool(_find_python312_exe())
         if ok312:
-            logf("[OK] Python 3.12 安装成功！")
-            return True, "Python 3.12 安装成功"
+            logf("[OK] 64 位 Python 3.12 安装成功！")
+            return True, "64 位 Python 3.12 安装成功"
         if r.returncode == 0:
             # 退出码 0 但没检测到：可能是路径非常规，引导用户确认（不再判失败）
             logf("[AMD] 安装程序已成功退出（退出码 0），但暂未在常规路径检测到 Python 3.12。")
             logf("[AMD] 请点击「重新检查」；若仍检测不到，可手动安装 Python 3.12（点「打开 Python 下载页」）。")
-            return False, "安装程序已执行（退出码 0），但未检测到 Python 3.12，请点「重新检查」确认；若仍无，请手动安装。"
+            return False, "安装程序已执行（退出码 0），但未检测到 64 位 Python 3.12，请点「重新检查」确认；若仍无，请手动安装。"
         return False, f"安装程序退出码 {r.returncode}，请手动安装 Python 3.12。"
     except Exception as e:
         return False, str(e)

@@ -16,12 +16,19 @@ import time
 import zipfile
 
 
-def redact(text):
+def redact_secrets(text):
+    """Remove service credentials while preserving paths needed by local tools."""
     text = str(text)
     text = re.sub(r"\b(?:sk-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,})\b", "<REDACTED>", text)
     text = re.sub(r'(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization|hf_token)[\s"\x27]*[:=][\s"\x27]*(?:bearer\s+)?)[^\s,;"\x27]+', r'\1<REDACTED>', text)
+    text = re.sub(r'(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]+=*', r'\1<REDACTED>', text)
     text = re.sub(r'(?i)(https?://)[^/\s:@]+:[^/\s@]+@', r'\1<REDACTED>@', text)
     text = re.sub(r'(?i)([?&](?:token|key|signature|access_token)=)[^&\s"\x27]+', r'\1<REDACTED>', text)
+    return text
+
+
+def redact(text):
+    text = redact_secrets(text)
     text = re.sub(r"(?i)[A-Z]:[\\/]+Users[\\/]+[^\\/\r\n\"']+", "%USERPROFILE%", text)
     home = str(Path.home())
     return text.replace(home, "%USERPROFILE%") if len(home) > 3 else text

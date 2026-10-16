@@ -59,6 +59,7 @@ diagnostics_training_tests.log
 
 # 助手服务与个人运行资料（仅本机保存，不发布）
 assistant_service.json
+external_mcp.json
 caption_service.json
 app_settings.json
 settings/

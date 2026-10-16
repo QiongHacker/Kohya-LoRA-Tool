@@ -18,6 +18,7 @@ import ModernTrainingDialog from './components/ModernTrainingDialog.vue'
 import TrainingHistoryDialog from './components/TrainingHistoryDialog.vue'
 import ModelDownloadDialog from './components/ModelDownloadDialog.vue'
 import EnvironmentDialog from './components/EnvironmentDialog.vue'
+import ExternalMcpDialog from './components/ExternalMcpDialog.vue'
 import PromptReverseDialog from './components/PromptReverseDialog.vue'
 const LoRAWorkbench = defineAsyncComponent(() => import('./components/LoRAWorkbench.vue'))
 import ModernHelpDialog from './components/ModernHelpDialog.vue'
@@ -74,6 +75,7 @@ const workspaceProject = ref<ProjectCard | null>(null)
 const workspaceConfig = ref<ProjectConfig | null>(null)
 const assistantOpen = ref(false)
 const promptReverseOpen = ref(false)
+const externalMcpOpen = ref(false)
 const loraWorkbenchOpen = ref(false)
 const loraWorkbenchMounted = ref(false)
 const agentBusy = ref(false)
@@ -82,6 +84,7 @@ const modeWorkspace = ref<ModeWorkspaceData | null>(null)
 const qwenModelSetup = ref<QwenModelSetup | null>(null)
 const activeWorkspaceRef = ref<{
   hasUnsavedChanges?: () => boolean
+  isBusy?: () => boolean
   startTraining: () => void
   save?: () => void
   guideAction?: (action: string) => Promise<ProjectConfig | null> | ProjectConfig | null
@@ -106,6 +109,8 @@ const logExportId = ref('')
 const logExportError = ref('')
 const setupDialogOpen = ref(false)
 const setupAction = ref('')
+const setupFizgigProject = ref('')
+const setupFizgigVersion = ref('v7.3.1')
 const historyDialogOpen = ref(false)
 const trainingDialogRef = ref<{ expand: () => void; attach: (id: string) => Promise<void> } | null>(null)
 const setupDialogRef = ref<{ attach: (id: string) => Promise<void> } | null>(null)
@@ -262,7 +267,8 @@ const demoQuantModes: Record<string, string[]> = {
 function setActiveWorkspace(instance: unknown) {
   activeWorkspaceRef.value = instance as {
     startTraining: () => void
-  save?: () => void
+    isBusy?: () => boolean
+    save?: () => void
     guideAction?: (action: string) => Promise<ProjectConfig | null> | ProjectConfig | null
     openModelDialog?: () => void
   } | null
@@ -736,6 +742,38 @@ async function openAgentTask(id: string, project = '', force = true) {
     await setupDialogRef.value?.attach(id)
   }
 }
+let externalMcpTimer: ReturnType<typeof setTimeout> | undefined
+let externalMcpRevision = -1
+let pollingExternalMcp = false
+async function pollExternalMcp() {
+  if (agentOwnerDisposed || pollingExternalMcp || preview.value || !window.pywebview?.api) return
+  pollingExternalMcp = true
+  if (externalMcpTimer) clearTimeout(externalMcpTimer)
+  externalMcpTimer = undefined
+  try {
+    const api = window.pywebview.api
+    const pending = Boolean(activeWorkspaceRef.value?.hasUnsavedChanges?.() || activeWorkspaceRef.value?.isBusy?.())
+    const state = await api.get_mcp_status(workspaceOpen.value ? workspaceProject.value?.name || '' : '', pending)
+    if (state.revision !== externalMcpRevision) {
+      const changed = externalMcpRevision >= 0
+      externalMcpRevision = state.revision
+      if (changed && data.value) {
+        data.value.projects = await api.list_projects()
+        const project = workspaceProject.value
+        if (project && state.last_project === project.name) {
+          if (pending) showToast('外部 Agent 已更新项目；当前页面有未保存修改，请先保留后重新打开项目。')
+          else await refreshAssistantProject(project.name)
+        }
+      }
+    }
+    if (state.task_id && state.task_id !== seenAgentTaskId) await openAgentTask(state.task_id, state.last_project, false)
+  } catch { /* Optional local connector must not interrupt the training UI. */ }
+  finally {
+    pollingExternalMcp = false
+    if (!agentOwnerDisposed) externalMcpTimer = setTimeout(pollExternalMcp, 2500)
+  }
+}
+
 let agentOwnerTimer: ReturnType<typeof setTimeout> | undefined
 let agentOwnerDisposed = false
 let pollingAgentOwner = false
@@ -928,6 +966,7 @@ async function refreshHomeGuide(mode = selectedGuideMode.value) {
 }
 
 async function onGuideAction(step: GuideStep) {
+  if (activeWorkspaceRef.value?.isBusy?.()) return showToast('正在保存引擎版本，请稍候。')
   const action = step.action
   const mode = workspaceProject.value?.mode || selectedGuideMode.value
   if (action === 'cmd_dl_krea2_models' && workspaceProject.value?.mode === 'krea2_fz') {
@@ -936,6 +975,12 @@ async function onGuideAction(step: GuideStep) {
     return
   }
   if (action === 'cmd_env' || action === 'cmd_install' || action === 'cmd_install_musubi' || action === 'cmd_install_at' || action === 'cmd_install_fizgig') {
+    if (action === 'cmd_install_fizgig' && workspaceProject.value) {
+      const patch = await activeWorkspaceRef.value?.guideAction?.(action)
+      if (patch && !(await saveKohyaConfig(patch))) return
+    }
+    setupFizgigProject.value = action === 'cmd_install_fizgig' ? workspaceProject.value?.name || '' : ''
+    setupFizgigVersion.value = setupFizgigProject.value ? modeWorkspace.value?.fizgig_version || 'v7.3.1' : 'v7.3.1'
     setupAction.value = action
     agentTaskTitle.value = ''
     setupDialogOpen.value = true
@@ -1023,6 +1068,7 @@ function logExportCompleted(path: string) {
 }
 
 async function runAction(action: string, projectName?: string) {
+  if (action === 'external_mcp') { externalMcpOpen.value = true; return }
   if (action === 'lora_workbench') { loraWorkbenchMounted.value = true; loraWorkbenchOpen.value = true; return }
   if (action === 'prompt_reverse') { promptReverseOpen.value = true; return }
   if (action === 'export_log' || action === 'export_diagnostics') { await exportLog(action, projectName); return }
@@ -1255,7 +1301,10 @@ async function runKrea2ComponentAction(action: string, patch?: ProjectConfig) {
 async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
   if (workspaceProject.value?.mode === 'krea2_fz' && (action === 'cmd_dl_krea2_models' || action.startsWith('krea2_encoder:') || action.startsWith('krea2_component:'))) return runKrea2ComponentAction(action, patch)
   if (action === 'cmd_install_fizgig' || action === 'fizgig_engine_update' || action === 'fizgig_engine_rollback') {
+    if (activeWorkspaceRef.value?.isBusy?.()) return showToast('正在保存引擎版本，请稍候。')
     if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
+    setupFizgigProject.value = action === 'cmd_install_fizgig' ? workspaceProject.value?.name || '' : ''
+    setupFizgigVersion.value = setupFizgigProject.value ? modeWorkspace.value?.fizgig_version || 'v7.3.1' : 'v7.3.1'
     setupAction.value = action
     agentTaskTitle.value = ''
     setupDialogOpen.value = true
@@ -1374,7 +1423,7 @@ onMounted(async () => {
       ? firstEngineSidebarModeForBaseType(firstEngineProject.base_type)
       : firstEngineSidebarModes.sdxl
     logs.value = [...loaded.data.logs]
-    if (!loaded.preview) { await loadAppearanceSettings(); void pollAgentOwnership() }
+    if (!loaded.preview) { await loadAppearanceSettings(); void pollAgentOwnership(); void pollExternalMcp() }
     scheduleUiIdleFade()
     if (loaded.preview) modeWorkspace.value = demoModeWorkspace('character')
     else await refreshHomeGuide(firstEngineProject?.mode || 'character')
@@ -1397,6 +1446,7 @@ watch(dialogOpen, (isOpen) => {
 
 onUnmounted(() => {
   agentOwnerDisposed = true
+  if (externalMcpTimer) clearTimeout(externalMcpTimer)
   if (agentOwnerTimer) clearTimeout(agentOwnerTimer)
   if (uiIdleFadeTimer !== undefined) window.clearTimeout(uiIdleFadeTimer)
   window.removeEventListener('keydown', onKeydown)
@@ -1482,6 +1532,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       <ModernEngineWorkspace
         v-else-if="!loading && !loadError && workspaceOpen && workspaceProject && workspaceKind === 'engine' && modeWorkspace"
         :key="`engine-workspace-${workspaceProject.name}-${workspaceProject.mode}`"
+        :save-config="saveKohyaConfig"
         :project="workspaceProject"
         :mode="workspaceProject.mode"
         :config="workspaceConfig"
@@ -1560,10 +1611,10 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <ModernTaskDialog
       ref="setupDialogRef"
       :open="setupDialogOpen"
-      :title="agentTaskTitle || (setupAction === 'video_caption' ? '视频 AI 自动描述' : setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v7.3.1' : '安装 Fizgig v7.3.1')"
+      :title="agentTaskTitle || (setupAction === 'video_caption' ? '视频 AI 自动描述' : setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v7.3.1' : '配置 Fizgig ' + setupFizgigVersion)"
       :action="setupAction"
       :description="setupAction === 'agent_task' ? '助手已启动此任务；这里显示软件的实际执行进度与日志。' : setupAction === 'video_caption' ? '为当前项目的视频生成英文描述，并保存为视频旁的同名 .txt 字幕。' : setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
-      :project-name="workspaceProject?.name ?? ''"
+      :project-name="setupAction === 'cmd_install_fizgig' ? setupFizgigProject : workspaceProject?.name ?? ''"
       @close="setupDialogOpen = false"
       @finished="refreshGuideState"
       @notify="showToast"
@@ -1597,8 +1648,9 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       @changed="refreshGuideState"
       @notify="showToast"
     />
-    <LoRAWorkbench v-if="loraWorkbenchMounted" :open="loraWorkbenchOpen" :desktop="!preview" :project-name="workspaceProject?.name || ''" @close="loraWorkbenchOpen = false" @notify="showToast" @environment="loraWorkbenchOpen = false; setupAction = 'cmd_install_fizgig'; setupDialogOpen = true" />
+    <LoRAWorkbench v-if="loraWorkbenchMounted" :open="loraWorkbenchOpen" :desktop="!preview" :project-name="workspaceProject?.name || ''" @close="loraWorkbenchOpen = false" @notify="showToast" @environment="loraWorkbenchOpen = false; setupFizgigProject = ''; setupFizgigVersion = 'v7.3.1'; setupAction = 'cmd_install_fizgig'; setupDialogOpen = true" />
     <PromptReverseDialog :open="promptReverseOpen" :desktop="!preview" @close="promptReverseOpen = false" @notify="showToast" />
+    <ExternalMcpDialog :open="externalMcpOpen" :desktop="!preview" @close="externalMcpOpen = false" @changed="pollExternalMcp" @notify="showToast" />
     <EnvironmentDialog
       :open="envDialogOpen"
       :choose-path="chooseWorkspacePath"

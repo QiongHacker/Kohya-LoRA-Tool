@@ -70,7 +70,7 @@ async function start() {
       ? await api.start_preprocess_task(props.projectName ?? '')
       : props.action === 'video_caption'
         ? await api.start_video_caption_task(props.projectName ?? '')
-        : await api.start_setup_task(props.action)
+        : await api.start_setup_task(props.action, props.action === 'cmd_install_fizgig' ? props.projectName ?? '' : '')
     if (!result.ok || !result.task_id) {
       startError.value = result.error ?? '无法启动任务。'
       emit('notify', startError.value)

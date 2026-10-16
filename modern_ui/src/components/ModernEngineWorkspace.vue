@@ -25,6 +25,7 @@ const props = defineProps<{
   details: ModeWorkspaceData
   desktop: boolean
   componentBusy?: boolean
+  saveConfig?: (patch: ProjectConfig) => Promise<boolean>
   choosePath: (kind: BrowseKind, currentPath?: string, memoryKey?: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
@@ -35,6 +36,7 @@ const emit = defineEmits<{
   classicAction: [action: string, patch?: ProjectConfig]
 }>()
 
+const switchingVersion = ref(false)
 const dirty = reactive(new Set<string>())
 const configuredParams = new Set<string>()
 const draft = reactive({
@@ -202,14 +204,14 @@ function makePatch(): ProjectConfig {
 }
 
 function save() {
-  if (props.componentBusy) return
+  if (props.componentBusy || switchingVersion.value) return
   const patch = makePatch()
   if (Object.keys(patch).length === 1 && patch.mode === props.mode) return emit('notify', '当前没有修改项目配置。')
   emit('save', patch)
 }
 
 function startTraining() {
-  if (props.componentBusy) return
+  if (props.componentBusy || switchingVersion.value) return
   if (!props.desktop) return emit('notify', '浏览器预览不会启动训练。')
   emit('train', makePatch())
 }
@@ -225,13 +227,20 @@ async function browseModel() {
   const path = await props.choosePath('model', draft.base_model, 'base_model')
   if (path) { draft.base_model=path; markRoot('base_model') }
 }
-function onVersionChange() {
+async function onVersionChange() {
+  if (switchingVersion.value) return
   markParam('fizgig_version')
   if (!quantModes.value.includes(draft.quant_mode)) { draft.quant_mode='auto'; markParam('quant_mode') }
   if (isV7.value && !['auto','adamw','adamw8bit'].includes(draft.optimizer)) { draft.optimizer='auto'; markParam('optimizer') }
-  emit('notify', '版本修改待保存；切换到 v7 会使用独立缓存，原版本快照请回原版本续训。')
+  if (!props.saveConfig) { save(); return }
+  switchingVersion.value = true
+  try {
+    if (await props.saveConfig(makePatch())) emit('notify', '已保存所选引擎版本。续训请使用原快照对应的版本。')
+  } finally { switchingVersion.value = false }
 }
 async function guideAction(action: string): Promise<ProjectConfig | null> {
+  if (switchingVersion.value) return null
+  if (isFizgig.value && action === 'cmd_install_fizgig') return makePatch()
   if (isMulti.value && action === 'cmd_pick_raw') {
     document.querySelector('.multi-panel')?.scrollIntoView({ block: 'start' })
     emit('notify', '请在角色库中分别选择素材目录。')
@@ -252,11 +261,12 @@ async function guideAction(action: string): Promise<ProjectConfig | null> {
 }
 
 function requestAction(action: string) {
+  if (switchingVersion.value) return
   if (!props.desktop && !['readme', 'krea2_guide', 'flux2_guide', 'h3_guide'].includes(action)) return emit('notify', '浏览器预览中，此操作不会触碰本机数据。')
   emit('classicAction', action, makePatch())
 }
 
-defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideAction, save })
+defineExpose({ hasUnsavedChanges: () => dirty.size > 0, isBusy: () => switchingVersion.value, startTraining, guideAction, save })
 
 const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCase() === 'amd')
 </script>
@@ -265,12 +275,12 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
   <section class="engine-workspace" :aria-label="`${details.label} 新版训练页`">
     <header class="engine-toolbar">
       <div class="engine-heading">
-        <button class="engine-back" type="button" :disabled="componentBusy" @click="emit('back', makePatch())"><UiIcon name="back" /> 返回项目</button>
+        <button class="engine-back" type="button" :disabled="componentBusy || switchingVersion" @click="emit('back', makePatch())"><UiIcon name="back" /> 返回项目</button>
       <div class="engine-heading-copy"><h1>{{ isMulti ? '多角色 LoRA · ' + details.label : details.label + '训练' }}</h1><span>项目：{{ project.name }}</span></div>
       </div>
       <div class="engine-actions">
-        <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction(engineUpdateAction)"><span class="update-arrow">↗</span> 引擎更新可用</button>
-        <button v-if="desktop" class="engine-button" type="button" :disabled="componentBusy" @click="save">{{ dirty.size ? '保存修改 · 未保存' : '设置已保存' }}</button>
+        <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="isFizgig ? '可选安装新版；项目继续使用当前所选版本。' : legacyTooltips.engineUpdate" :disabled="componentBusy || switchingVersion" @click="requestAction(engineUpdateAction)"><span class="update-arrow">↗</span> {{ isFizgig ? '可选升级引擎' : '引擎更新可用' }}</button>
+        <button v-if="desktop" class="engine-button" type="button" :disabled="componentBusy || switchingVersion" @click="save">{{ dirty.size ? '保存修改 · 未保存' : '设置已保存' }}</button>
         <!-- ★ 2026-10-02：与左侧栏重复的「一键开始训练」已移除 ✗（同一动作，只保留侧栏那个）-->
 
         <button v-else class="engine-button primary" type="button" @click="save">保存预览设置</button>
@@ -281,7 +291,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
       <span class="engine-status" :class="{ ready: details.engine_ready }">{{ details.engine_ready ? '训练引擎就绪' : '训练引擎未就绪' }}</span>
       <span class="engine-status" :class="{ ready: assetReady }">{{ assetReady ? '模型文件齐全' : `模型文件缺少 ${details.missing_models.length} 项` }}</span>
       <span class="engine-status">{{ details.gpu }}</span>
-          <button class="engine-link" type="button" :disabled="componentBusy" :title="isKrea2 ? '配置项目实际使用的模型和编码器' : '打开当前训练模式的模型文件夹。'" @click="requestAction(modelAction)">{{ isKrea2 ? '配置模型与组件' : '打开模型目录' }}</button>
+          <button class="engine-link" type="button" :disabled="componentBusy || switchingVersion" :title="isKrea2 ? '配置项目实际使用的模型和编码器' : '打开当前训练模式的模型文件夹。'" @click="requestAction(modelAction)">{{ isKrea2 ? '配置模型与组件' : '打开模型目录' }}</button>
     </div>
     <AmdCompatibilityBar
       v-if="isAmdGpu && supported('amd_mode')"
@@ -291,12 +301,13 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
     />
 
     <div class="engine-scroll-area">
-      <div class="engine-scroll-content" :inert="componentBusy">
+      <div class="engine-scroll-content" :inert="componentBusy || switchingVersion">
         <p v-if="isKrea2" class="krea2-workflow">环境准备 <span>→</span> 模型与组件 <span>→</span> 图集与标签 <span>→</span> 开始训练</p>
         <MultiCharacterPanel v-if="isMulti" :model-value="multiSettings" :project-name="project.name" :desktop="desktop" :choose-path="choosePath" @update:model-value="updateMulti" @notify="emit('notify',$event)" />
         <component :is="isKrea2 ? 'details' : 'section'" v-if="isFizgig" class="engine-card runtime-card">
-          <summary v-if="isKrea2" class="runtime-summary">环境与引擎 · {{ details.fizgig_version }}<span>{{ componentVersionPending ? '版本修改待保存' : details.engine_ready ? '已就绪 · 可展开调整' : '未就绪 · 展开安装' }}</span></summary>
-          <div class="runtime-choice"><label class="engine-field"><span>此项目的训练引擎版本</span><select v-model="draft.fizgig_version" class="engine-select" @change="onVersionChange"><option v-for="v in versions" :key="v" :value="v">{{ v }}{{ details.fizgig_versions?.includes(v) ? ' · 已安装' : ' · 需安装 / 更新' }}</option></select></label><button v-if="desktop && !details.fizgig_versions?.includes(details.fizgig_target_version || 'v7.3.1')" class="engine-button compact" type="button" @click="requestAction('fizgig_engine_update')">安装新版 Fizgig</button></div>
+          <summary v-if="isKrea2" class="runtime-summary">环境与引擎 · {{ details.fizgig_version }}<span>{{ switchingVersion ? '正在切换版本' : componentVersionPending ? '版本修改待保存' : details.engine_ready ? '已就绪 · 可展开调整' : '未就绪 · 展开安装' }}</span></summary>
+          <div class="runtime-choice"><label class="engine-field"><span>此项目的训练引擎版本</span><select v-model="draft.fizgig_version" class="engine-select" :disabled="switchingVersion" @change="onVersionChange"><option v-for="v in versions" :key="v" :value="v">{{ v }}{{ details.fizgig_versions?.includes(v) ? ' · 已安装' : ' · 需安装 / 更新' }}</option></select></label><button v-if="desktop && !details.engine_ready" class="engine-button compact" type="button" :disabled="componentVersionPending || switchingVersion" @click="requestAction('cmd_install_fizgig')">配置 {{ draft.fizgig_version }}</button></div>
+          <p v-if="details.fizgig_engine_detail" class="engine-hint">{{ componentVersionPending ? '版本切换尚未保存。' : details.fizgig_engine_detail }}</p>
           <p class="engine-hint">{{ isV7 ? '普通 LoRA · 文本编码器冻结 · 新版独立缓存。预览按轮数触发，开始时不额外采样，最后一轮只有满足间隔才采样。' : '旧版本项目继续使用原训练入口；升级软件不会自动迁移训练参数和续训快照。' }}</p>
           <p v-if="['anima_fz','sdxl_fz'].includes(mode)" class="engine-hint">上游实验性入口。{{ mode==='anima_fz' ? '仅支持标准 28 层 Anima；2.9B / 40 层请选 Kohya。' : '支持完整 SDXL 同架构底模；不训练文本编码器。' }}</p>
         </component>

@@ -159,6 +159,22 @@ class ModernUIBridge(LoRAWorkbenchBridge):
 
         from kohya_core.training_agent import TrainingAgent
         self._agent = TrainingAgent(self)
+        from kohya_core.mcp_server import ExternalMcp
+        self._external_mcp = ExternalMcp(self)
+
+    def get_mcp_status(self, ui_project=None, has_unsaved=None):
+        if isinstance(ui_project, str) and isinstance(has_unsaved, bool):
+            self._external_mcp.note_ui(ui_project, has_unsaved)
+        return self._external_mcp.status()
+
+    def configure_mcp(self, enabled, allow_actions=False, port=19366):
+        return self._external_mcp.configure(enabled, allow_actions, port)
+
+    def rotate_mcp_token(self):
+        return self._external_mcp.rotate_token()
+
+    def get_mcp_client_config(self, format="codex"):
+        return self._external_mcp.client_config(str(format))
 
     def _agent_guard(self):
         if not self._agent.mutation_allowed():
@@ -542,7 +558,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             self._task_downloader = None
             return task_id
 
-    def start_setup_task(self, action):
+    def start_setup_task(self, action, project_name=""):
         """Run existing prerequisite/engine installers behind the modern task dialog."""
         action = str(action or "")
         installers = {
@@ -558,6 +574,25 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if not spec:
             return {"ok": False, "error": "这个安装任务尚未接入新版训练页。"}
         title, installer = spec
+        if action == "cmd_install_fizgig" and project_name:
+            try:
+                config = self.core.load_project(str(project_name))
+                if not isinstance(config, dict) or config.get("mode") not in FIZGIG_FAMILIES:
+                    raise ValueError("请先打开一个有效的 Fizgig 项目。")
+                mode = config["mode"]
+                version = str((config.get("params") or {}).get("fizgig_version") or (
+                    FIZGIG_TARGET if mode == "zimage_fz" else "v7.0.1" if mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
+                if version not in ("v6.5.0", *FIZGIG_STANDARD):
+                    raise ValueError("未接入这个 Fizgig 版本。")
+                if mode == "zimage_fz" and version != FIZGIG_TARGET:
+                    raise ValueError("Z-Image Turbo 需要 Fizgig " + FIZGIG_TARGET)
+                if mode in ("anima_fz", "sdxl_fz") and version not in FIZGIG_STANDARD:
+                    raise ValueError("Anima / SDXL Fizgig 项目需要已接入的 v7 标准入口。")
+            except (OSError, ValueError, TypeError) as exc:
+                return {"ok": False, "error": str(exc)}
+            from kohya_core.fizgig_engine import ensure_selected_runtime
+            title = ("安装 / 检查 Fizgig " if version == FIZGIG_TARGET else "检查 Fizgig ") + version
+            installer = lambda log: ensure_selected_runtime(self.core, version, log)
         task_id = self._begin_task(title, "setup")
         if not task_id:
             return {"ok": False, "error": "已有环境、引擎或模型下载任务正在运行，请等它完成后再试。"}
@@ -1008,7 +1043,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 return {"ok": False, "error": "训练确认状态已失效，请重新启动训练。"}
             task.update(status="running", message="已确认标签，正在启动训练引擎…", detail="模型加载可能需要几分钟")
             review_event.set()
-        self._task_log(str(task_id), "[训练] Agent 已按授权执行完整性检查并继续；尚未验证图文语义。" if source == "agent" and self._agent.owns_thread() else "[训练] 用户已检查标签并确认继续。")
+        self._task_log(str(task_id), "[训练] 外部 MCP 客户端已确认继续；尚未验证图文语义。" if source == "mcp" else "[训练] Agent 已按授权执行完整性检查并继续；尚未验证图文语义。" if source == "agent" and self._agent.owns_thread() else "[训练] 用户已检查标签并确认继续。")
         return {"ok": True}
 
     def get_caption_service(self):
@@ -1768,6 +1803,9 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         except Exception as exc:
             return {"ok": False, "error": "无法读取训练模式状态：%s" % exc}
         if not details.get("engine_ready"):
+            if mode in FIZGIG_FAMILIES:
+                return {"ok": False, "error": "项目所选 Fizgig %s 尚未就绪：%s" % (
+                    params.get("fizgig_version"), details.get("fizgig_engine_detail") or "请检查此版本的运行环境。")}
             engine_names = {
                 "krea2": "第二引擎 musubi", "flux2": "第二引擎 musubi",
                 "krea2_fz": "第四引擎 Fizgig", "flux2_fz": "第四引擎 Fizgig",
@@ -3839,12 +3877,16 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             missing = ["无法读取模型状态：%s" % exc]
         version_info = core.fizgig_engine_update_status() if mode in FIZGIG_FAMILIES else {}
         version = str((project_config.get("params") or {}).get("fizgig_version") or (FIZGIG_TARGET if mode == "zimage_fz" or not project_name else "v7.0.1" if mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
+        engine_detail = ""
         if mode in FIZGIG_FAMILIES:
             record = fizgig_runtime(core, version)
             engine_ready = Path(record["python"]).is_file() and fizgig_source_version(record["source"]) == version
+            engine_detail = "未检测到完整的 Fizgig %s 安装，请检查此版本的源码与运行环境。" % version
             if engine_ready:
                 with fizgig_use_runtime(core, {"fizgig_version": version}):
-                    engine_ready = bool(core.fizgig_engine_status()[0])
+                    engine_status = core.fizgig_engine_status()
+                    engine_ready, engine_detail = bool(engine_status[0]), str(engine_status[1])
+            engine_update_available = version != FIZGIG_TARGET
         supports = {
             key: bool(core.param_supports(key, mode))
             # base_model is stored on the project root, but also controls the model picker UI.
@@ -3931,6 +3973,11 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             }
             for step in getattr(core, "GUIDE_STEPS", {}).get(mode, ())
         ]
+        if mode in FIZGIG_FAMILIES:
+            for step in guide_steps:
+                if step["check"] == "fizgig":
+                    step.update(label="② Fizgig " + version, button="检查环境" if engine_ready else "配置环境",
+                                tip="按项目选择的 %s 检查环境；可在训练页切换已安装的兼容版本。" % version)
         krea2_components = self.get_model_downloads(mode, project_name) if mode == "krea2_fz" else None
         if mode == "krea2_fz":
             for step in guide_steps:
@@ -3939,8 +3986,6 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                                 tip="选择编码器类型，指定已有文件，或下载缺少的组件。准备完成后仍可修改。")
                 elif step["check"] == "env":
                     step.update(label="① Python / Git 环境")
-                elif step["check"] == "fizgig":
-                    step.update(label="② Fizgig 训练引擎")
                 elif step["check"] == "raw":
                     step.update(label="④ 图集与标签")
         if project_config.get("training_kind") == "multi_character":
@@ -3969,6 +4014,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "supports": supports,
             "quant_modes": quant_modes,
             "fizgig_version": version if mode in FIZGIG_FAMILIES else "",
+            "fizgig_engine_detail": engine_detail,
             "fizgig_versions": version_info.get("versions", []),
             "fizgig_standard_versions": list(FIZGIG_STANDARD),
             "zimage_components": self.get_model_downloads(mode, project_name) if mode == "zimage_fz" else None,
@@ -4547,6 +4593,7 @@ def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=Non
     )
     bridge._window = window
     startup.attach(window)
+    bridge._external_mcp.restore()
     try:
         webview.start(startup.watch, gui="edgechromium", debug=debug, http_server=not dev,
                       user_agent="KohyaLoRA-Desktop/%s" % app_version, icon=str(root / "app.ico"))
@@ -4554,6 +4601,7 @@ def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=Non
         startup.record("host_failed", exc)
         raise RuntimeError("新版页面启动失败：%s\n\n启动诊断：%s" % (redact(str(exc)), startup.path)) from exc
     finally:
+        bridge._external_mcp.close()
         startup.detach()
     # Reuse the launcher's existing classic fallback in this process.
     return "classic" if startup.classic_requested else 0

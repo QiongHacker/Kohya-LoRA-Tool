@@ -127,10 +127,14 @@ def update_status(core):
     record = runtime(core)
     installed = Path(record["python"]).is_file() and bool(source_version(record["source"]))
     current = installed and source_version(record["source"]) == VERSION
-    versions = list((_registry(core).get("installs") or {}).keys())
-    old = runtime(core, "v6.5.0")
-    if Path(old["python"]).is_file() and source_version(old["source"]) and "v6.5.0" not in versions:
-        versions.append("v6.5.0")
+    candidates = dict.fromkeys([*(_registry(core).get("installs") or {}), "v6.5.0", *SUPPORTED_V7])
+    versions = []
+    for version in candidates:
+        if version not in ("v6.5.0", *SUPPORTED_V7):
+            continue
+        candidate = runtime(core, version)
+        if Path(candidate["python"]).is_file() and source_version(candidate["source"]) == version:
+            versions.append(version)
     return {"installed": installed, "update_available": installed and not current,
             "target_version": VERSION, "current_version": record.get("version") or "待识别",
             "engine_dir": record["source"], "h3_supported": installed, "qwen_image_2_supported": installed,
@@ -294,6 +298,23 @@ def cli_ready(core, record):
             raise RuntimeError("Fizgig %s 入口不可用：%s" % (entry, (result.stderr or output)[-600:]))
 
 
+def ensure_selected_runtime(core, version, logf=print):
+    """Prepare the selected runtime; an existing legacy choice never upgrades."""
+    if version == VERSION:
+        return install(core, logf)
+    if version not in ("v6.5.0", *SUPPORTED_V7):
+        raise ValueError("未接入这个 Fizgig 版本：%s" % version)
+    record = runtime(core, version)
+    if not Path(record["python"]).is_file() or source_version(record["source"]) != version:
+        raise RuntimeError("未检测到完整的 Fizgig %s 安装，请检查原引擎目录；也可以在项目中选择 %s 后安装。" % (version, VERSION))
+    backend = record.get("backend") or ("amd-rocm" if core.detect_gpu_vendor() == "amd" else "nvidia")
+    with use_runtime(core, {"fizgig_version": version}):
+        core._fizgig_verify(record["python"], record["source"], logf, backend=backend)
+    core.clear_status_cache()
+    logf("[Fizgig] 已复用项目选定版本 %s；无需下载 %s。" % (version, VERSION))
+    return record["python"]
+
+
 def install(core, logf=print):
     root = Path(core.get_kohya_dir())
     root.mkdir(parents=True, exist_ok=True)
@@ -303,7 +324,7 @@ def install(core, logf=print):
     try:
         registry = _registry(core)
         previous = runtime(core)
-        if previous.get("version") == VERSION and source_version(previous["source"]) == VERSION and Path(previous["python"]).is_file() and _dependencies_match(previous, _env(core, previous)):
+        if previous.get("version") == VERSION and source_version(previous["source"]) == VERSION and Path(previous["python"]).is_file() and core._python312_64bit(previous["python"]) and _dependencies_match(previous, _env(core, previous)):
             core.check_stop()
             core._fizgig_verify(previous["python"], previous["source"], logf, backend=previous.get("backend", "nvidia"))
             core.check_stop()
@@ -319,17 +340,33 @@ def install(core, logf=print):
             _deploy(core, download(core, logf), source)
         record = {"version": VERSION, "source": str(source), "backend": backend}
         candidate = dict(previous, backend=backend)
-        if Path(candidate["python"]).is_file() and _dependencies_match(candidate, _env(core, candidate)):
+        if Path(candidate["python"]).is_file() and core._python312_64bit(candidate["python"]) and _dependencies_match(candidate, _env(core, candidate)):
             record["python"] = candidate["python"]
             logf("[Fizgig] 复用匹配的 GPU 环境；不重新下载 torch / ROCm。")
         else:
             venv = folder / ("venv-rocm" if backend == "amd-rocm" else "venv-cuda")
             record["python"] = str(venv / "Scripts/python.exe")
             py = core._fizgig_ensure_python312(logf)
+            if Path(record["python"]).is_file() and not core._python312_64bit(record["python"]):
+                # Preserve incompatible venvs; never move an arbitrary registry path.
+                resolved = venv.resolve()
+                if resolved.parent != folder.resolve() or resolved.name not in ("venv-rocm", "venv-cuda"):
+                    raise RuntimeError("训练环境路径超出当前引擎目录，无法自动备份。")
+                backup = venv.with_name(venv.name + ".incompatible-" + str(time.time_ns()))
+                if backup.resolve().parent != folder.resolve():
+                    raise RuntimeError("训练环境备份路径超出当前引擎目录。")
+                logf("[Fizgig] 现有环境不是可用的 64 位 Python 3.12；将备份后重建。")
+                try:
+                    venv.rename(backup)
+                except OSError as exc:
+                    raise RuntimeError("无法备份原训练环境，请关闭占用它的程序后重试：%s" % exc) from exc
+                logf("[Fizgig] 原环境已保留到：%s" % backup)
             if not Path(record["python"]).is_file():
                 logf("[Fizgig] 创建新版独立环境；旧版本保持原路径。")
                 if core.run_stream([py, "-m", "venv", str(venv)], cwd=str(root), logf=logf):
                     raise RuntimeError("Fizgig 新环境创建失败，原版本仍保留。")
+            if not core._python312_64bit(record["python"]):
+                raise RuntimeError("Fizgig 环境需要 64 位 Python 3.12；当前环境架构不匹配，已停止安装 GPU 依赖。")
             if not core._ensure_venv_pip(record["python"], str(venv), logf, label="Fizgig"):
                 raise RuntimeError("Fizgig 新环境缺少 pip。")
             if not core._upgrade_pip(record["python"], str(root), logf, label="Fizgig"):

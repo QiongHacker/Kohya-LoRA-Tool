@@ -160,6 +160,53 @@ def _cache_identity(core, family, files, subsets, resolution, commit=COMMIT, tra
     return hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:20], signature
 
 
+def preview_prompts(params, subsets):
+    """One stable, relevant caption for automatic previews; explicit prompts stay intact."""
+    custom = str(params.get("sample_prompt") or "").strip()
+    positive = str(params.get("global_pos") or "").strip()
+    if custom:
+        lines, origin = [line.strip() for line in custom.splitlines() if line.strip()], "custom"
+    else:
+        from .project_config import read_caption
+        trigger = str(params.get("trigger") or "").strip()
+        caption = ""
+        extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif",
+                      ".mp4", ".mov", ".webm", ".mkv", ".wav", ".mp3", ".flac", ".m4a", ".ogg"}
+        checked = 0
+        for directory, _repeats, _count in subsets:
+            if checked >= 100:
+                break
+            try:
+                entries = sorted(Path(directory).iterdir(), key=lambda path: path.name.casefold())
+            except OSError:
+                continue
+            for media in entries:
+                if checked >= 100:
+                    break
+                if media.suffix.lower() not in extensions or media.is_symlink() or not media.is_file():
+                    continue
+                checked += 1
+                try:
+                    candidate = " ".join(read_caption(media).split()).lstrip("# ")
+                except (OSError, ValueError):
+                    continue
+                if candidate and candidate.strip(" ,").casefold() != trigger.casefold():
+                    caption = candidate[:1200]
+                    break
+            if caption:
+                break
+        origin = "dataset_caption" if caption else "fallback"
+        if not caption:
+            caption = "a detailed portrait, high quality" if params.get("at_sub_mode", "character") == "character" else "a detailed scene, high quality"
+        if trigger and not re.search(r"(?<!\w)" + re.escape(trigger) + r"(?!\w)", caption, re.I):
+            caption = trigger + ", " + caption
+        style = str(params.get("style_caption") or "").strip()
+        if style and style.casefold() not in caption.casefold():
+            caption += ", " + style
+        lines = [caption]
+    return [", ".join(filter(None, (positive, line))) for line in lines], origin
+
+
 def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress):
     version = record["version"]
     commit = source_commit(version)
@@ -339,9 +386,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     enabled = core._sample_preview_enabled(params, vram_gb)
     sample_epochs = core._fizgig_sample_epochs(params, sum(r * n for _, r, n in subsets), epochs)
     if enabled:
-        prompt = str(params.get("sample_prompt") or params.get("trigger") or "a detailed portrait, high quality").strip()
-        positive = str(params.get("global_pos") or "").strip()
-        prompt_lines = [", ".join(filter(None, (positive, line.strip()))) for line in prompt.splitlines() if line.strip()]
+        prompt_lines, prompt_source = preview_prompts(params, subsets)
         prompts = cache / "sample_prompts.txt"; prompts.write_text("\n".join(prompt_lines) + "\n", encoding="utf-8")
         steps, cfg = ((30, 4.5) if family == "anima" else (30, 3.0) if family == "sdxl" else (8, 1.0) if family == "zimage" else (20, 3.5))
         cmd += ["--sample_prompts", str(prompts), "--sample_every_n_epochs", str(sample_epochs),
@@ -353,6 +398,14 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         if family == "minimax":
             options += ["preview_frames=" + str(frames)]
             if files.get("audio_vae") and frames > 1: options += ["preview_audio=1"]
+        preview_model = files.get("preview_checkpoint") or files["dit"]
+        core._record_effective(sample_prompt="\n".join(prompt_lines), sample_prompt_source=prompt_source,
+                               sample_prompt_file=str(prompts), sample_preview_checkpoint=preview_model,
+                               sample_negative=str(params.get("global_neg") or "") if family != "zimage" else "")
+        monitored("[Fizgig] 预览提示词（%s）：%s" % ("自定义" if prompt_source == "custom" else "训练标签" if prompt_source == "dataset_caption" else "通用回退", " | ".join(prompt_lines)))
+        monitored("[Fizgig] 预览底模：%s；使用引擎当前轮次 LoRA / EMA 权重，固定种子用于比较训练变化。" % preview_model)
+        if (output / ".sample_override.json").is_file():
+            monitored("[Fizgig] 注意：项目含外部引擎的 .sample_override.json，非空覆盖设置可能替代上述采样参数；请核对后续 [sample override] 日志。")
         monitored("[Fizgig] 预览：每 %s 轮，%spx，%s 步，CFG %s；开始时不额外采样；最后一轮仅在满足间隔时采样。文件在项目 output 中。" % (sample_epochs, resolution, steps, cfg))
     for option in options: cmd += ["--family_option", option]
     _write(marker, run_identity)

@@ -198,7 +198,24 @@ export interface LoRAExploration { config: LoRAExploreConfig; variants: LoRAExpl
 export interface LoRAWorkbenchReport { ok: boolean; action: string; error?: string; info: LoRAInfo; images?: Array<{ name: string; label: string }>; recipe?: LoRAPreview; blocks?: Record<string, number>; output?: string; output_bytes?: number; compression?: { rank: number; mean_energy: number }; analysis?: LoRAWeightAnalysis; profile?: LoRAProfile; profile_images?: Array<{ name: string; label: string }>; exploration?: LoRAExploration }
 export interface LoRAWorkbenchTask { id: string; status: string; message: string; progress: number | null }
 
+export interface McpStatus {
+  ok: boolean
+  enabled: boolean
+  allow_actions: boolean
+  running: boolean
+  port: number
+  url: string
+  error?: string
+  revision: number
+  last_project: string
+  task_id: string
+}
+
 export interface DesktopApi {
+  get_mcp_status(ui_project?: string, has_unsaved?: boolean): Promise<McpStatus>
+  configure_mcp(enabled: boolean, allow_actions: boolean, port: number): Promise<McpStatus>
+  rotate_mcp_token(): Promise<McpStatus>
+  get_mcp_client_config(format: 'codex' | 'json'): Promise<{ ok: boolean; text?: string; error?: string }>
   report_ui_startup(stage: string, detail?: string): Promise<{ ok: boolean }>
   open_ui_startup_report(): Promise<{ ok: boolean; error?: string; path?: string }>
   use_classic_ui(): Promise<{ ok: boolean; error?: string }>
@@ -285,7 +302,7 @@ export interface DesktopApi {
   get_model_catalog(): Promise<ModelCatalogData>
   get_mode_workspace(mode: string, project_name?: string): Promise<ModeWorkspaceData>
   inspect_base_model(path: string): Promise<{ ok: boolean; base_type?: string; error?: string }>
-  start_setup_task(action: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
+  start_setup_task(action: string, project_name?: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_task_status(task_id: string, after?: number): Promise<ModernTaskStatus>
   list_task_samples(task_id: string, offset?: number): Promise<{ ok: boolean; samples?: TrainingSampleEntry[]; total?: number; next_offset?: number | null; error?: string }>
   get_task_sample(task_id: string, after?: string, full?: boolean, name?: string): Promise<ModernTaskSample>
@@ -488,6 +505,7 @@ export interface ModeWorkspaceData {
   engine_ready: boolean
   engine_update_available?: boolean
   fizgig_version?: string
+  fizgig_engine_detail?: string
   fizgig_versions?: string[]
   fizgig_standard_versions?: string[]
   zimage_components?: ModelDownloadList | null
