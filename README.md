@@ -1,106 +1,91 @@
 <p align="center">
-  <img src="docs/assets/readme-hero.svg" alt="Kohya-LoRA：四类引擎，一套 Windows 本地训练工作台" width="100%" />
+  <img src="docs/assets/readme-hero.svg" alt="Kohya-LoRA Tool — one workspace, four training engines" width="100%" />
 </p>
 
-<h1 align="center">Kohya-LoRA 一键训练工具</h1>
+<h1 align="center">Kohya-LoRA Tool</h1>
 
-<p align="center"><strong>四类引擎统一操作 · AI 助手协作训练 · 中文界面 · 免费开源</strong></p>
+<p align="center"><strong>A Windows workspace for local LoRA training.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/l1934332574-maker/Kohya-LoRA-Tool?style=flat-square&amp;color=6366f1" /></a>
+  <a href="https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/l1934332574-maker/Kohya-LoRA-Tool?style=flat-square&amp;color=6366f1" /></a>
   <img alt="Windows 10 / 11" src="https://img.shields.io/badge/Windows-10%20%2F%2011-2563eb?style=flat-square" />
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-059669?style=flat-square" /></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/latest"><strong>下载安装</strong></a> ·
-  <a href="https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool"><strong>国内下载</strong></a> ·
-  <a href="CHANGELOG.md">更新记录</a> ·
-  <a href="#交流与反馈"><strong>QQ 交流群：602396066</strong></a>
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a><br />
+  <a href="https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/latest">Download</a> ·
+  <a href="https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool">China mirror</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="https://github.com/l1934332574-maker/Kohya-LoRA-Tool/issues">Issues</a>
 </p>
 
-将环境安装、模型下载、打标、参数配置、训练和结果查看放进一个 Windows 桌面工具。适合训练 **人物、画风、概念 LoRA**，也接入了视频与音频训练模式。
+Train character, style and concept LoRAs through a single desktop workflow: environment setup, model selection, dataset preparation, training and sample review. Integrates **kohya / sd-scripts, musubi-tuner, AI Toolkit and Fizgig**, with additional video and audio modes for supported models.
 
-## 核心优势
+**Platform:** Windows 10 / 11. **Interface language:** primarily Simplified Chinese. NVIDIA is the primary supported GPU path; AMD support is available through selected Fizgig ROCm configurations and depends on the model and hardware.
 
-| 优势 | 你能直接用到的能力 |
-|---|---|
-| **四类引擎，一套操作** | 先选模型与版本，再按显卡推荐 kohya、musubi、AI Toolkit 或 Fizgig，显示推荐理由 |
-| **AI 助手直接参与训练** | 说出目标，助手提问补全需求，调用环境检查、模型下载、项目配置与训练流程 |
-| **外部 Agent 接入** | 通过本机 MCP 连接自己的 Codex，查询报错、管理参数、调用训练任务 |
-| **少折腾环境和下载** | 图形化安装与修复、国内下载源、大文件断点续传；可选择已有模型 |
-| **参数变化看得见** | 六档训练方案，应用前显示参数变化，支持撤销与手动调整 |
-| **数据准备到效果对比** | WD14 / PixAI 二次元打标、标签编辑、固定种子采样、历史查看与 A/B 对比 |
-| **概念滑块 LoRA** | 文字指导或图片对训练，支持双向变化、减弱或增强效果，直接查看五档权重对照（实验性） |
-| **独立反推提示词** | WD14 / PixAI 二次元关键词、RAM++ 真实照片关键词、Qwen3-VL 社区版详细描述，支持编辑、复制与导出 TXT |
-| **多个项目有序管理** | 项目配置、处理后数据与输出分开管理，配套训练记录、任务队列和日志导出 |
+## Features
 
-六档方案：**先跑通流程 / 快速试效果 / 降低显存占用 / 标准训练 / 加快每步速度 / 增加训练量**。
+| Capability | What it provides |
+| --- | --- |
+| **Model-first workflow** | Choose a model and version, then review engine recommendations for your hardware. |
+| **Environment and model management** | Guided setup and repair, domestic download sources, resumable downloads and reuse of local model files. |
+| **Dataset preparation** | WD14 / PixAI tagging, caption editing and project-specific data preparation. A separate image-to-prompt tool also offers RAM++ photo tags and Qwen3-VL descriptions. |
+| **Training controls** | Six task-oriented presets with parameter previews, manual overrides, project settings and training records. |
+| **Sample review** | Fixed-seed previews, sampling history and A/B comparisons where supported by the selected mode. |
+| **Agent integration** | An optional in-app assistant and an authenticated local MCP interface for external agents. |
+| **Concept sliders** | Experimental text-guided or image-pair training with weight comparisons for supported SDXL and Anima models. |
 
-## 支持的模型
+## Model and engine support
 
-| 引擎 | 已接入模型 | 素材 |
-|---|---|---|
-| **kohya / sd-scripts** | SD1.5、SDXL、FLUX.1、Anima | 图片 |
-| **musubi-tuner** | Krea 2、FLUX.2 | 图片 |
-| **AI Toolkit** | Krea2、Qwen-Image、Z-Image Base；MiniMax H3 | 图片；H3 视频 |
-| **Fizgig** | Krea2、FLUX.2 Klein 9B、Qwen-Image-2.1、Z-Image Turbo、MiniMax H3；SDXL、标准 Anima（实验性） | 图片；H3 图片 / 视频 / 音频 |
+| Engine | Integrated models | Media |
+| --- | --- | --- |
+| **kohya / sd-scripts** | SD 1.5, SDXL, FLUX.1, Anima | Images |
+| **musubi-tuner** | Krea 2, FLUX.2 | Images |
+| **AI Toolkit** | Krea 2, Qwen-Image, Z-Image Base, MiniMax H3 | Images; H3 video |
+| **Fizgig** | Krea 2, FLUX.2 Klein 9B, Qwen-Image-2.1, Z-Image Turbo, MiniMax H3; experimental SDXL and standard Anima | Images; H3 image / video / audio |
 
-**Windows 10 / 11，NVIDIA 为主要支持路径。** AMD 通过同一模型入口优先推荐已适配的 Fizgig ROCm 路径；SDXL / Anima 仍为实验性支持。Klein 4B 走 Musubi，Anima 2.9B / 40 层走 Kohya。显存需求和采样稳定性取决于具体模型、引擎与配置；第三方底模需匹配对应架构。
+Capabilities vary by model, engine version and configuration. Klein 4B uses the Musubi route; Anima 2.9B / 40-layer models use the Kohya route. Third-party checkpoints must match the supported architecture. VRAM requirements and preview availability depend on the selected mode.
 
-## 下载与开始训练
+## Get started
 
-- **安装版**：[GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/latest) 或 [魔搭](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool) 下载 `Setup.exe`。
-- **便携版**：下载 `KohyaLoraTool_*_portable.zip`，完整解压后运行 `Kohya一键工具.exe`。
+1. Download **`Setup.exe`** from [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/latest) or the [ModelScope mirror](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool). For a portable installation, download `KohyaLoraTool_*_portable.zip`, extract the complete archive and run `Kohya一键工具.exe`.
+2. Create a project and choose the model version, training objective and engine.
+3. Follow the setup guide to prepare the engine and model components.
+4. Import your dataset, review captions and training parameters, then start training.
+5. Review available samples and retrieve the LoRA from the project output directory.
 
-`Code → Download ZIP` 是源码。基础模型和训练环境按所选模式准备，首次使用需要下载相应资源。
+**Code → Download ZIP** downloads the source, not the desktop application. Engines and model weights are downloaded separately as needed.
 
-**新建项目 → 选择模型版本和训练目的 → 查看推荐引擎 → 按引导准备环境 → 导入素材并核对标签 → 查看方案 → 开始训练。**
+## Agent integration
 
-在任务窗口查看进度、日志与可用采样，完成后打开项目输出目录取走 LoRA。
+The **in-app training assistant** can inspect the environment, prepare project settings and call existing training tools. Connect your own compatible text service or local Ollama instance. Permissions control downloads, setup and training actions; the standard interface works without an AI service.
 
-## 概念滑块 LoRA
+The **local MCP interface** lets external agents inspect projects and diagnostics, manage settings and control training through the application's existing workflows. It is disabled by default, authenticated and read-only unless write access is enabled. Open **外部 Agent · MCP** in the sidebar to configure it. See the [MCP guide](docs/MCP.md) (Chinese) for connection details and available tools.
 
-**新建项目 → 选择 SDXL 或标准 28 层 Anima → 训练目的「概念滑块」**。
+## Data and privacy
 
-定义变化方向，选择文字指导或配对图片，先跑 128 步试训，再查看固定条件下的权重对照。支持检查点选择、效果评估与 LoRA 导出；0 权重使用底模基线。
+Training runs locally. Projects, datasets and outputs stay in the application's local data directory; LoRA outputs are stored under `output/<project-name>/`.
 
-基于 Fizgig 标准接口的实验性功能，暂不支持 Anima 2.9B / 40 层和滑块续训。效果取决于底模、描述与数据，需要检查目标变化和主体保持。
+When an online assistant is enabled, relevant conversations, configuration and requested logs are sent to the selected provider. Sending images requires separate permission. Service credentials use Windows user encryption. Online services may charge fees, and their terms apply.
 
-## AI 助手怎么用
+## Documentation and community
 
-打开左侧 **训练助手**，连接自己的兼容文字服务或本地 Ollama，然后说出目标：
+- [Chinese README](README.zh-CN.md) — feature overview and workflow details.
+- [User guide](README_使用说明.md) (Chinese).
+- [MCP integration](docs/MCP.md) (Chinese).
+- [Frontend development](modern_ui/README.md).
+- [Changelog](CHANGELOG.md) (Chinese).
+- **QQ community: 602396066**.
 
-> 我要训练人物 LoRA，图集已经准备好了，帮我检查环境并设置参数。
-
-助手通过可点击选项、文件选择补全信息，再按权限准备和执行任务。安装、下载、在线图片与自动开训可以分别授权，也可随时手动接管。对话按项目保存，重启不会自动恢复训练。
-
-AI 服务需自行配置，在线服务可能收费；助手效果取决于接入模型。不接 AI 也能正常使用训练界面，助手不保证自动修复所有问题。
-
-## 连接自己的 Codex / Agent
-
-左侧打开 **外部 Agent · MCP**，开启接口，复制连接配置到自己的客户端。默认只读；开启操作权限后，可修改项目、下载模型、启动训练和查询进度。
-
-接口只接受本机鉴权连接，与界面共用训练流程。[接入说明与工具列表](docs/MCP.md)。
-
-## 数据与隐私
-
-训练在本机执行，项目、图集和产物保存在本地。使用在线助手时，相关对话、配置与按需读取的日志会发送给所选服务；发送图片需单独允许。服务密钥使用 Windows 用户加密保存，发布包不携带作者的私人配置。
-
-实际数据位置可在软件内查看，LoRA 输出到 `数据目录/output/<项目名>/`。
-
-## 交流与反馈
-
-### QQ 交流群：**602396066**
-
-交流训练经验、反馈问题、讨论新功能。反馈训练故障时，请附上 **软件版本、模式 / 引擎、显卡型号、复现步骤和导出的日志**。
-
-也可以提交 [GitHub Issue](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/issues) 或 Pull Request。
+For bug reports, include the application version, model / engine, GPU, reproduction steps and exported logs. Please remove private information before sharing logs publicly. Contributions and pull requests are welcome.
 
 <details>
-<summary><strong>源码运行与使用文档</strong></summary>
+<summary><strong>Run from source</strong></summary>
 
-建议 Python 3.12，前端构建需要 Node.js 20.19+ 或 22.12+；新版界面需要 WebView2。在仓库根目录执行：
+Python 3.12 is recommended. Building the frontend requires Node.js 20.19+ or 22.12+. The modern desktop interface requires Microsoft Edge WebView2.
+
+From the repository root:
 
 ```powershell
 python -m pip install customtkinter pillow -r requirements-ui.txt
@@ -109,14 +94,12 @@ npm --prefix modern_ui run build
 python kohya_gui.py
 ```
 
-经典界面入口：`python kohya_gui.py --ui classic`。安装包用户可在快捷方式目标末尾追加 ` --ui classic`。
-
-- [使用说明](README_使用说明.md)
-- [更新日志](CHANGELOG.md)：安装包功能以对应已发布版本为准。
-- [前端开发说明](modern_ui/README.md)
+For the classic interface, run `python kohya_gui.py --ui classic`.
 
 </details>
 
-## 开源许可
+## License and acknowledgements
 
-项目采用 [MIT License](LICENSE)。底层引擎、模型及第三方资源遵循各自许可，见 [第三方声明](THIRD_PARTY_NOTICES.md)。请使用有权用于训练的素材。
+This desktop application is licensed under the [MIT License](LICENSE). Integrated engines, models and other resources retain their respective licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md).
+
+Built on the work of the kohya / sd-scripts, musubi-tuner, AI Toolkit and Fizgig communities. Use datasets and models you have permission to train with.
