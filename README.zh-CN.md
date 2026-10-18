@@ -46,9 +46,11 @@
 | **kohya / sd-scripts** | SD1.5、SDXL、FLUX.1、Anima | 图片 |
 | **musubi-tuner** | Krea 2、FLUX.2 | 图片 |
 | **AI Toolkit** | Krea2、Qwen-Image、Z-Image Base；MiniMax H3 | 图片；H3 视频 |
-| **Fizgig** | Krea2、FLUX.2 Klein 9B、Qwen-Image-2.1、Z-Image Turbo、MiniMax H3；SDXL、标准 Anima（实验性） | 图片；H3 图片 / 视频 / 音频 |
+| **Fizgig** | Krea2、FLUX.2 Klein 9B、Qwen-Image-2.1、Z-Image Turbo、MiniMax H3、MOSS-Image Base；SDXL、标准 Anima（实验性） | 图片；H3 图片 / 视频 / 音频 |
 
 **Windows 10 / 11，NVIDIA 为主要支持路径。** AMD 通过同一模型入口优先推荐已适配的 Fizgig ROCm 路径；SDXL / Anima 仍为实验性支持。Klein 4B 走 Musubi，Anima 2.9B / 40 层走 Kohya。显存需求和采样稳定性取决于具体模型、引擎与配置；第三方底模需匹配对应架构。
+
+MOSS-Image 使用独立的 Fizgig v8.5.0，支持 Base 训练、SFT 预览与本地组件选择。[配置说明与 8GB 实测](docs/MOSS_Image_Fizgig_v850_验证与接入_20261018.md)。
 
 ## 下载与开始训练
 

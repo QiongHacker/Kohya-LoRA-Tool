@@ -12,12 +12,12 @@ WORKSPACE_PARAM_KEYS = (
     'batch_size', 'gc', 'global_pos', 'global_neg',
     'caption_method', 'caption_language', 'caption_length',
     'pixai_character', 'pixai_copyright', 'pixai_style', 'pixai_threshold',
-    'h3_caption_replace', 'h3_sync_trigger',
+    'h3_caption_replace', 'h3_sync_trigger', 'moss_preview_base',
 )
 BOOL_PARAM_KEYS = frozenset(('strong_bind', 'clean_concept', 'sample_preview',
                             'compile', 'overwrite', 'keep_user_captions', 'amd_mode',
                             'pixai_character', 'pixai_copyright', 'pixai_style',
-                            'h3_caption_replace', 'h3_sync_trigger'))
+                            'h3_caption_replace', 'h3_sync_trigger', 'moss_preview_base'))
 
 
 def normalize_learning_rate(value):
@@ -71,7 +71,7 @@ def training_params(core, config, project_name):
             return default
 
     if mode.endswith('_fz'):
-        params_version = str(stored.get('fizgig_version') or ('v7.3.1' if mode == 'zimage_fz' else 'v7.0.1' if mode in ('anima_fz', 'sdxl_fz') else 'v6.5.0'))
+        params_version = str(stored.get('fizgig_version') or ('v8.5.0' if mode == 'moss_fz' else 'v7.3.1' if mode == 'zimage_fz' else 'v7.0.1' if mode in ('anima_fz', 'sdxl_fz') else 'v6.5.0'))
     else:
         params_version = ''
     kohya = mode in ('character', 'style', 'concept')
@@ -143,6 +143,9 @@ def training_params(core, config, project_name):
     if mode == "zimage_fz":
         from .zimage_fizgig import settings
         params["zimage_fz_models"] = settings(config)
+    if mode == "moss_fz":
+        from .moss_models import settings
+        params["moss_models"] = settings(config)
     if mode == "h3_fz":
         from .h3_models import settings
         params["h3_models"] = settings(config)

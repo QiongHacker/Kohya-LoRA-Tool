@@ -23,9 +23,10 @@ from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bund
 from kohya_core.training_history import TrainingHistory
 from kohya_core.training_media import sample_files, image_preview, is_sample
 from kohya_core.model_catalog import catalog as model_catalog, resolve_choice
-from kohya_core.fizgig_engine import runtime as fizgig_runtime, source_version as fizgig_source_version, VERSION as FIZGIG_TARGET, SUPPORTED_V7 as FIZGIG_STANDARD, use_runtime as fizgig_use_runtime
+from kohya_core.fizgig_engine import runtime as fizgig_runtime, source_version as fizgig_source_version, VERSION as FIZGIG_TARGET, SUPPORTED_STANDARD as FIZGIG_STANDARD, MOSS_VERSION, target_version as fizgig_target_version, use_runtime as fizgig_use_runtime
 from kohya_core.fizgig_adapter import FAMILIES as FIZGIG_FAMILIES, models as fizgig_models, missing as fizgig_missing, _validate as validate_fizgig_models
 from kohya_core.zimage_fizgig import settings as zimage_fz_settings, rows as zimage_fz_rows, validate as validate_zimage_fz_component, files as zimage_fz_files, models_dir as zimage_fz_models_dir
+from kohya_core.moss_models import settings as moss_settings, rows as moss_rows, validate as validate_moss_component, files as moss_files, models_dir as moss_models_dir, missing as moss_missing
 from kohya_core.h3_models import settings as h3_settings, rows as h3_rows, validate as validate_h3_component, validate_selected as validate_h3_selected, training_precision as h3_training_precision, required_keys as h3_required_keys, validate_download as validate_h3_download
 from kohya_core.krea2_models import encoder_state as krea2_encoder_state, CHOICES as KREA2_ENCODER_CHOICES, settings as krea2_settings, rows as krea2_rows, files as krea2_files, missing as krea2_missing, encoder_key as krea2_encoder_key, change as change_krea2_selection, validate as validate_krea2_component, validate_selected as validate_krea2_selected
 from kohya_core.zimage_models import settings as zimage_settings, discover as zimage_components, validate_selection as validate_zimage_selection, missing as zimage_missing
@@ -38,6 +39,7 @@ except Exception:  # pragma: no cover - desktop package may omit the optional he
 
 
 _MODERN_PROJECT_TEMPLATES = {
+    "MOSS-Image LoRA（Fizgig）": {"mode": "moss_fz", "base_type": "sdxl", "note": "Base 训练，SFT 预览；Fizgig v8.5.0 普通 LoRA。"},
     "Z-Image Turbo LoRA（Fizgig）": {"mode": "zimage_fz", "base_type": "sdxl", "note": "Z-Image Turbo 普通 LoRA；冻结训练适配器，8 步、CFG 1 预览。"},
     "Anima LoRA（Fizgig）": {"mode": "anima_fz", "base_type": "anima", "note": "Fizgig v7.0.1 标准 28 层 Anima，普通 LoRA；上游实验性入口。"},
     "SDXL LoRA（Fizgig）": {"mode": "sdxl_fz", "base_type": "sdxl", "note": "Fizgig v7.0.1 完整 SDXL 底模，冻结文本编码器；上游实验性入口。"},
@@ -63,7 +65,7 @@ _MODERN_IMPORT_EXTRA_PARAMS = {
     "wd14_model", "overwrite", "keep_user_captions", "amd_mode", "fizgig_qwen_preset",
     "batch_size", "gc", "sample_prompt", "sample_seed", "global_pos", "global_neg",
     "caption_method", "caption_language", "caption_length",
-    "h3_caption_replace", "h3_sync_trigger",
+    "h3_caption_replace", "h3_sync_trigger", "moss_preview_base",
 }
 
 _APPEARANCE_BACKGROUND_HISTORY_LIMIT = 8
@@ -293,7 +295,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             return str(destination)
         directories = {"krea2": "krea2_models_dir", "krea2_at": "krea2_at_models_dir", "krea2_fz": "krea2_models_dir",
                        "flux2": "flux2_models_dir", "flux2_fz": "flux2_models_dir", "qwen21_fz": "qwen21_fz_models_dir",
-                       "h3_fz": "h3_fz_models_dir", "zimage_fz": "zimage_fz_models_dir", "video": "h3_models_dir"}
+                       "h3_fz": "h3_fz_models_dir", "zimage_fz": "zimage_fz_models_dir", "moss_fz": "moss_models_dir", "video": "h3_models_dir"}
         if mode in directories:
             return str(getattr(self.core, directories[mode])())
         if mode in ("qwen_image", "zimage"):
@@ -574,16 +576,18 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if not spec:
             return {"ok": False, "error": "这个安装任务尚未接入新版训练页。"}
         title, installer = spec
-        if action == "cmd_install_fizgig" and project_name:
+        if action in ("cmd_install_fizgig", "fizgig_engine_update") and project_name:
             try:
                 config = self.core.load_project(str(project_name))
                 if not isinstance(config, dict) or config.get("mode") not in FIZGIG_FAMILIES:
                     raise ValueError("请先打开一个有效的 Fizgig 项目。")
                 mode = config["mode"]
                 version = str((config.get("params") or {}).get("fizgig_version") or (
-                    FIZGIG_TARGET if mode == "zimage_fz" else "v7.0.1" if mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
+                    fizgig_target_version(mode) if mode in ("zimage_fz", "moss_fz") else "v7.0.1" if mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
                 if version not in ("v6.5.0", *FIZGIG_STANDARD):
                     raise ValueError("未接入这个 Fizgig 版本。")
+                if mode == "moss_fz" and version != MOSS_VERSION:
+                    raise ValueError("MOSS-Image 需要 Fizgig " + MOSS_VERSION)
                 if mode == "zimage_fz" and version != FIZGIG_TARGET:
                     raise ValueError("Z-Image Turbo 需要 Fizgig " + FIZGIG_TARGET)
                 if mode in ("anima_fz", "sdxl_fz") and version not in FIZGIG_STANDARD:
@@ -591,7 +595,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             except (OSError, ValueError, TypeError) as exc:
                 return {"ok": False, "error": str(exc)}
             from kohya_core.fizgig_engine import ensure_selected_runtime
-            title = ("安装 / 检查 Fizgig " if version == FIZGIG_TARGET else "检查 Fizgig ") + version
+            title = ("安装 / 检查 Fizgig " if version in (FIZGIG_TARGET, MOSS_VERSION) else "检查 Fizgig ") + version
             installer = lambda log: ensure_selected_runtime(self.core, version, log)
         task_id = self._begin_task(title, "setup")
         if not task_id:
@@ -624,6 +628,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
     def _model_download_spec(self, mode, project_name=""):
         mode = str(mode or "")
         specs = {
+            "moss_fz": ("MOSS-Image 训练组件", "Base 训练 · SFT 预览", "MOSS_MODEL_LINKS", "moss_models_dir", "moss_model_files", {"dit", "te", "vae"}),
             "zimage_fz": ("Z-Image Turbo 训练组件", "本地文件与按需下载", "ZIMAGE_FZ_MODEL_LINKS", "zimage_fz_models_dir", "zimage_fz_model_files", {"dit", "te", "vae", "training_adapter"}),
             "anima_fz": ("Anima 模型", "Fizgig 标准 28 层 Anima 组件", "ANIMA_FZ_MODEL_LINKS", "anima_fz_models_dir", "anima_fz_model_files", {"dit", "te", "vae"}),
             "sdxl_fz": ("SDXL 模型", "完整 SDXL 底模；已有第三方底模可直接选择", "SDXL_FZ_MODEL_LINKS", "sdxl_fz_models_dir", "sdxl_fz_model_files", {"dit"}),
@@ -653,16 +658,20 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         links = getattr(self.core, links_name, {})
         asset_dir = str(getattr(self.core, dir_name)())
         config = self.core.load_project(str(project_name or "")) if project_name else {}
-        selection = zimage_fz_settings(config) if mode == "zimage_fz" else h3_settings(config) if mode == "h3_fz" else krea2_settings(config) if mode == "krea2_fz" else None
+        selection = moss_settings(config) if mode == "moss_fz" else zimage_fz_settings(config) if mode == "zimage_fz" else h3_settings(config) if mode == "h3_fz" else krea2_settings(config) if mode == "krea2_fz" else None
         if mode == "krea2_fz":
             state = krea2_rows(self.core, selection, allow_fp8=links_name == "KREA2_FZ_MODEL_LINKS")
         else:
-            state = zimage_fz_rows(self.core, selection) if mode == "zimage_fz" else h3_rows(self.core, selection) if mode == "h3_fz" else {}
+            state = moss_rows(self.core, selection) if mode == "moss_fz" else zimage_fz_rows(self.core, selection) if mode == "zimage_fz" else h3_rows(self.core, selection) if mode == "h3_fz" else {}
         existing = ({key: row["path"] if row["present"] else None for key, row in state.items()}
                     if state else getattr(self.core, files_name)())
         required = set(required)
         if links_name == "KREA2_FZ_MODEL_LINKS":
             required.add(krea2_encoder_key(existing, selection))
+        if mode == "moss_fz":
+            params = self._classic_training_params(config or {"mode": mode}, project_name)
+            if self.core._sample_preview_enabled(params, self._safe_vram()) and not params.get("moss_preview_base"):
+                required.add("preview_checkpoint")
         if mode == "h3_fz":
             media = None
             if config and config.get("raw_dir"):
@@ -695,13 +704,15 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 "required_group": "主模型（二选一）" if main_choice else "文本编码器（二选一）" if encoder_choice else "",
                 "optional": key not in required and not main_choice and not encoder_choice,
                 "part_size": part_size,
-                "local_select": mode in ("h3_fz", "krea2_fz", "zimage_fz") and bool(project_name),
+                "local_select": mode in ("h3_fz", "krea2_fz", "zimage_fz", "moss_fz") and bool(project_name),
                 "manual": bool(row.get("manual")), "disabled": bool(row.get("disabled")),
                 "validation_error": row.get("error", ""), "detail": row.get("detail", ""),
                 "selected": bool(row.get("selected")), "in_use": bool(row.get("in_use")),
             })
         note = ""
-        if mode == "zimage_fz":
+        if mode == "moss_fz":
+            note = "选择已有文件或按需下载。训练使用浮点 Base；SFT 仅供预览。Qwen3.5-9B 保持完整精度，小显存逐层加载；分片请放在同一目录并选择第一片。"
+        elif mode == "zimage_fz":
             note = "Turbo BF16 / FP16 单文件、Qwen3-4B、FLUX.1 VAE 和训练适配器均需准备，可指定已有文件。适配器训练时冻结，预览和成品不包含它。Base 请使用 AI Toolkit 入口。"
         elif mode == "krea2_at":
             note = "AI Toolkit 的文本编码器会在首次训练时按需准备；RAW 底模和 VAE 可在此提前下载。"
@@ -724,6 +735,54 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if mode == "krea2_fz":
             params["encoder"] = krea2_encoder_state(state, selection, allow_fp8=links_name == "KREA2_FZ_MODEL_LINKS")
         return params
+
+    def select_moss_component(self, project_name, key, action="select"):
+        """Pick, disable or reset one project component; never copy user weights."""
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        if key not in self.core.MOSS_MODEL_LINKS or action not in ("select", "default", "disable"):
+            return {"ok": False, "error": "组件或操作无效。"}
+        project_name = str(project_name or "").strip()
+        config = self.core.load_project(project_name) if project_name else None
+        if not config or config.get("mode") != "moss_fz":
+            return {"ok": False, "error": "请在 MOSS-Image 项目内选择组件。"}
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "请等当前任务结束后再修改模型组件。"}
+        if action == "disable":
+            return {"ok": False, "error": "训练必需组件不能停用。"}
+        path = ""
+        if action == "select":
+            state = moss_rows(self.core, moss_settings(config))[key]
+            chosen = self.choose_path("model", state["path"], "moss_component_" + key)
+            if not chosen.get("ok") or chosen.get("cancelled"):
+                return chosen
+            path = os.path.abspath(os.path.expanduser(str(chosen.get("path") or "").strip().strip('"')))
+            try:
+                validate_moss_component(path, key)
+            except (ValueError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "任务已经启动，请结束后再修改组件。"}
+        # Re-read after the native picker so other project fields are preserved.
+        config = self.core.load_project(project_name)
+        if not config or config.get("mode") != "moss_fz":
+            return {"ok": False, "error": "项目已变化，请重新打开模型设置。"}
+        values = moss_settings(config)
+        if action == "default":
+            values.pop(key, None)
+        else:
+            values[key] = path
+        config["moss_models"] = values
+        if not self.core.save_project(project_name, config):
+            return {"ok": False, "error": "组件设置保存失败，请重试。"}
+        self.core.clear_status_cache()
+        return {"ok": True, "message": "组件设置已保存。", "path": path}
 
     def select_zimage_fz_component(self, project_name, key, action="select"):
         """Pick, disable or reset one project component; never copy user weights."""
@@ -915,11 +974,11 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         os.makedirs(asset_dir, exist_ok=True)
         dest = os.path.join(asset_dir, os.path.basename(filename))
         config = self.core.load_project(str(project_name or "")) if project_name else {}
-        selected_before = zimage_fz_settings(config) if mode == "zimage_fz" else h3_settings(config) if mode == "h3_fz" else krea2_settings(config) if mode == "krea2_fz" else {}
+        selected_before = moss_settings(config) if mode == "moss_fz" else zimage_fz_settings(config) if mode == "zimage_fz" else h3_settings(config) if mode == "h3_fz" else krea2_settings(config) if mode == "krea2_fz" else {}
         if mode == "krea2_fz":
             existing = krea2_files(self.core, selected_before, allow_fp8=links_name == "KREA2_FZ_MODEL_LINKS")
         else:
-            existing = zimage_fz_files(self.core, selected_before) if mode == "zimage_fz" else self.core.h3_fz_model_files(selected_before) if mode == "h3_fz" else getattr(self.core, files_name)()
+            existing = moss_files(self.core, selected_before) if mode == "moss_fz" else zimage_fz_files(self.core, selected_before) if mode == "zimage_fz" else self.core.h3_fz_model_files(selected_before) if mode == "h3_fz" else getattr(self.core, files_name)()
         if existing.get(key) and os.path.isfile(existing[key]):
             return {"ok": False, "error": "该模型文件已存在，无需重复下载。"}
         task_id = self._begin_task("下载模型文件", "download", mode=mode, key=key)
@@ -973,6 +1032,19 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                                 raise OSError("模型已下载，但项目路径保存失败；请重新选择这个文件。")
                 except (ValueError, OSError) as exc:
                     ok, failure = False, str(exc)
+            if ok and mode == "moss_fz":
+                try:
+                    validate_moss_component(path, key)
+                    if project_name and key in selected_before:
+                        current = self.core.load_project(project_name)
+                        if current and current.get("mode") == mode and moss_settings(current).get(key) == selected_before[key]:
+                            values = moss_settings(current)
+                            values[key] = str(path)
+                            current["moss_models"] = values
+                            if not self.core.save_project(project_name, current):
+                                raise OSError("模型已下载，但路径保存失败；请重新选择文件。")
+                except (ValueError, OSError) as exc:
+                    ok, failure = False, str(exc)
             if ok and mode == "zimage_fz":
                 try:
                     validate_zimage_fz_component(path, key)
@@ -999,7 +1071,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             self.core.clear_status_cache()
 
         self._task_log(task_id, "[下载] %s：%s" % (label, filename))
-        downloader = ModelDownloader(url, dest, progress_cb=progress,
+        download_options = {"fallback_urls": urls[1:]} if mode == "moss_fz" else {}
+        downloader = ModelDownloader(url, dest, progress_cb=progress, **download_options,
                                      done_cb=done,
                                      logf=lambda line: self._task_log(task_id, line))
         with self._task_lock:
@@ -1817,6 +1890,12 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             return {"ok": False, "error": "当前模式的必需模型文件尚未齐全：\n%s\n\n模型目录：%s" % (
                 "\n".join(str(item) for item in missing), details.get("asset_dir") or "未指定")}
 
+        if mode == "moss_fz":
+            preview_missing = moss_missing(self.core, params.get("moss_models"),
+                preview=self.core._sample_preview_enabled(params, self._safe_vram()),
+                base_preview=bool(params.get("moss_preview_base")))
+            if preview_missing:
+                return {"ok": False, "error": "；".join(preview_missing)}
         if mode == "krea2_fz" and params.get("krea2_models"):
             try:
                 validate_krea2_selected(self.core, params.get("krea2_models"), allow_fp8=params.get("fizgig_version") in FIZGIG_STANDARD)
@@ -1926,7 +2005,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         supports_amd = bool(getattr(self.core, "param_supports", lambda *_: False)("amd_mode", mode))
         if vendor == "amd" and supports_amd and not params.get("amd_mode"):
             return {"ok": False, "error": "检测到 AMD 显卡；请在新版训练页开启 AMD 兼容模式并保存，再开始训练。"}
-        if vendor == "amd" and mode in ("qwen21_fz", "h3_fz", "zimage_fz"):
+        if vendor == "amd" and mode in ("qwen21_fz", "h3_fz", "zimage_fz", "moss_fz"):
             warnings.append("Fizgig AMD ROCm 通道为实验性兼容路径；此模式的训练兼容性尚未验证。")
         if vendor != "amd":
             try:
@@ -1953,6 +2032,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if mode == "krea2_fz" and params.get("krea2_models"):
             model_path = str(krea2_files(self.core, params.get("krea2_models"),
                                          allow_fp8=params.get("fizgig_version") in FIZGIG_STANDARD).get("raw") or model_path)
+        if mode == "moss_fz":
+            model_path = str(moss_files(self.core, params.get("moss_models")).get("dit") or model_path)
         if mode == "zimage_fz":
             model_path = str(zimage_fz_files(self.core, params.get("zimage_fz_models")).get("dit") or model_path)
         plan = {
@@ -2004,14 +2085,14 @@ class ModernUIBridge(LoRAWorkbenchBridge):
     def _engine_kind_for_mode(mode):
         return {"style": "kohya", "character": "kohya", "concept": "kohya",
                 "krea2": "musubi", "flux2": "musubi", "krea2_fz": "fizgig", "flux2_fz": "fizgig",
-                "qwen21_fz": "fizgig", "h3_fz": "fizgig", "anima_fz": "fizgig", "sdxl_fz": "fizgig", "zimage_fz": "fizgig",
+                "qwen21_fz": "fizgig", "h3_fz": "fizgig", "anima_fz": "fizgig", "sdxl_fz": "fizgig", "zimage_fz": "fizgig", "moss_fz": "fizgig",
                 "video": "ai_toolkit", "krea2_at": "ai_toolkit", "qwen_image": "ai_toolkit", "zimage": "ai_toolkit"}.get(mode, "unknown")
 
     @staticmethod
     def _engine_label_for_mode(mode):
         return {"style": "Kohya / sd-scripts", "character": "Kohya / sd-scripts", "concept": "Kohya / sd-scripts",
                 "krea2": "musubi-tuner", "flux2": "musubi-tuner", "krea2_fz": "Fizgig", "flux2_fz": "Fizgig",
-                "qwen21_fz": "Fizgig", "h3_fz": "Fizgig", "anima_fz": "Fizgig", "sdxl_fz": "Fizgig", "zimage_fz": "Fizgig",
+                "qwen21_fz": "Fizgig", "h3_fz": "Fizgig", "anima_fz": "Fizgig", "sdxl_fz": "Fizgig", "zimage_fz": "Fizgig", "moss_fz": "Fizgig",
                 "video": "AI Toolkit", "krea2_at": "AI Toolkit", "qwen_image": "AI Toolkit", "zimage": "AI Toolkit"}.get(mode, "训练引擎")
 
     def _resume_path(self, project_name, mode, params):
@@ -2376,7 +2457,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             # are reused without silently selecting another dataset or engine.
             if patch.get("mode") != current.get("mode") or patch.get("base_type") != current.get("base_type"):
                 return {"ok": False, "error": "当前模式或底模类型已变化，不能直接恢复这条记录。"}
-            for key in ("raw_dir", "reg_dir", "base_model", "train_env", "h3_models", "krea2_models", "zimage_fz_models", "at_model"):
+            for key in ("raw_dir", "reg_dir", "base_model", "train_env", "h3_models", "krea2_models", "zimage_fz_models", "moss_models", "at_model"):
                 patch.pop(key, None)
             if current.get("training_kind") == "slider":
                 if patch.get("training_kind") != "slider":
@@ -2428,7 +2509,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         getattr(self.core, "reset_effective", lambda: None)()
         root_keys = ("mode", "base_type", "at_sub_mode", "concept_type", "fast_tier", "trigger",
                      "raw_dir", "reg_dir", "base_model", "style_preset", "style_caption",
-                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "krea2_models", "zimage_fz_models", "training_kind", "multi_character")
+                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "krea2_models", "zimage_fz_models", "moss_models", "training_kind", "multi_character")
         record_config = {key: config[key] for key in root_keys if key in config}
         stored_params = config.get("params") if isinstance(config.get("params"), dict) else {}
         record_config["params"] = {key: value for key, value in stored_params.items() if key in WORKSPACE_PARAM_KEYS}
@@ -2622,7 +2703,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                         lambda line: self._task_log(task_id, line), mode=mode, params=params,
                         vram_gb=plan.get("vram_gb"), resume_from=resume_path, progress=monitor,
                     )
-                elif mode in ("anima_fz", "sdxl_fz", "zimage_fz"):
+                elif mode in ("anima_fz", "sdxl_fz", "zimage_fz", "moss_fz"):
                     self.core.train_fizgig_lora(lambda line: self._task_log(task_id, line), mode=mode, params=params,
                         vram_gb=plan.get("vram_gb"), resume_from=resume_path, progress=monitor)
                 elif mode == "h3_fz":
@@ -3089,12 +3170,14 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 continue
             if key == "fizgig_version" and value not in ("v6.5.0", *FIZGIG_STANDARD):
                 return {"ok": False, "error": "未接入这个 Fizgig 版本。"}
+            if key == "fizgig_version" and next_mode == "moss_fz" and value != MOSS_VERSION:
+                return {"ok": False, "error": "MOSS-Image 需要 Fizgig " + MOSS_VERSION}
             if key == "fizgig_version" and next_mode == "zimage_fz" and value != FIZGIG_TARGET:
                 return {"ok": False, "error": "Z-Image Turbo 需要 Fizgig " + FIZGIG_TARGET}
             if key == "fizgig_version" and next_mode in ("anima_fz", "sdxl_fz") and value not in FIZGIG_STANDARD:
                 return {"ok": False, "error": "Anima / SDXL Fizgig 项目需要已接入的 v7 标准入口。"}
             allowed_quant = getattr(self.core, "QUANT_MODE_OPTIONS", {}).get(next_mode, ())
-            if next_mode in FIZGIG_FAMILIES and (incoming_params.get("fizgig_version") or params.get("fizgig_version") or (FIZGIG_TARGET if next_mode in ("anima_fz", "sdxl_fz", "zimage_fz") else "v6.5.0")) in FIZGIG_STANDARD:
+            if next_mode in FIZGIG_FAMILIES and (incoming_params.get("fizgig_version") or params.get("fizgig_version") or (fizgig_target_version(next_mode) if next_mode in ("anima_fz", "sdxl_fz", "zimage_fz", "moss_fz") else "v6.5.0")) in FIZGIG_STANDARD:
                 allowed_quant = (("auto", "int8", "nf4", "hqq") if next_mode == "h3_fz" else ("auto", "bf16", "int8", "nf4"))
             if key == "quant_mode" and value not in allowed_quant:
                 return {"ok": False, "error": "当前训练模式不支持量化精度「%s」。" % value}
@@ -3128,7 +3211,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 return {"ok": False, "error": "训练参数「%s」的格式无效。" % key}
             params[key] = value
         if next_mode in FIZGIG_FAMILIES:
-            version = params.get("fizgig_version") or (FIZGIG_TARGET if next_mode in ("anima_fz", "sdxl_fz", "zimage_fz") else "v6.5.0")
+            version = params.get("fizgig_version") or (fizgig_target_version(next_mode) if next_mode in ("anima_fz", "sdxl_fz", "zimage_fz", "moss_fz") else "v6.5.0")
             allowed_quant = ((("auto", "int8", "nf4", "hqq") if next_mode == "h3_fz" else ("auto", "bf16", "int8", "nf4"))) if version in FIZGIG_STANDARD else self.core.QUANT_MODE_OPTIONS.get(next_mode, ())
             if (params.get("quant_mode") or "auto") not in allowed_quant:
                 return {"ok": False, "error": "所选引擎版本不支持已保存的量化精度，请同时改为自动或此版本支持的精度。"}
@@ -3812,7 +3895,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "krea2": "musubi_ok", "flux2": "musubi_ok",
             "video": "at_ok", "krea2_at": "at_ok", "qwen_image": "at_ok", "zimage": "at_ok",
             "krea2_fz": "fizgig_ok", "flux2_fz": "fizgig_ok",
-            "qwen21_fz": "fizgig_ok", "h3_fz": "fizgig_ok", "anima_fz": "fizgig_ok", "sdxl_fz": "fizgig_ok", "zimage_fz": "fizgig_ok",
+            "qwen21_fz": "fizgig_ok", "h3_fz": "fizgig_ok", "anima_fz": "fizgig_ok", "sdxl_fz": "fizgig_ok", "zimage_fz": "fizgig_ok", "moss_fz": "fizgig_ok",
         }.get(mode)
         engine_ready = bool(status.get(engine_key)) if engine_key else False
         engine_update_available = False
@@ -3829,7 +3912,10 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         missing = []
         asset_dir = ""
         try:
-            if mode == "zimage_fz":
+            if mode == "moss_fz":
+                missing = fizgig_missing(core, "moss_image", project_config)
+                asset_dir = moss_models_dir(core)
+            elif mode == "zimage_fz":
                 missing = fizgig_missing(core, "zimage", project_config)
                 asset_dir = zimage_fz_models_dir(core)
             elif mode in ("anima_fz", "sdxl_fz"):
@@ -3876,7 +3962,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         except Exception as exc:
             missing = ["无法读取模型状态：%s" % exc]
         version_info = core.fizgig_engine_update_status() if mode in FIZGIG_FAMILIES else {}
-        version = str((project_config.get("params") or {}).get("fizgig_version") or (FIZGIG_TARGET if mode == "zimage_fz" or not project_name else "v7.0.1" if mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
+        version = str((project_config.get("params") or {}).get("fizgig_version") or (fizgig_target_version(mode) if mode in ("zimage_fz", "moss_fz") or not project_name else "v7.0.1" if mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
         engine_detail = ""
         if mode in FIZGIG_FAMILIES:
             record = fizgig_runtime(core, version)
@@ -3886,7 +3972,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 with fizgig_use_runtime(core, {"fizgig_version": version}):
                     engine_status = core.fizgig_engine_status()
                     engine_ready, engine_detail = bool(engine_status[0]), str(engine_status[1])
-            engine_update_available = version != FIZGIG_TARGET
+            engine_update_available = version != fizgig_target_version(mode)
         supports = {
             key: bool(core.param_supports(key, mode))
             # base_model is stored on the project root, but also controls the model picker UI.
@@ -3895,7 +3981,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if mode in FIZGIG_FAMILIES and version in FIZGIG_STANDARD:
             for key in ("optimizer", "compile", "global_pos", "global_neg"):
                 supports[key] = key != "global_neg" or mode != "zimage_fz"
-            supports["blocks_to_swap"] = mode in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "zimage_fz")
+            supports["blocks_to_swap"] = mode in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "zimage_fz", "moss_fz")
         quant_modes = list(getattr(core, "QUANT_MODE_OPTIONS", {}).get(mode, ()))
         if mode in FIZGIG_FAMILIES and version in FIZGIG_STANDARD:
             quant_modes = ["auto", "int8", "nf4", "hqq"] if mode == "h3_fz" else ["auto", "bf16", "int8", "nf4"]
@@ -3953,7 +4039,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "raw": len((project_config.get("multi_character") or {}).get("roles", [])) >= 2 and all(r.get("directory") and r.get("trigger") for r in (project_config.get("multi_character") or {}).get("roles", [])) if project_config.get("training_kind") == "multi_character" else bool(project_config.get("raw_dir")),
         }
         model_checks = {
-            "krea2_models", "krea2_at_models", "flux2_models", "flux2_fz_models", "h3_models", "qwen21_fz_models", "h3_fz_models", "at_model", "fizgig_new_models", "zimage_fz_models",
+            "krea2_models", "krea2_at_models", "flux2_models", "flux2_fz_models", "h3_models", "qwen21_fz_models", "h3_fz_models", "at_model", "fizgig_new_models", "zimage_fz_models", "moss_models",
         }
         for step in getattr(core, "GUIDE_STEPS", {}).get(mode, ()):
             check = step.get("check")
@@ -4018,7 +4104,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "fizgig_versions": version_info.get("versions", []),
             "fizgig_standard_versions": list(FIZGIG_STANDARD),
             "zimage_components": self.get_model_downloads(mode, project_name) if mode == "zimage_fz" else None,
-            "fizgig_target_version": FIZGIG_TARGET,
+            "moss_components": self.get_model_downloads(mode, project_name) if mode == "moss_fz" else None,
+            "fizgig_target_version": fizgig_target_version(mode),
             "model_choice": project_config.get("model_choice"),
             "krea2_components": krea2_components,
             "interval_units": interval_units,
@@ -4027,7 +4114,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "presets": presets,
             "is_video": mode in ("video", "h3_fz"),
             "is_step_based": mode in ("video", "qwen_image", "zimage"),
-            "has_training_submode": mode in ("krea2", "krea2_at", "krea2_fz", "qwen21_fz", "flux2", "flux2_fz", "anima_fz", "sdxl_fz", "zimage_fz", "h3_fz"),
+            "has_training_submode": mode in ("krea2", "krea2_at", "krea2_fz", "qwen21_fz", "flux2", "flux2_fz", "anima_fz", "sdxl_fz", "zimage_fz", "h3_fz", "moss_fz"),
             "guide_steps": guide_steps,
         }
 
@@ -4083,7 +4170,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 if isinstance(raw_params, dict):
                     params = dict(imported_config.get("params") or {})
                     supplemented = 0
-                    bool_params = {"overwrite", "amd_mode"}
+                    bool_params = {"overwrite", "amd_mode", "moss_preview_base"}
                     int_params = {"video_frames"}
                     float_params = {"noise_offset", "min_snr_gamma"}
                     for key in _MODERN_IMPORT_EXTRA_PARAMS:
@@ -4168,7 +4255,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 data["params"].update(strong_bind=False, clean_concept=False, keep_user_captions=True, caption_method="existing")
             data["at_sub_mode"] = "character" if training_type == "multi_character" else training_type
             if model_choice: data["model_choice"] = {k: model_choice[k] for k in ("model", "variant", "engine")}
-            if mode in FIZGIG_FAMILIES: data["params"]["fizgig_version"] = FIZGIG_TARGET
+            if mode in FIZGIG_FAMILIES: data["params"]["fizgig_version"] = fizgig_target_version(mode)
         if imported_config:
             mode = imported_config.get("mode", mode)
             base_type = imported_config.get("base_type", base_type)

@@ -190,7 +190,7 @@ const catalog = computed<ModelCatalogData>(() => data.value?.model_catalog ?? { 
 const sidebarGroups = computed(() => [{label: '选择模型', modes: catalog.value.models.map(model => ({key: `model:${model.key}`, label: model.label}))}])
 function modelKeyForProject(project: ProjectCard): string {
   if (isKohyaProject(project)) return project.base_type
-  const modeMap: Record<string, string> = {anima_fz:'anima',sdxl_fz:'sdxl',krea2:'krea2',krea2_at:'krea2',krea2_fz:'krea2',flux2:'klein',flux2_fz:'klein',qwen_image:'qwen',qwen21_fz:'qwen',video:'h3',h3_fz:'h3',zimage:'zimage',zimage_fz:'zimage'}
+  const modeMap: Record<string, string> = {anima_fz:'anima',sdxl_fz:'sdxl',krea2:'krea2',krea2_at:'krea2',krea2_fz:'krea2',flux2:'klein',flux2_fz:'klein',qwen_image:'qwen',qwen21_fz:'qwen',video:'h3',h3_fz:'h3',zimage:'zimage',zimage_fz:'zimage',moss_fz:'moss_image'}
   return modeMap[project.mode] || project.mode
 }
 const selectedNavModel = computed(() => workspaceProject.value ? `model:${modelKeyForProject(workspaceProject.value)}` : selectedMode.value.startsWith('model:') ? selectedMode.value : `model:${firstEngineBaseTypeForSidebarMode(selectedMode.value) || modelKeyForProject({mode:selectedMode.value,base_type:'sdxl'} as ProjectCard)}`)
@@ -249,11 +249,13 @@ const demoPresets: Record<string, Record<string, string>> = {
   flux2_fz: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '512' },
   video: { rank: '32', alpha: '32', unet_lr: '2e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '512', video_steps: '2000', video_frames: '73' },
   qwen_image: { rank: '16', alpha: '16', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '512', video_steps: '2000' },
+  moss_fz: {rank: '16', alpha: '16', unet_lr: '1e-4', te_lr: '0', repeats: '1', max_epochs: '50', resolution: '512', sample_interval: '5'},
   zimage: { rank: '16', alpha: '16', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '512', video_steps: '2000' },
 }
 
 
 const demoQuantModes: Record<string, string[]> = {
+  moss_fz: ['auto','bf16','int8','nf4'],
   anima_fz: ['auto','bf16','int8','nf4'],
   sdxl_fz: ['auto','bf16','int8','nf4'],
   krea2: ['auto', 'fp8', 'int8', 'nf4'],
@@ -320,17 +322,17 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
   const template = templates.value.find((item) => item.mode === mode)
   const preset = demoPresets[mode] ?? {}
   const stepBased = ['video', 'qwen_image', 'zimage'].includes(mode)
-  const usesEpochs = ['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode)
+  const usesEpochs = ['moss_fz', 'krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode)
   const supports: Record<string, boolean> = {
     base_model: ['anima_fz', 'sdxl_fz', 'style', 'character', 'concept'].includes(mode),
     rank: true, alpha: true, unet_lr: true, te_lr: false, repeats: !stepBased,
     max_epochs: !stepBased, resolution: true, save_every: true, sample_interval: true,
-    video_steps: stepBased, video_frames: ['video', 'h3_fz'].includes(mode), optimizer: !['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode),
+    video_steps: stepBased, video_frames: ['video', 'h3_fz'].includes(mode), optimizer: !['moss_fz', 'krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode),
     strong_bind: true, clean_concept: true, sample_preview: true, compile: ['krea2', 'flux2', 'krea2_fz'].includes(mode),
     global_pos: ['style', 'character', 'concept'].includes(mode), global_neg: ['style', 'character', 'concept'].includes(mode),
     crop_ratio: true, sample_prompt: true, noise_offset: false, min_snr_gamma: false,
-    quant_mode: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode),
-    blocks_to_swap: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz'].includes(mode),
+    quant_mode: ['moss_fz', 'krea2', 'flux2', 'krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode),
+    blocks_to_swap: ['moss_fz', 'krea2', 'flux2', 'krea2_fz', 'flux2_fz'].includes(mode),
     // ★ 2026-09-27 新增：批大小 / 梯度检查点（用户诉求「训练器能改 bs 和梯度检查点」）
     //   第一引擎（画风/人物/概念）与第二引擎的 Krea2 / FLUX.2 都真读它们；
     //   Fizgig（第四引擎）走 yaml 且固定开启，不显示
@@ -352,6 +354,7 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     h3_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['fizgig', '② 安装第四引擎', '去安装', 'cmd_install_fizgig', '安装第四引擎 Fizgig。'], ['h3_fz_models', '③ 下载 H3 Fizgig 模型', '去下载', 'cmd_dl_h3_fz_models', '官方 int8 DiT、文本编码器、视频 VAE 必需；独立音频需音频 VAE，可选适配器和 Turbo LoRA。'], ['raw', '④ 选择混合媒体文件夹', '去选文件夹', 'cmd_pick_raw', '图片、视频和音频可放在同一目录或子目录；每个媒体都需要同名 .txt。']],
     video: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['h3_models', '③ 下载 H3 模型', '去下载', 'cmd_dl_h3_models', '检查 H3 主模型、文本编码器和视频 VAE。'], ['raw', '④ 选择视频文件夹', '去选文件夹', 'cmd_pick_raw', '选择包含 mp4 视频和同名 txt 字幕的数据集文件夹。']],
     qwen_image: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['at_model', '③ Qwen-Image 模型', '查看说明', 'cmd_at_model_help', '查看模型选择、显存和本地组件说明。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（15~30 张人物/风格图片）。']],
+    moss_fz: [['env','① 环境准备','去准备','cmd_env','准备 Python / Git。'],['fizgig','② Fizgig v8.5.0','配置环境','cmd_install_fizgig','安装 MOSS-Image 训练引擎。'],['moss_models','③ 模型与组件','查看配置','cmd_dl_moss_models','Base 训练，SFT 预览。'],['raw','④ 图集与标签','去选择','cmd_pick_raw','选择训练图片。']],
     zimage_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '准备 Python / Git。'], ['fizgig', '② Fizgig 训练引擎', '去安装', 'cmd_install_fizgig', '安装 Fizgig v7.3.1。'], ['zimage_fz_models', '③ 模型与训练组件', '查看配置', 'cmd_dl_zimage_fz_models', '选择 Turbo 底模、Qwen3-4B、FLUX.1 VAE 和训练适配器。'], ['raw', '④ 图集与标签', '去选择', 'cmd_pick_raw', '选择训练图片文件夹。']],
     zimage: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['at_model', '③ Z-Image 模型', '查看说明', 'cmd_at_model_help', '查看模型选择、显存和本地组件说明。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（15~30 张人物/风格图片）。']],
   }
@@ -367,6 +370,24 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     interval_hints: mode === 'h3_fz' ? { sample_interval: '填 N = 每 N 轮采样；留空沿用 H3 预设（当前默认 5 轮），填 0 按图集大小估算。训练开始时可能额外采样。' } : undefined,
     defaults: preset, presets: { [mode]: { sdxl: preset } }, is_video: ['video', 'h3_fz'].includes(mode), is_step_based: stepBased,
     has_training_submode: ['krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'flux2', 'flux2_fz'].includes(mode),
+    ...(mode === 'moss_fz' ? {
+      fizgig_version: 'v8.5.0', fizgig_target_version: 'v8.5.0', fizgig_versions: [],
+      fizgig_standard_versions: ['v7.0.1', 'v7.3.1', 'v8.5.0'], engine_key: 'fizgig_ok', has_training_submode: true,
+      missing_models: ['MOSS-Image Base', 'Qwen3.5-9B', 'FLUX.2 VAE'],
+      moss_components: {
+        ok: true, title: 'MOSS-Image 训练组件',
+        items: [
+          ['dit', 'MOSS-Image Base 训练底模（10.2 GB）', 'moss_image_base_bf16.safetensors'],
+          ['te', 'Qwen3.5-9B BF16 文本编码器（19.3 GB）', 'qwen3.5_9b_bf16.safetensors'],
+          ['vae', 'FLUX.2 小型 VAE（0.25 GB）', 'flux2-vae_small.safetensors'],
+          ['preview_checkpoint', 'MOSS-Image SFT 预览底模（5.4 GB）', 'moss_image_sft_int8_convrot.safetensors'],
+        ].map(([key, label, filename]) => ({
+          key, label, filename, url: '', path: '', present: false,
+          required: key !== 'preview_checkpoint', required_group: '',
+          optional: key === 'preview_checkpoint', part_size: 0, local_select: true,
+        })),
+      },
+    } : {}),
     guide_steps,
   }
 }
@@ -386,7 +407,7 @@ function showToast(message: string) {
 function normalizeImportedConfig(raw: unknown): ProjectConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('配置文件内容不是有效的 JSON 对象。')
   const source = raw as Record<string, unknown>
-  const modes = new Set(['style', 'character', 'concept', 'krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz', 'flux2', 'flux2_fz', 'video', 'qwen_image', 'zimage', 'zimage_fz'])
+  const modes = new Set(['style', 'character', 'concept', 'krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz', 'flux2', 'flux2_fz', 'video', 'qwen_image', 'zimage', 'zimage_fz', 'moss_fz'])
   const baseTypes = new Set(['sd15', 'sdxl', 'flux', 'anima'])
   const mode = typeof source.mode === 'string' && modes.has(source.mode) ? source.mode : 'character'
   const requestedBaseType = typeof source.base_type === 'string' ? source.base_type : ''
@@ -556,7 +577,7 @@ async function saveDialog() {
         previewConfigs.value = { ...previewConfigs.value, [name]: imported ?? {
           mode, base_type: baseType, at_sub_mode: createGoal.value === 'multi_character' ? 'character' : createGoal.value, model_choice: createChoice.value,
           training_kind: createGoal.value === 'multi_character' ? 'multi_character' : createGoal.value === 'slider' ? 'slider' : 'standard',
-          params: mode.endsWith('_fz') ? { fizgig_version: 'v7.3.1' } : {},
+          params: mode.endsWith('_fz') ? { fizgig_version: mode === 'moss_fz' ? 'v8.5.0' : 'v7.3.1' } : {},
         } }
         data.value!.projects = [project, ...projects.value]
         appendLog(imported
@@ -986,7 +1007,7 @@ async function onGuideAction(step: GuideStep) {
     setupDialogOpen.value = true
     return
   }
-  if (action === 'cmd_dl_krea2_models' || action === 'cmd_dl_flux2_models' || action === 'cmd_dl_h3_models' || action === 'cmd_dl_qwen21_fz_models' || action === 'cmd_dl_h3_fz_models' || action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models' || action === 'cmd_dl_zimage_fz_models') {
+  if (action === 'cmd_dl_krea2_models' || action === 'cmd_dl_flux2_models' || action === 'cmd_dl_h3_models' || action === 'cmd_dl_qwen21_fz_models' || action === 'cmd_dl_h3_fz_models' || action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models' || action === 'cmd_dl_zimage_fz_models' || action === 'cmd_dl_moss_models') {
     modelDialogOpen.value = true
     return
   }
@@ -1310,7 +1331,7 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
     setupDialogOpen.value = true
     return
   }
-  if (action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models' || action === 'cmd_dl_zimage_fz_models') {
+  if (action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models' || action === 'cmd_dl_zimage_fz_models' || action === 'cmd_dl_moss_models') {
     if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
     modelDialogOpen.value=true; return
   }
@@ -1707,7 +1728,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
           <p v-if="formError" class="form-error">{{ formError }}</p>
           <footer class="dialog-actions">
             <button class="small-button" type="button" @click="dialogOpen = false">取消</button>
-            <button class="small-button primary" type="button" :disabled="busy" @click="saveDialog">{{ busy ? '正在保存…' : dialogKind === 'create' ? '创建并打开' : '保存名称' }}</button>
+            <button class="small-button primary" type="button" :disabled="busy || (dialogKind === 'create' && !importedConfigJson && !createChoiceAvailable)" @click="saveDialog">{{ busy ? '正在保存…' : dialogKind === 'create' ? '创建并打开' : '保存名称' }}</button>
           </footer>
         </section>
       </div>

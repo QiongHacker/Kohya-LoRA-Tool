@@ -48,15 +48,15 @@ const draft = reactive({
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
   caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
   batch_size: '', gc: 'auto',
-  h3_caption_replace: false, h3_sync_trigger: true, strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
+  moss_preview_base: false, h3_caption_replace: false, h3_sync_trigger: true, strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
 })
 
 const isKrea2 = computed(() => props.mode === 'krea2_fz')
 const componentVersionPending = computed(() => draft.fizgig_version !== props.details.fizgig_version)
 const isFizgig = computed(() => props.mode.endsWith('_fz'))
-const isV7 = computed(() => isFizgig.value && ['v7.0.1', 'v7.3.1'].includes(draft.fizgig_version))
+const isV7 = computed(() => isFizgig.value && (props.details.fizgig_standard_versions || ['v7.0.1', 'v7.3.1']).includes(draft.fizgig_version))
 const supported = (key: string) => key === 'global_neg' && props.mode === 'zimage_fz' ? false : isFizgig.value && ['optimizer','compile','global_pos','global_neg'].includes(key) ? isV7.value : Boolean(props.details.supports?.[key])
-const versions = computed(() => [...new Set([draft.fizgig_version, ...(props.details.fizgig_versions || []), props.details.fizgig_target_version || 'v7.3.1'])].filter(v => v && (props.mode === 'zimage_fz' ? v === 'v7.3.1' : (!(isMulti.value || ['anima_fz','sdxl_fz'].includes(props.mode)) || ['v7.0.1','v7.3.1'].includes(v)))))
+const versions = computed(() => [...new Set([draft.fizgig_version, ...(props.details.fizgig_versions || []), props.details.fizgig_target_version || 'v7.3.1'])].filter(v => v && (props.mode === 'moss_fz' ? v === 'v8.5.0' : v === 'v8.5.0' ? false : props.mode === 'zimage_fz' ? v === 'v7.3.1' : (!(isMulti.value || ['anima_fz','sdxl_fz'].includes(props.mode)) || ['v7.0.1','v7.3.1'].includes(v)))))
 const legacyFizgigQuant: Record<string, string[]> = { krea2_fz:['auto','fp8','int8','nf4','bf16'], flux2_fz:['auto','fp8','int8','nf4'], qwen21_fz:['auto','bf16','int8','nf4'], h3_fz:['auto','int8','nf4','hqq'] }
 const quantModes = computed(() => isV7.value ? (props.mode === 'h3_fz' ? ['auto','int8','nf4','hqq'] : ['auto','bf16','int8','nf4']) : isFizgig.value ? legacyFizgigQuant[props.mode] || [] : props.details.quant_modes?.length ? props.details.quant_modes : ['auto', 'fp8', 'int8', 'nf4'])
 const defaults = computed(() => props.details.defaults ?? {})
@@ -67,7 +67,7 @@ const officialQwenPreset = computed(() => props.mode === 'qwen21_fz')
 const isH3Fizgig = computed(() => props.mode === 'h3_fz')
 const engineUpdateAction = computed(() => String(props.details.engine_key || '').includes('fizgig') ? 'fizgig_engine_update' : 'at_engine_update')
 const assetReady = computed(() => props.details.missing_models.length === 0)
-const modelAction = computed(() => isKrea2.value ? 'cmd_dl_krea2_models' : props.mode === 'zimage_fz' ? 'cmd_dl_zimage_fz_models' : `open_models:${props.mode}`)
+const modelAction = computed(() => isKrea2.value ? 'cmd_dl_krea2_models' : props.mode === 'moss_fz' ? 'cmd_dl_moss_models' : props.mode === 'zimage_fz' ? 'cmd_dl_zimage_fz_models' : `open_models:${props.mode}`)
 const intervalUnit = (key: 'save_every' | 'sample_interval') => props.details.interval_units?.[key] === 'epochs' ? '轮' : '步'
 const intervalTooltip = (key: 'save_every' | 'sample_interval') => props.details.interval_hints?.[key] || (key === 'save_every'
   ? props.details.interval_units?.[key] === 'epochs' ? legacyTooltips.saveEveryEpochs : legacyTooltips.saveEverySteps
@@ -132,6 +132,7 @@ function hydrate(config?: ProjectConfig | null) {
   draft.strong_bind = params.strong_bind === undefined ? true : Boolean(params.strong_bind)
   draft.clean_concept = params.clean_concept === undefined ? true : Boolean(params.clean_concept)
   draft.sample_preview_mode = params.sample_preview == null ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
+  draft.moss_preview_base = Boolean(params.moss_preview_base)
   draft.compile = Boolean(params.compile)
   draft.overwrite = Boolean(params.overwrite)
   draft.keep_user_captions = Boolean(params.keep_user_captions)
@@ -195,7 +196,7 @@ function makePatch(): ProjectConfig {
   for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
-  for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'keep_user_captions', 'amd_mode', 'h3_caption_replace', 'h3_sync_trigger'] as const) {
+  for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'keep_user_captions', 'amd_mode', 'h3_caption_replace', 'h3_sync_trigger', 'moss_preview_base'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   if (dirty.has('params.sample_preview')) params.sample_preview = draft.sample_preview_mode === 'auto' ? null : draft.sample_preview_mode === 'on'
@@ -312,6 +313,13 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <p v-if="['anima_fz','sdxl_fz'].includes(mode)" class="engine-hint">上游实验性入口。{{ mode==='anima_fz' ? '仅支持标准 28 层 Anima；2.9B / 40 层请选 Kohya。' : '支持完整 SDXL 同架构底模；不训练文本编码器。' }}</p>
         </component>
         <Krea2ComponentsPanel v-if="isKrea2" :setup="details.krea2_components" :disabled="componentBusy || !desktop" :version-pending="componentVersionPending" @configure="requestAction(modelAction)" @select-encoder="requestAction('krea2_encoder:' + $event)" @component="(key, action) => requestAction('krea2_component:' + key + ':' + action)" />
+        <section v-if="mode === 'moss_fz'" class="engine-card">
+          <header class="engine-card-heading"><div><h2>模型与训练组件</h2><small>Base 训练 · SFT 预览</small></div><button class="engine-button compact" type="button" @click="requestAction(modelAction)">配置与下载</button></header>
+          <div v-for="item in details.moss_components?.items || []" :key="item.key" class="zimage-component-row">
+            <span>{{ item.label }}</span><small :title="item.path">{{ item.validation_error || (item.present ? item.path : '未准备') }}</small>
+          </div>
+          <label class="engine-check"><input v-model="draft.moss_preview_base" type="checkbox" @change="markParam('moss_preview_base')" />使用训练 Base 预览（默认使用 SFT）</label>
+        </section>
         <section v-if="mode === 'zimage_fz'" class="engine-card">
           <header class="engine-card-heading"><div><h2>模型与训练组件</h2><small>Z-Image Turbo · 8 步 / CFG 1</small></div><button class="engine-button compact" type="button" @click="requestAction(modelAction)">配置与下载</button></header>
           <div v-for="item in details.zimage_components?.items || []" :key="item.key" class="zimage-component-row">
@@ -335,7 +343,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             <strong :title="details.asset_dir || undefined">{{ details.asset_dir || '由引擎按配置管理' }}</strong>
             <small v-if="details.missing_models.length">缺少：{{ details.missing_models.join('、') }}</small>
           </div>
-          <button v-if="!isKrea2" class="engine-button compact" type="button" @click="requestAction(modelAction)">{{ mode === 'zimage_fz' ? '配置模型 / 组件' : '打开模型目录' }}</button>
+          <button v-if="!isKrea2" class="engine-button compact" type="button" @click="requestAction(modelAction)">{{ ['zimage_fz','moss_fz'].includes(mode) ? '配置模型 / 组件' : '打开模型目录' }}</button>
         </section>
 
         <div class="engine-card-grid" :class="{multi:isMulti}">
@@ -421,7 +429,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <button v-if="mode === 'krea2' || mode === 'krea2_fz'" class="engine-utility" type="button" :title="legacyTooltips.krea2Guide" @click="requestAction('krea2_guide')">Krea2 使用引导</button>
           <button v-if="mode === 'flux2' || mode === 'flux2_fz'" class="engine-utility" type="button" :title="legacyTooltips.flux2Guide" @click="requestAction('flux2_guide')">FLUX.2 使用引导</button>
           <button v-if="isVideo && !isH3Fizgig" class="engine-utility" type="button" :title="legacyTooltips.h3Guide" @click="requestAction('h3_guide')">H3 视频引导</button>
-          <button v-if="!isKrea2" class="engine-utility" type="button" title="配置当前训练模式的模型文件。" @click="requestAction(modelAction)">{{ mode === 'zimage_fz' ? '配置模型 / 组件' : '打开模型目录' }}</button>
+          <button v-if="!isKrea2" class="engine-utility" type="button" title="配置当前训练模式的模型文件。" @click="requestAction(modelAction)">{{ ['zimage_fz','moss_fz'].includes(mode) ? '配置模型 / 组件' : '打开模型目录' }}</button>
           <template v-if="isVideo && !isH3Fizgig">
             <button class="engine-utility" type="button" title="为没有字幕的视频生成占位 txt（内容=触发词），避免训练缺字幕报错；建议之后手动改成具体描述。" @click="requestAction('video_caption_stub')">一键生成占位字幕</button>
             <button class="engine-utility" type="button" title="用 Qwen2.5-VL 自动给视频生成英文描述（首次下载模型约 6~7GB，已有 txt 的会跳过）。" @click="requestAction('video_caption')">AI 自动描述</button>

@@ -385,5 +385,35 @@
         "preferred": {}
       }
     ]
+  },
+  {
+    "key": "moss_image",
+    "label": "MOSS-Image",
+    "variants": [
+      {
+        "key": "moss_base",
+        "label": "MOSS-Image Base",
+        "note": "Base 训练，SFT 预览。8GB NVIDIA 已完成小规模验证；AMD 待实测。",
+        "preferred": {
+          "nvidia": "fizgig",
+          "amd": "fizgig"
+        },
+        "engines": [
+          {
+            "key": "fizgig",
+            "label": "Fizgig v8.5.0",
+            "mode": "moss_fz",
+            "template": "MOSS-Image LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "普通 LoRA；自动精度，逐层缓存完整精度文本编码器。",
+            "experimental": true,
+            "min_version": "v8.5.0"
+          }
+        ]
+      }
+    ]
   }
 ]

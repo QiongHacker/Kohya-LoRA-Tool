@@ -7,18 +7,24 @@ import os
 from pathlib import Path
 import re
 import time
-from .fizgig_engine import VERSION, COMMIT, MIRROR, SUPPORTED_V7, source_commit, source_version, _env, _sha, _write
+from .fizgig_engine import VERSION, COMMIT, MIRROR, SUPPORTED_STANDARD as SUPPORTED_V7, MOSS_VERSION, source_commit, source_version, _env, _sha, _write
 
 FAMILIES = {"krea2_fz": "krea2", "flux2_fz": "klein", "qwen21_fz": "qwen_image21",
-            "h3_fz": "minimax", "anima_fz": "anima", "sdxl_fz": "sdxl", "zimage_fz": "zimage"}
+            "h3_fz": "minimax", "anima_fz": "anima", "sdxl_fz": "sdxl", "zimage_fz": "zimage", "moss_fz": "moss_image"}
 
 
 def models_dir(core, family):
+    if family == "moss_image":
+        from .moss_models import models_dir as directory
+        return directory(core)
     return str(Path(core.KIT_DIR) / "models" / ("base" if family == "sdxl" else "anima"))
 
 
 def models(core, family, params=None):
     params = params or {}
+    if family == "moss_image":
+        from .moss_models import files, settings
+        return files(core, settings(params))
     if family == "zimage":
         from .zimage_fizgig import files, settings
         return files(core, settings(params))
@@ -63,6 +69,9 @@ def models(core, family, params=None):
 
 def missing(core, family, params=None):
     files = models(core, family, params)
+    if family == "moss_image":
+        from .moss_models import missing as missing_moss, settings
+        return missing_moss(core, settings(params))
     if family == "zimage":
         from .zimage_fizgig import missing as missing_zimage, settings
         return missing_zimage(core, settings(params))
@@ -94,6 +103,8 @@ def _helper_configs(core, family, logf):
         urls = [(MIRROR + "helpers/" + family + "/" + spec["commit"] + "/" + name, True),
                 ("https://hf-mirror.com/" + spec["repo"] + "/resolve/" + spec["commit"] + "/" + name, True),
                 ("https://huggingface.co/" + spec["repo"] + "/resolve/" + spec["commit"] + "/" + name, False)]
+        if spec.get("modelscope_repo"):
+            urls.insert(0, ("https://modelscope.cn/models/" + spec["modelscope_repo"] + "/resolve/master/" + name, True))
         logf("[Fizgig] 准备本地分词器 / 配置：%s / %s（国内镜像优先）" % (family, name))
         for url, direct in urls:
             if core._download_with_resume(url, str(target), logf, direct=direct, quick_fail=True):
@@ -116,8 +127,11 @@ def _validate(core, family, files):
         if not core._safetensors_complete(path):
             raise RuntimeError("模型文件不完整或损坏：%s。请重新下载该文件。" % path)
     validate_base(core, family, files["dit"])
-    if family == "zimage":
-        from .zimage_fizgig import validate
+    if family in ("zimage", "moss_image"):
+        if family == "moss_image":
+            from .moss_models import validate
+        else:
+            from .zimage_fizgig import validate
         for key in required: validate(files[key], key)
     if family == "krea2" and core._safetensors_is_prequantized(files["dit"]):
         raise RuntimeError("Krea2 需要 bf16 RAW 底模；推理用预量化文件不能直接用于训练。")
@@ -128,6 +142,9 @@ def validate_base(core, family, checkpoint):
         raise RuntimeError("模型文件不完整或损坏，请重新下载。")
     if family == "zimage":
         from .zimage_fizgig import validate
+        validate(checkpoint, "dit")
+    if family == "moss_image":
+        from .moss_models import validate
         validate(checkpoint, "dit")
     if family == "minimax":
         from .h3_models import validate
@@ -148,6 +165,9 @@ def _cache_identity(core, family, files, subsets, resolution, commit=COMMIT, tra
         p = Path(path); st = p.stat()
         return [str(p.resolve()), st.st_size, st.st_mtime_ns]
     assets = {k: stat(v) for k, v in files.items() if v and k in ("dit", "vae", "te", "audio_vae")}
+    if family == "moss_image" and files.get("te"):
+        from .moss_models import component_files
+        assets["te"] = [stat(path) for path in component_files(files["te"])]
     images = []
     for folder, _repeats, _count in subsets:
         for path in sorted(Path(folder).iterdir()):
@@ -213,6 +233,8 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if source_version(record["source"]) != version or version not in SUPPORTED_V7 or not Path(record["python"]).is_file():
         raise RuntimeError("此项目选择 Fizgig %s，请先安装或更新引擎。" % version)
     family = FAMILIES[mode]
+    if family == "moss_image" and version != MOSS_VERSION:
+        raise RuntimeError("MOSS-Image 需要 Fizgig " + MOSS_VERSION)
     if family == "zimage" and version != VERSION:
         raise RuntimeError("Z-Image Turbo 需要 Fizgig %s，请更新引擎。" % VERSION)
     if family == "krea2":
@@ -223,6 +245,14 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         validate_selected(core, params.get("h3_models"))
     files = models(core, family, params)
     _validate(core, family, files)
+    if family == "moss_image":
+        if params.get("moss_preview_base"):
+            files["preview_checkpoint"] = None
+        if core._sample_preview_enabled(params, vram_gb):
+            from .moss_models import missing as missing_moss, settings, validate
+            errors = missing_moss(core, settings(params), preview=True, base_preview=bool(params.get("moss_preview_base")))
+            if errors: raise RuntimeError("；".join(errors))
+            if files.get("preview_checkpoint"): validate(files["preview_checkpoint"], "preview_checkpoint")
     if family == "krea2":
         for key, label in (("dit", "RAW 底模"), ("vae", "VAE"), ("te", "文本编码器"), ("preview_checkpoint", "Turbo 预览底模")):
             logf("[Fizgig · Krea 2] %s：%s" % (label, files.get(key) or "未使用"))
@@ -265,14 +295,16 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         value = params.get(key)
         return default if value in (None, "") else value
     resolution = int(numeric("resolution", 512))
-    epochs = int(numeric("max_epochs", 16))
-    rank = int(numeric("rank", 32))
+    epochs = int(numeric("max_epochs", 50 if family == "moss_image" else 16))
+    rank = int(numeric("rank", 16 if family == "moss_image" else 32))
     alpha = float(numeric("alpha", rank))
     lr = float(numeric("unet_lr", 1e-4))
     if min(resolution, epochs, rank, alpha, lr) <= 0 or not all(math.isfinite(v) for v in (alpha, lr)):
         raise ValueError("分辨率、轮数、rank、alpha、学习率需要为正数。")
     if int(numeric("batch_size", 1)) != 1:
         raise ValueError("当前 Fizgig 接入按每次一个素材训练；批大小请设为 1。")
+    if family == "moss_image" and str(params.get("gc") or "auto").lower() in ("关闭", "off", "false", "0"):
+        raise ValueError("MOSS-Image 由引擎管理梯度检查点，请选择自动或开启。")
     optimizer = str(params.get("optimizer") or "auto").lower()
     if optimizer == "auto": optimizer = "adamw8bit" if family == "qwen_image21" else "adamw"
     if optimizer not in ("adamw", "adamw8bit"):
@@ -348,7 +380,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         logf("[Fizgig %s · %s] 缓存 %s；相同模型、分辨率和素材才复用缓存。" % (version, family, stage))
         cmd = [python, str(Path(source) / "src/fizgig/families/cache.py"), "--family", family,
                "--stage", stage, "--dataset_config", str(config), "--model", files[key],
-               "--skip_existing", "--batch_size", "1", "--num_workers", "2"]
+               "--skip_existing", "--batch_size", "4096" if family == "moss_image" and stage == "text" else "1", "--num_workers", "2"]
         if family == "minimax" and stage == "latents":
             if files.get("audio_vae"): cmd += ["--aux", "audio_vae=" + files["audio_vae"]]
             if dataset["videos"] and h3_training_type != "style": cmd += ["--aux", "clip_still=1"]
@@ -388,7 +420,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if enabled:
         prompt_lines, prompt_source = preview_prompts(params, subsets)
         prompts = cache / "sample_prompts.txt"; prompts.write_text("\n".join(prompt_lines) + "\n", encoding="utf-8")
-        steps, cfg = ((30, 4.5) if family == "anima" else (30, 3.0) if family == "sdxl" else (8, 1.0) if family == "zimage" else (20, 3.5))
+        steps, cfg = ((30, 4.5) if family == "anima" else (30, 3.0) if family == "sdxl" else (8, 1.0) if family == "zimage" else (30, 4.0) if family == "moss_image" else (20, 3.5))
         cmd += ["--sample_prompts", str(prompts), "--sample_every_n_epochs", str(sample_epochs),
                 "--sample_width", str(resolution), "--sample_height", str(resolution),
                 "--sample_steps", str(steps), "--sample_cfg_scale", str(cfg),

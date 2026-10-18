@@ -6,6 +6,7 @@
 # ---------- 双模式预设 ----------
 
 MODE_LABELS = {
+    "moss_fz": "MOSS-Image LoRA（Fizgig）",
     "style": "🎨 画风LoRA模式",
     "character": "👤 人物角色LoRA模式",
     "concept": "🦄 概念LoRA模式",
@@ -23,7 +24,7 @@ MODE_LABELS = {
     "qwen_image": "🖼 Qwen-Image LoRA",
     "zimage": "🖼 Z-Image LoRA",
 }
-MODE_KEYS = ["style", "character", "concept", "krea2", "krea2_at", "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz", "video", "qwen_image", "zimage", "anima_fz", "sdxl_fz", "zimage_fz"]
+MODE_KEYS = ["moss_fz", "style", "character", "concept", "krea2", "krea2_at", "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz", "video", "qwen_image", "zimage", "anima_fz", "sdxl_fz", "zimage_fz"]
 
 # Qwen-Image / Z-Image 的画风/人物子模式（训练类型切换）
 AT_SUB_LABELS = {
@@ -154,6 +155,7 @@ BASE_TYPE_HINTS = {k: v["hint"] for k, v in ARCH_INFO.items()}
 _PRESET_ARCHS = ("sd15", "sdxl", "flux", "anima")
 
 _PRESET_BASE = {
+    "moss_fz": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "0", "repeats": "1", "max_epochs": "50", "resolution": "512", "sample_interval": "5"},
     "style": {"rank": "12", "alpha": "6", "unet_lr": "3e-4", "te_lr": "1.5e-4", "repeats": "5", "max_epochs": "8", "resolution": "512"},
     "character": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5", "repeats": "3", "max_epochs": "6", "resolution": "512"},
     "concept": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5", "repeats": "3", "max_epochs": "8", "resolution": "512"},
@@ -227,6 +229,7 @@ PRESET_VERSION = 4
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
 QUANT_MODE_OPTIONS = {
+    "moss_fz": ("auto", "bf16", "int8", "nf4"),
     "zimage_fz": ("auto", "bf16", "int8", "nf4"),
     "anima_fz": ("auto", "bf16", "int8", "nf4"),
     "sdxl_fz": ("auto", "bf16", "int8", "nf4"),
@@ -237,7 +240,7 @@ QUANT_MODE_OPTIONS = {
     "qwen21_fz": ("auto", "bf16", "int8", "nf4"),
     "h3_fz": ("auto", "int8", "nf4", "hqq"),
 }
-MIN_IMAGES = {"zimage_fz": 15, "anima_fz": 15, "sdxl_fz": 15, "style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "qwen21_fz": 5, "h3_fz": 1, "flux2": 15, "flux2_fz": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
+MIN_IMAGES = {"moss_fz": 15, "zimage_fz": 15, "anima_fz": 15, "sdxl_fz": 15, "style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "qwen21_fz": 5, "h3_fz": 1, "flux2": 15, "flux2_fz": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
@@ -377,6 +380,7 @@ TRIGGER_HINT_AT = ("💡提示：填一个网上很少见到的英文单词（�
                    "训练后输入这个单词，就能召唤这个角色/风格。\n"
                    "不填也可以正常训练（但召唤效果弱）。")
 DATASET_TIPS = {
+    "moss_fz": "使用 MOSS-Image Base 训练，SFT 预览。建议 15~30 张图片，优先使用准确的自然语言描述；512px 起步，小显存选择自动精度。AMD 尚待实机验证。",
     "zimage_fz": "Z-Image Turbo 普通 LoRA。BF16 / FP16 底模、Qwen3-4B、FLUX.1 VAE 与训练适配器；支持 CUDA / ROCm。建议 12 GB 以上显存，先用 512px 小规模试训。出图使用 Turbo，8 步、CFG 1。",
     "anima_fz": "建议 15~30 张多角度、不同背景的图片。Fizgig 只接标准 28 层 Anima；2.9B / 40 层请选 Kohya。新项目默认 512px。",
     "sdxl_fz": "建议 15~30 张图片。使用完整 SDXL safetensors 底模，支持同架构第三方底模；这里只训练 UNet LoRA，文本编码器冻结。新项目默认 512px。",
@@ -395,7 +399,7 @@ DATASET_TIPS = {
     "zimage": "📌 数据集提示：15~30 张同一人物/风格图片。此入口训练 Z-Image Base；支持完整 Diffusers 目录或 BF16 / FP16 拆分权重。请用相同 Base 底模验证 LoRA；Turbo 请新建项目选择 Fizgig。",
 }
 
-OUTPUT_NAMES = {"zimage_fz": "zimage_turbo_fizgig_lora", "anima_fz": "anima_fizgig_lora", "sdxl_fz": "sdxl_fizgig_lora", "style": "anime_style_lora", "character": "character_lora", "concept": "concept_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "qwen21_fz": "qwen21_fizgig_lora", "h3_fz": "h3_fizgig_lora", "flux2": "flux2_lora", "flux2_fz": "flux2_fizgig_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
+OUTPUT_NAMES = {"moss_fz": "moss_image_lora", "zimage_fz": "zimage_turbo_fizgig_lora", "anima_fz": "anima_fizgig_lora", "sdxl_fz": "sdxl_fizgig_lora", "style": "anime_style_lora", "character": "character_lora", "concept": "concept_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "qwen21_fz": "qwen21_fizgig_lora", "h3_fz": "h3_fizgig_lora", "flux2": "flux2_lora", "flux2_fz": "flux2_fizgig_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
 # ---------- 新手引导步骤（数据驱动，按模式渲染） ----------
 # 每步：id(唯一) / label(显示文案) / btn(按钮文字) / check(完成判定类型) / act(GUI 动作方法名) / tip(悬停提示)
 # check 类型：
@@ -550,6 +554,7 @@ PY_MAX = (3, 13, 0)
 #   风格预设「动漫」rank 32 互相打架。现在统一由 _apply_presets() 按模式+底模填。
 #   （FLUX.2 人物 的 base_type 是占位值：flux2 模式的底模控件本就隐藏，取哪档结果相同。）
 PROJECT_TEMPLATES = {
+    "MOSS-Image LoRA（Fizgig）": {"mode": "moss_fz", "base_type": "sdxl", "note": "Base 训练，SFT 预览；Fizgig v8.5.0 普通 LoRA。"},
     "自定义": {
         "mode": "character",
         "base_type": "sdxl",
@@ -629,4 +634,14 @@ GUIDE_STEPS["zimage_fz"] = [
     {"id":"fizgig", "label":"② Fizgig 训练引擎", "btn":"去安装", "check":"fizgig", "act":"cmd_install_fizgig", "tip":"安装新版 Fizgig；国内镜像优先。"},
     {"id":"models", "label":"③ 模型与训练组件", "btn":"查看配置", "check":"zimage_fz_models", "act":"cmd_dl_zimage_fz_models", "tip":"选择已有 Turbo 底模、Qwen3-4B、FLUX.1 VAE 和训练适配器。"},
     {"id":"raw", "label":"④ 图集与标签", "btn":"去选择", "check":"raw", "act":"cmd_pick_raw", "tip":"选择原始图片文件夹并检查标签。"},
+]
+
+MODE_SHORT["moss_fz"] = "MOSS-Image(Fizgig)"
+for _key in ("global_pos", "global_neg", "quant_mode", "blocks_to_swap", "optimizer", "compile", "repeats", "max_epochs"):
+    PARAM_SCOPE[_key] = (*PARAM_SCOPE[_key], "moss_fz")
+GUIDE_STEPS["moss_fz"] = [
+    {"id":"env", "label":"① 环境准备", "btn":"去准备", "check":"env", "act":"cmd_env", "tip":"准备 Python / Git。"},
+    {"id":"fizgig", "label":"② Fizgig v8.5.0", "btn":"配置环境", "check":"fizgig", "act":"cmd_install_fizgig", "tip":"MOSS-Image 使用独立版本源码。"},
+    {"id":"models", "label":"③ 模型与组件", "btn":"查看配置", "check":"moss_models", "act":"cmd_dl_moss_models", "tip":"训练 Base、Qwen3.5-9B、FLUX.2 VAE；SFT 供预览。"},
+    {"id":"raw", "label":"④ 图集与标签", "btn":"去选择", "check":"raw", "act":"cmd_pick_raw", "tip":"选择训练图片并检查描述。"},
 ]

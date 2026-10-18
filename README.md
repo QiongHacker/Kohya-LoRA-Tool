@@ -38,9 +38,11 @@ Chinese UI · NVIDIA GPUs · Selected AMD ROCm configurations
 | **kohya / sd-scripts** | SD 1.5, SDXL, FLUX.1, Anima |
 | **musubi-tuner** | Krea 2, FLUX.2 |
 | **AI Toolkit** | Krea 2, Qwen-Image, Z-Image Base, MiniMax H3 |
-| **Fizgig** | Krea 2, FLUX.2 Klein 9B, Qwen-Image-2.1, Z-Image Turbo, MiniMax H3; experimental SDXL / standard Anima |
+| **Fizgig** | Krea 2, FLUX.2 Klein 9B, Qwen-Image-2.1, Z-Image Turbo, MiniMax H3, MOSS-Image Base; experimental SDXL / standard Anima |
 
 MiniMax H3 also supports video through AI Toolkit and image / video / audio through Fizgig. Model versions, GPU requirements and available features vary by engine; see the [user guide](README_使用说明.md).
+
+MOSS-Image uses Fizgig v8.5.0 with separate Base training and SFT preview models. [Setup and 8GB validation](docs/MOSS_Image_Fizgig_v850_验证与接入_20261018.md).
 
 ## Quick start
 

@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.12"
+APP_VERSION = "0.19.13"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5299,7 +5299,7 @@ def _fizgig_marker_ok():
 
 
 def _fizgig_source_current(fz_dir):
-    from kohya_core.fizgig_engine import source_version, VERSION, SUPPORTED_V7
+    from kohya_core.fizgig_engine import source_version, VERSION, SUPPORTED_STANDARD as SUPPORTED_V7
     return source_version(fz_dir) in SUPPORTED_V7 or all(
         os.path.isfile(os.path.join(fz_dir, *rel.split("/"))) for rel in FIZGIG_SRC_REQUIRED)
 
@@ -6101,7 +6101,7 @@ def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
             _kok, _kdetail = _amd_gpu_kernel_check(vpy, _env, logf, "第四引擎")
             if not _kok:
                 raise RuntimeError(_kdetail)
-        from kohya_core.fizgig_engine import source_version, VERSION, SUPPORTED_V7, cli_ready
+        from kohya_core.fizgig_engine import source_version, VERSION, SUPPORTED_STANDARD as SUPPORTED_V7, cli_ready
         if source_version(fz_dir) in SUPPORTED_V7:
             cli_ready(sys.modules[__name__], {"python": vpy, "source": fz_dir, "backend": backend})
         elif _fizgig_source_current(fz_dir):
@@ -9795,8 +9795,8 @@ def _warn_alloc_conf(logf):
 
 _INTERVAL_PARAM_KEYS = ("save_every", "sample_interval")
 _INTERVAL_EPOCH_MODES = {
-    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz", "zimage_fz")),
-    "sample_interval": frozenset(("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz", "zimage_fz")),
+    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz", "zimage_fz", "moss_fz")),
+    "sample_interval": frozenset(("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz", "zimage_fz", "moss_fz")),
 }
 
 
@@ -9917,7 +9917,7 @@ def rollback_fizgig_engine(logf=print):
 
 
 def train_fizgig_lora(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
-    from kohya_core.fizgig_engine import use_runtime, VERSION, SUPPORTED_V7
+    from kohya_core.fizgig_engine import use_runtime, VERSION, SUPPORTED_STANDARD as SUPPORTED_V7
     from kohya_core.fizgig_adapter import train_lora
     params = dict(params or {})
     if mode == "krea2_fz" and "krea2_models" not in params:
@@ -9926,6 +9926,9 @@ def train_fizgig_lora(logf=print, mode="krea2_fz", params=None, vram_gb=None, re
     if mode == "h3_fz" and "h3_models" not in params:
         from kohya_core.h3_models import settings
         params["h3_models"] = settings(load_project(params.get("project")) if params.get("project") else None)
+    if mode == "moss_fz" and "moss_models" not in params:
+        from kohya_core.moss_models import settings
+        params["moss_models"] = settings(load_project(params.get("project")) if params.get("project") else None)
     if params.get("training_kind") == "slider":
         from kohya_core.slider_training import train as train_slider
         if resume_from: raise ValueError("滑块首版尚未开放续训，请从头训练。")
@@ -10038,7 +10041,7 @@ def is_concept_mode(mode, at_sub_mode=None):
     if mode == "concept":
         return True
     return mode in ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz",
-                    "qwen_image", "zimage", "zimage_fz") and (at_sub_mode or "") == "concept"
+                    "qwen_image", "zimage", "zimage_fz", "moss_fz") and (at_sub_mode or "") == "concept"
 
 
 # ==================== 小工具：训练前通用操作（主页 🧰 小工具模块） ====================
@@ -10269,7 +10272,7 @@ def gpu_status_text():
 # ---------- 配置导出 / 导入（可分享；不含本机路径与提示词，提示词可选） ----------
 _CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps", "video_frames", "batch_size", "sample_interval", "sample_seed")
 _CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
-_CFG_PARAM_BOOL_KEYS = ("pixai_character", "pixai_copyright", "pixai_style", "strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode", "h3_caption_replace", "h3_sync_trigger")
+_CFG_PARAM_BOOL_KEYS = ("pixai_character", "pixai_copyright", "pixai_style", "strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode", "h3_caption_replace", "h3_sync_trigger", "moss_preview_base")
 _CFG_PARAM_STR_KEYS = ("pixai_threshold", "fizgig_version", "optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma", "caption_method", "caption_language", "caption_length")
 _CFG_PROMPT_KEYS = ("trigger", "style_caption", "sample_prompt", "global_pos", "global_neg")
 _CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
@@ -12591,7 +12594,7 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
         return None
     pat = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
     candidates = []
-    for _d in (output_dir, os.path.join(output_dir, "snapshots"), os.path.join(output_dir, "snapshots", "fizgig-v7.0.1"), os.path.join(output_dir, "snapshots", "fizgig-v7.3.1")):
+    for _d in (output_dir, os.path.join(output_dir, "snapshots"), os.path.join(output_dir, "snapshots", "fizgig-v7.0.1"), os.path.join(output_dir, "snapshots", "fizgig-v7.3.1"), os.path.join(output_dir, "snapshots", "fizgig-v8.5.0")):
         if not os.path.isdir(_d):
             continue
         for f in os.listdir(_d):
@@ -12603,30 +12606,34 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
                 continue
             if state_missing(p, "fizgig"):
                 continue
+            completed = False
             if version:
                 try:
                     with open(os.path.join(p, "training_state.json"), encoding="utf-8") as stream:
                         state_meta = json.load(stream)
                     identity = state_meta.get("kohya_runtime") or {}
-                    if version in ("v7.0.1", "v7.3.1"):
+                    if version in ("v7.0.1", "v7.3.1", "v8.5.0"):
                         if identity.get("version") != version or (family and identity.get("family") != family):
                             continue
-                        if state_meta.get("kohya_complete") and (epochs is None or int(state_meta.get("epoch", 0)) >= int(epochs)):
-                            continue
-                    elif identity.get("version") in ("v7.0.1", "v7.3.1"):
+                        completed = bool(state_meta.get("kohya_complete")) and (epochs is None or int(state_meta.get("epoch", 0)) >= int(epochs))
+                    elif identity.get("version") in ("v7.0.1", "v7.3.1", "v8.5.0"):
                         continue
-                except (OSError, ValueError, AttributeError):
+                except (OSError, ValueError, TypeError, AttributeError):
                     continue
-            candidates.append((state_timestamp(p), int(m.group(1)), p))
+            candidates.append((state_timestamp(p), int(m.group(1)), p, completed))
     try:
         final = os.path.join(output_dir, output_name + ".safetensors")
-        if version not in ("v7.0.1", "v7.3.1") and os.path.isfile(final):
+        if version not in ("v7.0.1", "v7.3.1", "v8.5.0") and os.path.isfile(final):
             final_mtime = os.path.getmtime(final)
-            candidates = [(stamp, epoch, path) for stamp, epoch, path in candidates
+            candidates = [(stamp, epoch, path, completed) for stamp, epoch, path, completed in candidates
                           if stamp > final_mtime]
     except OSError:
         pass
-    return max(candidates)[2] if candidates else None
+    if not candidates:
+        return None
+    latest = max(candidates)
+    # A completed newer snapshot suppresses older unfinished saves from that run.
+    return None if latest[3] else latest[2]
 
 def resume_step_from(resume_from, steps_per_epoch=None):
     """Read actual saved counters before falling back to the snapshot name."""
@@ -16257,6 +16264,18 @@ def _ensure_anima_components(logf=print):
 
 
 from kohya_core.zimage_fizgig import LINKS as ZIMAGE_FZ_MODEL_LINKS
+
+
+# MOSS-Image component access for the modern desktop and external agent bridge.
+from kohya_core.moss_models import LINKS as MOSS_MODEL_LINKS
+
+def moss_models_dir():
+    from kohya_core.moss_models import models_dir
+    return models_dir(sys.modules[__name__])
+
+def moss_model_files(selection=None):
+    from kohya_core.moss_models import files
+    return files(sys.modules[__name__], selection)
 
 
 def zimage_fz_models_dir():

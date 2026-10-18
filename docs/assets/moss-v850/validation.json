@@ -1,0 +1,134 @@
+{
+  "date": "2026-10-18",
+  "gpu": "NVIDIA GeForce RTX 4070 Laptop GPU, 8188 MiB",
+  "fizgig": {
+    "version": "v8.5.0",
+    "commit": "75d54881e466c9b7f436e2e397437a8bdc38f2e1",
+    "published_at": "2026-10-18T00:41:38Z",
+    "archive_bytes": 20678733,
+    "archive_sha256": "71c9af3781c19e74ce8fe02bf04bc2561a13ea6cad8b43b3d5d0cdd1e1596ba5"
+  },
+  "training": {
+    "images": 3,
+    "resolution_setting": 512,
+    "actual_buckets": [
+      [
+        352,
+        496
+      ],
+      [
+        352,
+        512
+      ],
+      [
+        384,
+        512
+      ]
+    ],
+    "rank": 16,
+    "alpha": 16,
+    "learning_rate": 0.0001,
+    "optimizer": "adamw",
+    "ema_decay": 0.98,
+    "batch_size": 1,
+    "auto_precision": "nf4",
+    "auto_swap_blocks": 0,
+    "warm_step_seconds": [
+      1.47,
+      1.51
+    ],
+    "trainer_peak_vram_gb": 4.8,
+    "steps": 30
+  },
+  "sft_preview": {
+    "size": [
+      512,
+      512
+    ],
+    "steps": 30,
+    "cfg": 4,
+    "seed": 42,
+    "swap_blocks": 40,
+    "stage_seconds": 243.69,
+    "peak_total_gpu_used_mib": 7712,
+    "image": "fizgig-sft-preview.png",
+    "patches": "LoRALinear canonical names; mismatched dtype blocks moved without storage sharing"
+  },
+  "app_adapter": {
+    "status": "passed",
+    "first_step": 6,
+    "resumed_step": 9,
+    "resume_step": 6,
+    "completed_run_no_older_fallback": true
+  },
+  "comfy": {
+    "status": "passed",
+    "base_precision": "fp8_e4m3fn",
+    "conditioning": "Fizgig cached Qwen3.5-9B; the ComfyUI Qwen loader is not exercised",
+    "comfy_native_commit": "e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d",
+    "plugin_modification": "none",
+    "sampling": "native MOSS shift=5, timestep multiplier=1; no ModelSamplingSD3 override",
+    "prompt_id": "d31049d1-d1e7-4140-82c4-7026a9f1cfd8",
+    "seconds": 84.69,
+    "images": [
+      {
+        "path": "comfy-base.png",
+        "sha256": "1e96ea083ede41bae1d253c2518c094f0fed54d28e516df85ebde1680bdf6ea6"
+      },
+      {
+        "path": "comfy-lora.png",
+        "sha256": "7a0616d4e2e66b87d6d352eb976c4b8494926b5d279a48013c830b9bb3101b30"
+      }
+    ],
+    "same_pixels": false,
+    "size": [
+      512,
+      512
+    ],
+    "visual_check": "passed: both images form a coherent full-color anime portrait; no noise/decode failure",
+    "quality_scope": "3-image short-run compatibility smoke check; not a character/style quality acceptance"
+  },
+  "automated_checks": {
+    "moss_cpu_integration_passed": 27,
+    "moss_gpu_offload_passed": 1,
+    "preview_prompt_passed": 4,
+    "download_integrity_passed": 6,
+    "frontend_bridge_passed": 36,
+    "frontend_build": "passed",
+    "python_compile": "passed",
+    "diff_check": "passed",
+    "existing_modern_training_suite": "not green; HEAD control reproduces 18 errors and 6 failures; current 18 errors and 5 failures"
+  },
+  "boundaries": [
+    "AMD not tested",
+    "full training quality not accepted",
+    "1024 not retested on v8.5.0",
+    "Comfy uses existing Fizgig conditioning cache; native Qwen loader not tested",
+    "functional GPU checks used source adapter; clean install not exercised"
+  ],
+  "runtime_checks": {
+    "source_version": "v8.5.0",
+    "cli_ready": true,
+    "pinned_dependencies_match": true
+  },
+  "new_model_downloads": [
+    {
+      "repo": "Comfy-Org/MOSS-Image",
+      "folder": "comfy",
+      "path": "diffusion_models/moss_image_sft_int8_convrot.safetensors",
+      "size": 5413698958,
+      "sha256": "b4d1475bc7eeffd7b809e82ea13a1fba1fb85c4e18365af3813722faa5c0fe4f",
+      "revision": "05cf96d24fa7b4755289b923ac5729b16cc0d9ba"
+    },
+    {
+      "repo": "Comfy-Org/MOSS-Image",
+      "folder": "comfy",
+      "path": "vae/flux2-vae_small.safetensors",
+      "size": 249521340,
+      "sha256": "d8d52ba036475f5fb07c8b435e176d3d97ebfa82f0d1a1c317f9cc1e25bd013b",
+      "revision": "f28da8f93449c16cfa7efa07dcd1303a1c0c44d1",
+      "url": "https://hf-mirror.com/Comfy-Org/MOSS-Image/resolve/f28da8f93449c16cfa7efa07dcd1303a1c0c44d1/vae/flux2-vae_small.safetensors"
+    }
+  ],
+  "release": "v0.19.13"
+}

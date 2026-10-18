@@ -213,4 +213,10 @@ def prepare(core, params, log=print, report_path=None):
         raise
     finally:
         if report_path:
-            _atomic_bytes(Path(report_path), json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+            try:
+                _atomic_bytes(Path(report_path), json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+            except OSError as exc:
+                # The report is supplementary; a Windows rename/replace denial
+                # must not discard a successfully prepared dataset or mask the
+                # original preparation error.
+                log("[H3 数据准备] 报告保存失败（不影响数据准备结果）：%s" % exc)

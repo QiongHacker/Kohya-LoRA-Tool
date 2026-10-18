@@ -102,9 +102,10 @@ class ModelDownloader(threading.Thread):
     done_cb(ok, dest)：结束回调（成功或失败/取消都会调用）。
     """
 
-    def __init__(self, url, dest, progress_cb=None, done_cb=None, logf=print, expected_size=None, expected_sha256=None):
+    def __init__(self, url, dest, progress_cb=None, done_cb=None, logf=print, expected_size=None, expected_sha256=None, fallback_urls=()):
         super().__init__(daemon=True)
         self.url = url
+        self.urls = tuple(dict.fromkeys([url, *fallback_urls]))
         self.dest = dest
         self.part = dest + ".part"
         self.metadata = self.part + ".json"
@@ -125,7 +126,17 @@ class ModelDownloader(threading.Thread):
 
     def run(self):
         try:
-            self._download()
+            for index, source_url in enumerate(self.urls):
+                if self._cancel.is_set():
+                    raise DownloadError("下载已取消")
+                self.url = source_url
+                try:
+                    self._download()
+                    break
+                except Exception:
+                    if self._cancel.is_set() or index + 1 == len(self.urls):
+                        raise
+                    self._log("[下载] 当前源不可用，尝试下一个下载源…")
             if self.done_cb:
                 self.done_cb(True, self.dest)
         except Exception as e:

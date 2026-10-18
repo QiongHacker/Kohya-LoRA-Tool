@@ -164,5 +164,24 @@
         "sha256": "e80af1e64a71883a9d10c3159d2e493e5934508da57852f6a180ae6ae63b14bd"
       }
     }
+  },
+  "moss_image": {
+    "repo": "OpenMOSS-Team/MOSS-Image-Base",
+    "modelscope_repo": "OpenMOSS/MOSS-Image-Base",
+    "commit": "1ceede80badddd6a7812069619edaa5633587192",
+    "files": {
+      "tokenizer/chat_template.jinja": {
+        "bytes": 7756,
+        "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+      },
+      "tokenizer/tokenizer.json": {
+        "bytes": 19989325,
+        "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+      },
+      "tokenizer/tokenizer_config.json": {
+        "bytes": 1123,
+        "sha256": "bee8eba30f0eb4af73c0fe2cd06d0f89b657d7819941c438157ec42f7c80ea87"
+      }
+    }
   }
 }

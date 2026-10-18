@@ -88,6 +88,7 @@ a = Analysis(
         'kohya_core.fizgig_engine', 'kohya_core.fizgig_adapter', 'kohya_core.model_catalog',
         'kohya_core.training_resume',
         'kohya_core.h3_models', 'kohya_core.h3_dataset', 'kohya_core.multi_character',
+        'kohya_core.moss_models',
         'gui.queue_window',
         'gui.modern_host', 'gui.lora_workbench_bridge',
         'kohya_core.qwen21_diffusers_compat',

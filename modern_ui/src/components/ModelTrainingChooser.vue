@@ -12,7 +12,7 @@ const model = computed(() => props.catalog.models.find(m => m.key === modelKey.v
 const variant = computed(() => model.value?.variants.find(v => v.key === variantKey.value) || model.value?.variants[0])
 const engine = computed(() => variant.value?.engines.find(e => e.key === engineKey.value))
 function available(e: { vendors: string[]; supported?: boolean; mode?: string }) {
-  if (goal.value === 'multi_character' && ['video', 'h3_fz'].includes(e.mode || '')) return false
+  if (goal.value === 'multi_character' && ['video', 'h3_fz', 'moss_fz'].includes(e.mode || '')) return false
   if (goal.value === 'slider' && !['sdxl_fz', 'anima_fz'].includes(e.mode || '')) return false
   return e.supported ?? (props.catalog.gpu_vendor === 'unknown' || e.vendors.includes(props.catalog.gpu_vendor))
 }
@@ -47,7 +47,7 @@ watch([modelKey, variantKey, engineKey, goal], () => {
       <p>{{ goal === 'multi_character' ? '独立角色触发词、同框素材与组合验证；训练参数沿用当前模型。' : goal === 'slider' ? '通过文字或图片对训练可调节属性的 LoRA。实验性功能。' : engine.reason }}</p>
       <span v-if="engine.experimental" class="experimental">实验性入口 · 需观察实际训练效果</span>
     </div>
-    <p v-else class="unavailable" role="status">{{ goal === 'slider' ? '支持 SDXL 与标准 28 层 Anima；Anima 2.9B / 40 层暂不支持滑块训练。' : goal === 'multi_character' ? '多角色模式仅用于图像人物 LoRA，请选择已接入当前显卡的图像训练入口。' : '这个模型版本尚未接入当前显卡的训练路径，请选择其他版本。' }}</p>
+    <p v-else class="unavailable" role="status">{{ goal === 'slider' ? '支持 SDXL 与标准 28 层 Anima；Anima 2.9B / 40 层暂不支持滑块训练。' : goal === 'multi_character' ? '当前模型尚未接入多角色模式，请选择其他图像训练入口。' : '这个模型版本尚未接入当前显卡的训练路径，请选择其他版本。' }}</p>
     <button v-if="variant && variant.engines.length > 1" class="compare" type="button" :aria-expanded="expanded" @click="expanded=!expanded">{{ expanded ? '收起引擎选择' : '查看其他引擎 / 手动选择' }}</button>
     <div v-if="expanded && variant" class="engine-options">
       <label v-for="e in variant.engines" :key="e.key" :class="{selected:engineKey===e.key, unavailable:!available(e)}"><input v-model="engineKey" type="radio" name="create-engine" :value="e.key" :disabled="!available(e)" /><div><strong>{{ e.label }}</strong><small>{{ e.reason }} {{ !available(e) ? goal === 'slider' && !['sdxl_fz', 'anima_fz'].includes(e.mode) ? '当前引擎未接入滑块训练。' : '当前显卡路径未接入。' : '' }}</small></div></label>

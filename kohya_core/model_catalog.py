@@ -20,6 +20,8 @@ def catalog(core):
                 engine['supported'] = vendor == 'unknown' or vendor in engine['vendors']
                 engine['recommended'] = bool(chosen and engine['key'] == chosen['key'])
                 engine['installed'] = bool(status.get(keys[engine['key']])) and (engine['key'] != 'fizgig' or fz.get('new_families_supported', False))
+                if engine.get('min_version'):
+                    engine['installed'] = engine['min_version'] in fz.get('versions', [])
                 engine['status'] = ('显卡路径未接入' if not engine['supported'] else '已安装' if engine['installed'] else '需安装 / 更新')
     return {'models': rows, 'gpu_vendor': vendor, 'gpu': status.get('gpu') or '未识别显卡'}
 

@@ -15,7 +15,7 @@ function handler(mode = 'krea2_fz', response = { ok: true }) {
   const calls = []
   const invoke = name => async (...args) => { calls.push([name, ...args]); return response }
   const context = {
-    window: { pywebview: { api: { select_krea2_component: invoke('krea2'), select_h3_component: invoke('h3') } } },
+    window: { pywebview: { api: { select_krea2_component: invoke('krea2'), select_h3_component: invoke('h3'), select_zimage_fz_component: invoke('zimage'), select_moss_component: invoke('moss') } } },
     props: { mode, projectName: 'demo' }, busy: { value: false }, selecting: { value: false }, error: { value: '' },
     loadList: async () => { calls.push(['reload']) }, emit: (...args) => calls.push(['emit', ...args]),
   }
@@ -55,4 +55,24 @@ test('an active task prevents opening the component picker', async () => {
   context.busy.value = true
   await context.invoke({ key: 'raw' })
   assert.equal(calls.length, 0)
+})
+
+
+test('MOSS and Z-Image route local component actions to their own APIs', async () => {
+  for (const [mode, api] of [['moss_fz', 'moss'], ['zimage_fz', 'zimage']]) {
+    for (const action of ['select', 'default']) {
+      const { context, calls } = handler(mode)
+      await context.invoke({ key: 'dit' }, action)
+      assert.deepEqual(calls[0], [api, 'demo', 'dit', action])
+      assert.ok(calls.some(call => call[0] === 'reload'))
+    }
+  }
+})
+
+test('MOSS cancelled picker preserves the current selection', async () => {
+  const { context, calls } = handler('moss_fz', { ok: true, cancelled: true })
+  await context.invoke({ key: 'te' })
+  assert.equal(calls.length, 1)
+  assert.equal(context.selecting.value, false)
+  assert.equal(context.error.value, '')
 })

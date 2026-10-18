@@ -309,6 +309,7 @@ export interface DesktopApi {
   cancel_task(task_id: string): Promise<{ ok: boolean; error?: string }>
   select_krea2_encoder(project_name: string, choice: Krea2EncoderChoice): Promise<{ ok: boolean; message?: string; error?: string }>
   select_krea2_component(project_name: string, key: string, action?: "select" | "default" | "disable"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
+  select_moss_component(project_name: string, key: string, action?: "select" | "default"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
   select_zimage_fz_component(project_name: string, key: string, action?: "select" | "default"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
   select_h3_component(project_name: string, key: string, action?: "select" | "default" | "disable"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
   get_model_downloads(mode: string, project_name?: string): Promise<ModelDownloadList>
@@ -508,6 +509,7 @@ export interface ModeWorkspaceData {
   fizgig_engine_detail?: string
   fizgig_versions?: string[]
   fizgig_standard_versions?: string[]
+  moss_components?: ModelDownloadList | null
   zimage_components?: ModelDownloadList | null
   fizgig_target_version?: string
   model_choice?: ModelChoice
@@ -541,6 +543,7 @@ declare global {
 }
 
 const demoTemplates: ProjectTemplate[] = [
+  { name: 'MOSS-Image LoRA（Fizgig）', mode: 'moss_fz', mode_label: 'MOSS-Image LoRA', base_type: 'sdxl', note: 'Base 训练，SFT 预览；Fizgig v8.5.0。' },
   { name: '自定义', mode: 'character', mode_label: '人物 LoRA', base_type: 'sdxl', note: '从人物 + SDXL 起步，进入训练页后可切换训练模式、底模和参数。' },
   { name: 'SD1.5', mode: 'character', mode_label: '人物 LoRA', base_type: 'sd15', note: '使用 SD1.5 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。' },
   { name: 'SDXL', mode: 'character', mode_label: '人物 LoRA', base_type: 'sdxl', note: '使用 SDXL 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。' },

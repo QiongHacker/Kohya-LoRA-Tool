@@ -19,6 +19,11 @@ import zipfile
 VERSION = "v7.3.1"
 LEGACY_V7 = "v7.0.1"
 SUPPORTED_V7 = (LEGACY_V7, VERSION)
+MOSS_VERSION = "v8.5.0"
+SUPPORTED_STANDARD = (*SUPPORTED_V7, MOSS_VERSION)
+MOSS_COMMIT = "75d54881e466c9b7f436e2e397437a8bdc38f2e1"
+MOSS_ARCHIVE_SHA256 = "71c9af3781c19e74ce8fe02bf04bc2561a13ea6cad8b43b3d5d0cdd1e1596ba5"
+MOSS_ARCHIVE_BYTES = 20678733
 OLD_COMMIT = "1c8ec88edc1a4f99f73585aeae00fec740b12ea6"
 COMMIT = "7ee4986dae28fe35cc4ef636b984729624b32b42"
 ARCHIVE_SHA256 = "ed0dfe599006492d5dfb04ddbc66aae0a4237b257d05eab0424aa4280de1b3bc"
@@ -39,8 +44,24 @@ OLD_REQUIRED = REQUIRED
 REQUIRED = (*OLD_REQUIRED, "src/fizgig/families/zimage.py", "src/fizgig/zimage/driver.py",
             "src/fizgig/zimage/model.py", "src/fizgig/zimage/pipeline.py")
 
+MOSS_REQUIRED = ("requirements.txt", "src/fizgig/families/train.py", "src/fizgig/families/cache.py",
+                 "src/fizgig/families/registry.py", "src/fizgig/families/moss_image.py",
+                 "src/fizgig/moss_image/driver.py", "src/fizgig/moss_image/model.py",
+                 "src/fizgig/moss_image/embedder.py", "src/fizgig/moss_image/sampling.py",
+                 "src/fizgig/utils/hf_cache.py", "src/fizgig/modules/offloading.py")
+
+
+def target_version(mode):
+    return MOSS_VERSION if mode == "moss_fz" else VERSION
+
+
+def required_files(version):
+    return MOSS_REQUIRED if version == MOSS_VERSION else OLD_REQUIRED if version == LEGACY_V7 else REQUIRED
+
+
 def source_commit(version):
-    return OLD_COMMIT if version == LEGACY_V7 else COMMIT
+    return MOSS_COMMIT if version == MOSS_VERSION else OLD_COMMIT if version == LEGACY_V7 else COMMIT
+
 
 _CONTEXT = contextvars.ContextVar("kohya_fizgig_runtime", default=None)
 
@@ -73,10 +94,10 @@ def source_version(source):
     source = Path(source)
     record = _read(source / ".kohya-fizgig-source.json")
     version = record.get("version")
-    if version in SUPPORTED_V7 and record.get("commit") == source_commit(version) and record.get("adapter") == (2 if version == LEGACY_V7 else 3):
+    if version in SUPPORTED_STANDARD and record.get("commit") == source_commit(version) and record.get("adapter") == (4 if version == MOSS_VERSION else 2 if version == LEGACY_V7 else 3):
         hashes = record.get("files") or {}
         try:
-            if all((source / name).is_file() and hashes.get(name) == _sha(source / name) for name in (OLD_REQUIRED if version == LEGACY_V7 else REQUIRED)):
+            if all((source / name).is_file() and hashes.get(name) == _sha(source / name) for name in required_files(version)):
                 return version
         except OSError:
             return ""
@@ -106,7 +127,7 @@ def runtime(core, version=None):
               "python": str(root / "fizgig_venv/Scripts/python.exe")}
     if version in (None, "v6.5.0", "legacy"):
         return legacy
-    if version in SUPPORTED_V7:
+    if version in SUPPORTED_STANDARD:
         return {"version": version, "source": str(root / "fizgig_versions" / version / "source"),
                 "python": str(root / "fizgig_versions" / version / ("venv-rocm" if core.detect_gpu_vendor() == "amd" else "venv-cuda") / "Scripts/python.exe")}
     raise ValueError("未安装或不支持的 Fizgig 版本：%s" % version)
@@ -126,11 +147,11 @@ def use_runtime(core, params):
 def update_status(core):
     record = runtime(core)
     installed = Path(record["python"]).is_file() and bool(source_version(record["source"]))
-    current = installed and source_version(record["source"]) == VERSION
-    candidates = dict.fromkeys([*(_registry(core).get("installs") or {}), "v6.5.0", *SUPPORTED_V7])
+    current = installed and source_version(record["source"]) in (VERSION, MOSS_VERSION)
+    candidates = dict.fromkeys([*(_registry(core).get("installs") or {}), "v6.5.0", *SUPPORTED_STANDARD])
     versions = []
     for version in candidates:
-        if version not in ("v6.5.0", *SUPPORTED_V7):
+        if version not in ("v6.5.0", *SUPPORTED_STANDARD):
             continue
         candidate = runtime(core, version)
         if Path(candidate["python"]).is_file() and source_version(candidate["source"]) == version:
@@ -138,20 +159,28 @@ def update_status(core):
     return {"installed": installed, "update_available": installed and not current,
             "target_version": VERSION, "current_version": record.get("version") or "待识别",
             "engine_dir": record["source"], "h3_supported": installed, "qwen_image_2_supported": installed,
-            "new_families_supported": current, "versions": versions, "standard_versions": list(SUPPORTED_V7)}
+            "new_families_supported": current, "versions": versions, "standard_versions": list(SUPPORTED_STANDARD)}
 
 
-def download(core, logf):
-    path = Path(core._engine_source_cache_dir()) / ("fizgig-%s.zip" % VERSION)
+def download(core, logf, version=VERSION):
+    if version not in (VERSION, MOSS_VERSION):
+        raise ValueError("此版本没有自动安装通道：" + version)
+    size, digest = (MOSS_ARCHIVE_BYTES, MOSS_ARCHIVE_SHA256) if version == MOSS_VERSION else (ARCHIVE_BYTES, ARCHIVE_SHA256)
+    sources = SOURCES if version == VERSION else (
+        ("魔搭国内镜像", MIRROR + "fizgig-" + version + ".zip", True),
+        ("GitHub 加速镜像", "https://ghfast.top/https://github.com/shootthesound/Fizgig/archive/" + source_commit(version) + ".zip", False),
+        ("GitHub 官方源", "https://codeload.github.com/shootthesound/Fizgig/zip/" + source_commit(version), False),
+    )
+    path = Path(core._engine_source_cache_dir()) / ("fizgig-%s.zip" % version)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file() and path.stat().st_size == ARCHIVE_BYTES and _sha(path) == ARCHIVE_SHA256:
-        logf("[Fizgig] 复用已校验源码缓存：%s" % VERSION)
+    if path.is_file() and path.stat().st_size == size and _sha(path) == digest:
+        logf("[Fizgig] 复用已校验源码缓存：%s" % version)
         return path
-    for label, url, direct in SOURCES:
+    for label, url, direct in sources:
         core.check_stop()
-        logf("[Fizgig] 下载 %s（%.1f MB），来源：%s" % (VERSION, ARCHIVE_BYTES / 1048576, label))
+        logf("[Fizgig] 下载 %s（%.1f MB），来源：%s" % (version, size / 1048576, label))
         if core._download_with_resume(url, str(path), logf, direct=direct, quick_fail=True):
-            if path.stat().st_size == ARCHIVE_BYTES and _sha(path) == ARCHIVE_SHA256:
+            if path.stat().st_size == size and _sha(path) == digest:
                 return path
             logf("[Fizgig] 源码校验不匹配，已隔离该文件并切换来源。")
             path.rename(path.with_name(path.name + ".invalid.%s" % time.time_ns()))
@@ -163,7 +192,7 @@ def download(core, logf):
     raise RuntimeError("Fizgig 国内镜像及备用源码均下载失败；原引擎仍保留，可稍后重试。")
 
 
-def _deploy(core, archive, source):
+def _deploy(core, archive, source, version=VERSION):
     source.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as z:
         if z.testzip() is not None:
@@ -178,16 +207,18 @@ def _deploy(core, archive, source):
                 raise RuntimeError("Fizgig 归档包含越界路径。")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(z.read(entry))
-    if not all((source / name).is_file() for name in REQUIRED):
+    if not all((source / name).is_file() for name in required_files(version)):
         raise RuntimeError("Fizgig 源码缺少新版模型家族入口。")
-    _patch_helpers(source)
-    _write(source / ".kohya-fizgig-source.json", {"version": VERSION, "commit": COMMIT,
-            "archive_sha256": ARCHIVE_SHA256, "adapter": 3,
-            "files": {name: _sha(source / name) for name in REQUIRED}})
+    _patch_helpers(source, version)
+    _write(source / ".kohya-fizgig-source.json", {"version": version, "commit": source_commit(version),
+            "archive_sha256": MOSS_ARCHIVE_SHA256 if version == MOSS_VERSION else ARCHIVE_SHA256, "adapter": 4 if version == MOSS_VERSION else 3,
+            "files": {name: _sha(source / name) for name in required_files(version)}})
 
 
-def _patch_helpers(source):
+def _patch_helpers(source, version=VERSION):
     """Use prepared local configs; patches are pinned, narrow, and fail closed."""
+    if version == MOSS_VERSION:
+        return _patch_moss_source(source)
     patches = {
         "src/fizgig/anima/driver.py": [
             ('AutoTokenizer.from_pretrained(HELPER, subfolder="tokenizer")',
@@ -256,10 +287,81 @@ def _patch_helpers(source):
     path.write_text(text, encoding="utf-8")
 
 
+
+def _patch_moss_offloading(source):
+    # MOSS omits LoRA on block 22. Match the resident base Linears by their
+    # logical name even when only one side has a LoRALinear wrapper.
+    path = source / "src/fizgig/modules/offloading.py"
+    text = path.read_text(encoding="utf-8")
+    before = "            modules_to_cpu = {k: v for k, v in layer_to_cpu.named_modules()}\n            for module_to_cuda_name, module_to_cuda in layer_to_cuda.named_modules():"
+    after = "            modules_to_cpu = dict(_kohya_swap_linears(layer_to_cpu))\n            for module_to_cuda_name, module_to_cuda in _kohya_swap_linears(layer_to_cuda):"
+    if text.count(before) != 1:
+        raise RuntimeError("Fizgig MOSS 预览块交换接口变化。")
+    helper = '''def _kohya_swap_linears(layer):
+    modules = dict(layer.named_modules())
+    for name, module in modules.items():
+        if not module.__class__.__name__.endswith("Linear") or not hasattr(module, "weight") or module.weight is None:
+            continue
+        parent, separator, child = name.rpartition(".")
+        if child == "base" and separator and modules[parent].__class__.__name__ == "LoRALinear":
+            name = parent
+        yield name, module
+
+
+'''
+    # Block 22 remains BF16 while its neighbours can be INT8. Reusing their
+    # storage would silently change Parameter.dtype and corrupt both blocks.
+    guard = """        cpu_linears = dict(_kohya_swap_linears(layer_to_cpu))
+        gpu_linears = dict(_kohya_swap_linears(layer_to_cuda))
+        if cpu_linears.keys() != gpu_linears.keys() or any(
+            cpu_linears[name].weight.shape != module.weight.shape
+            or cpu_linears[name].weight.dtype != module.weight.dtype
+            for name, module in gpu_linears.items()
+        ):
+            torch.cuda.current_stream().synchronize()
+            weighs_to_device(layer_to_cpu, torch.device("cpu"))
+            weighs_to_device(layer_to_cuda, device)
+            torch.cuda.current_stream().synchronize()
+            return None
+
+"""
+    anchor = "        debug_print = False\n"
+    if text.count(anchor) != 1:
+        raise RuntimeError("Fizgig MOSS 预览交换入口变化。")
+    text = text.replace("class Offloader:", helper + "class Offloader:").replace(before, after)
+    text = text.replace(anchor, guard + anchor)
+    path.write_text(text, encoding="utf-8")
+
+
+def _patch_moss_source(source):
+    _patch_moss_offloading(source)
+    path = source / "src/fizgig/utils/hf_cache.py"
+    text = path.read_text(encoding="utf-8")
+    anchor = "    local = cached_snapshot_dir(repo_id)"
+    if text.count(anchor) != 1:
+        raise RuntimeError("Fizgig MOSS 本地分词器接口变化。")
+    text = text.replace(anchor, "    import json\n    paths = json.loads(os.environ.get('FIZGIG_LOCAL_HELPERS', '{}'))\n    if repo_id in paths:\n        return cls.from_pretrained(paths[repo_id], local_files_only=True, **kwargs)\n" + anchor)
+    path.write_text(text, encoding="utf-8")
+    path = source / "src/fizgig/families/train.py"
+    text = path.read_text(encoding="utf-8")
+    changes = [
+        ('"architecture": arch_id, **(extra or {})', '"architecture": arch_id, **(extra or {}), "kohya_runtime": json.loads(os.environ.get("FIZGIG_KOHYA_RUNTIME", "{}")), "kohya_complete": epoch >= int(os.environ.get("FIZGIG_KOHYA_TARGET_EPOCHS", "2147483647"))'),
+        ('state_dir = os.path.join(output_dir, f"{output_name}-{epoch:06d}-state")', 'state_dir = os.path.join(output_dir, "snapshots", "fizgig-v8.5.0", f"{output_name}-{epoch:06d}-state")'),
+        ('prune_state_dirs(output_dir, output_name, keep_last_n_states)', 'prune_state_dirs(os.path.join(output_dir, "snapshots", "fizgig-v8.5.0"), output_name, keep_last_n_states)'),
+    ]
+    for before, after in changes:
+        if text.count(before) != 1:
+            raise RuntimeError("Fizgig MOSS 续训接口变化，已停止部署。")
+        text = text.replace(before, after)
+    path.write_text(text, encoding="utf-8")
+
+
 def _env(core, record):
-    if record.get("backend") == "amd-rocm":
-        return core._fizgig_rocm_env(record["source"], record["python"])
-    return core.build_direct_env()
+    env = (core._fizgig_rocm_env(record["source"], record["python"]) if record.get("backend") == "amd-rocm"
+           else core.build_direct_env())
+    if record.get("version") == MOSS_VERSION:
+        env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    return env
 
 
 def _dependencies_match(record, env):
@@ -300,9 +402,9 @@ def cli_ready(core, record):
 
 def ensure_selected_runtime(core, version, logf=print):
     """Prepare the selected runtime; an existing legacy choice never upgrades."""
-    if version == VERSION:
-        return install(core, logf)
-    if version not in ("v6.5.0", *SUPPORTED_V7):
+    if version in (VERSION, MOSS_VERSION):
+        return install(core, logf, version=version)
+    if version not in ("v6.5.0", *SUPPORTED_STANDARD):
         raise ValueError("未接入这个 Fizgig 版本：%s" % version)
     record = runtime(core, version)
     if not Path(record["python"]).is_file() or source_version(record["source"]) != version:
@@ -315,7 +417,9 @@ def ensure_selected_runtime(core, version, logf=print):
     return record["python"]
 
 
-def install(core, logf=print):
+def install(core, logf=print, version=VERSION):
+    if version not in (VERSION, MOSS_VERSION):
+        raise ValueError("没有此版本的安装通道：" + version)
     root = Path(core.get_kohya_dir())
     root.mkdir(parents=True, exist_ok=True)
     lock = core._acquire_kohya_install_lock(str(root), logf)
@@ -324,21 +428,21 @@ def install(core, logf=print):
     try:
         registry = _registry(core)
         previous = runtime(core)
-        if previous.get("version") == VERSION and source_version(previous["source"]) == VERSION and Path(previous["python"]).is_file() and core._python312_64bit(previous["python"]) and _dependencies_match(previous, _env(core, previous)):
+        if previous.get("version") == version and source_version(previous["source"]) == version and Path(previous["python"]).is_file() and core._python312_64bit(previous["python"]) and _dependencies_match(previous, _env(core, previous)):
             core.check_stop()
             core._fizgig_verify(previous["python"], previous["source"], logf, backend=previous.get("backend", "nvidia"))
             core.check_stop()
-            logf("[Fizgig] 已安装 %s，环境检查通过；无需重复下载。" % VERSION)
+            logf("[Fizgig] 已安装 %s，环境检查通过；无需重复下载。" % version)
             return previous["python"]
         vendor = core.detect_gpu_vendor()
         if vendor not in ("amd", "nvidia"):
             raise RuntimeError("Fizgig 当前接入支持 NVIDIA CUDA / AMD ROCm；未识别到支持的显卡，请检查驱动。")
         backend = "amd-rocm" if vendor == "amd" else "nvidia"
-        folder = root / "fizgig_versions" / VERSION
+        folder = root / "fizgig_versions" / version
         source = folder / "source"
-        if source_version(source) != VERSION:
-            _deploy(core, download(core, logf), source)
-        record = {"version": VERSION, "source": str(source), "backend": backend}
+        if source_version(source) != version:
+            _deploy(core, download(core, logf, version), source, version)
+        record = {"version": version, "source": str(source), "backend": backend}
         candidate = dict(previous, backend=backend)
         if Path(candidate["python"]).is_file() and core._python312_64bit(candidate["python"]) and _dependencies_match(candidate, _env(core, candidate)):
             record["python"] = candidate["python"]
@@ -393,11 +497,11 @@ def install(core, logf=print):
         installs = dict(registry.get("installs") or {})
         if previous.get("version") and Path(previous["python"]).is_file():
             installs.setdefault(previous["version"], previous)
-        installs[VERSION] = record
-        _write(root / "fizgig_installs.json", {"schema": 1, "active": VERSION,
-               "previous": (previous.get("version") if previous.get("version") != VERSION else registry.get("previous")), "installs": installs})
+        installs[version] = record
+        _write(root / "fizgig_installs.json", {"schema": 1, "active": version,
+               "previous": (previous.get("version") if previous.get("version") != version else registry.get("previous")), "installs": installs})
         core.clear_status_cache()
-        logf("[Fizgig] %s 已就绪。模型与项目不移动；旧项目可继续使用原引擎版本。" % VERSION)
+        logf("[Fizgig] %s 已就绪。模型与项目不移动；旧项目可继续使用原引擎版本。" % version)
         return record["python"]
     finally:
         core._release_kohya_install_lock(lock)
