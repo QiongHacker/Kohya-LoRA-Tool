@@ -312,7 +312,7 @@ class LoRAWorkbenchBridge:
                         references.append(str(path))
                     selection["profile"] = {"class_prompt": plain, "references": references}
             # Reserve the task before the save dialog, so a second click cannot race it.
-            title = {"inspect": "读取 LoRA", "analyze": "分析 LoRA 权重", "profile": "Profiler 快速分组分析", "explore": "LoRA 变体探索", "preview": "LoRA 原版 / 调整版对照", "export": "另存分层调整版", "compress": "压缩 LoRA"}[action]
+            title = {"inspect": "读取 LoRA", "analyze": "分析 LoRA 权重", "profile": "LoRA 分组对照", "explore": "LoRA 变体探索", "preview": "LoRA 原版 / 调整版对照", "export": "另存分层调整版", "compress": "压缩 LoRA"}[action]
             task_id = self._begin_task(title, "lora_workbench")
             if not task_id: return {"ok": False, "error": "已有任务正在运行，请先完成或停止。"}
             self.core.reset_stop()
@@ -405,7 +405,7 @@ class LoRAWorkbenchBridge:
                     if isinstance(saved, dict) and saved.get("source") == options["source"] and saved.get("family") == options["family"]:
                         _write(self._workbench_settings(), dict(saved, last_explore_task=task_id))
             elif action == "profile":
-                message = "Profiler 分析完成，可查看分组对照与调整建议。"
+                message = "分组对照已完成，可查看图片与调整建议。"
                 with self._task_lock:
                     saved = json.loads(self._workbench_settings().read_text(encoding="utf-8"))
                     if isinstance(saved, dict) and saved.get("source") == options["source"] and saved.get("family") == options["family"]:

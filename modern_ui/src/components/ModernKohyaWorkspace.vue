@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OutputDirectoryControl from './OutputDirectoryControl.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
@@ -429,6 +430,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
           </div>
         </div>
 
+        <OutputDirectoryControl :project-name="project.name" :config="config" :desktop="desktop" @action="requestAction" />
         <div class="utility-row">
           <button v-for="action in [{ label: '数据预处理', key: 'preprocess', tip: legacyTooltips.preprocess }, { label: '标签编辑器', key: 'label_editor', tip: legacyTooltips.labelEditor }, { label: '打开输出目录', key: 'output_dir', tip: legacyTooltips.openOutput }, { label: '训练记录', key: 'training_history', tip: '查看每次的配置、结果和 Loss 曲线' }, { label: '导出配置', key: 'export_config', tip: '' }, { label: '使用说明', key: 'readme', tip: legacyTooltips.readme }]" :key="action.key" class="utility-button" type="button" :title="action.tip || undefined" @click="desktop ? requestAction(action.key) : previewOnly(action.label)">{{ action.label }}</button>
           <button v-if="draft.base_type === 'anima'" class="utility-button" type="button" :title="legacyTooltips.animaComponents" @click="requestAction('anima_components')">Anima 配套组件</button>

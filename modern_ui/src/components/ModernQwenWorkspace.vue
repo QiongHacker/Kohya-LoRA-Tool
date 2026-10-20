@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OutputDirectoryControl from './OutputDirectoryControl.vue'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig, QwenModelChoice, QwenModelSaveResult, QwenModelSelection, QwenModelSetup } from '../bridge'
 import UiIcon from './UiIcon.vue'
@@ -530,6 +531,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             </Transition>
           </section>
 
+          <OutputDirectoryControl :project-name="project.name" :config="config" :desktop="desktop" @action="requestAction" />
           <div class="qwen-utility-row" aria-label="训练工具">
             <button class="utility-button" type="button" :title="legacyTooltips.preprocess" @click="requestAction('preprocess')">数据预处理（含自动打标）</button>
             <button class="utility-button" type="button" :title="legacyTooltips.labelEditor" @click="requestAction('label_editor')">标签编辑器</button>

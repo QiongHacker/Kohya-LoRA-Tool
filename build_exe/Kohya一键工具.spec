@@ -45,6 +45,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "lora_workbench_worker.py"), "kohya_core"),
+        (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "anima_layer_guide.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), '..', 'training_backends', 'sliders'), 'training_backends/sliders'),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "model_catalog.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "fizgig_helpers.json"), "kohya_core"),
@@ -88,7 +89,7 @@ a = Analysis(
         'kohya_core.fizgig_engine', 'kohya_core.fizgig_adapter', 'kohya_core.model_catalog',
         'kohya_core.training_resume',
         'kohya_core.h3_models', 'kohya_core.h3_dataset', 'kohya_core.multi_character',
-        'kohya_core.moss_models',
+        'kohya_core.moss_models', 'kohya_core.moss_multi_character',
         'gui.queue_window',
         'gui.modern_host', 'gui.lora_workbench_bridge',
         'kohya_core.qwen21_diffusers_compat',

@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "grouping": "anima_community_v1",
+  "source": {
+    "author": "Crody",
+    "title": "Anima 模型合并笔记",
+    "url": "https://note.com/crody/n/n691b389d46d0",
+    "checkedAt": "2026-10-18"
+  },
+  "modulationSource": {
+    "title": "sorryhyun · Modulation Guidance",
+    "url": "https://github.com/sorryhyun/anima_lora/blob/main/docs/inference/mod-guidance.md"
+  },
+  "layers": [
+    "局部稳定、轮廓与细节",
+    "手指、细线与小配饰",
+    "背景纵深与细节密度",
+    "身体、服装基础与发型轮廓",
+    "体型、服装与四肢基础",
+    "头发与服装的结构密度",
+    "服装、体型与姿态衔接",
+    "姿态平衡与四肢连接",
+    "体格、四肢与透视辅助",
+    "构图与身体、面部的衔接",
+    "脸宽、脸颊与下颌轮廓",
+    "脸型基础与年龄观感",
+    "上半脸、脸颊与表情",
+    "面部整合与构图衔接",
+    "眼形、眼周与面部观感",
+    "眼睛、脸颊与表情观感",
+    "眼鼻衔接与面部纵深",
+    "眼睛与面部观感的整合",
+    "鼻、嘴、下颌与表情",
+    "嘴形、下颌与下半脸纵深",
+    "五官整合与上色衔接",
+    "下半脸、表情与纹理",
+    "画风、纹理与背景密度",
+    "光线、光泽与背景细节",
+    "上色、阴影与线条锐度",
+    "整体画风、上色与配色",
+    "饱和度、对比度与光泽",
+    "最终色调、线条与整体观感"
+  ],
+  "groups": [
+    {
+      "id": "community_00_03",
+      "start": 0,
+      "end": 3,
+      "label": "细节与结构",
+      "summary": "轮廓、背景纵深与身体基础"
+    },
+    {
+      "id": "community_04_08",
+      "start": 4,
+      "end": 8,
+      "label": "体型与姿态",
+      "summary": "服装、身体比例与四肢衔接"
+    },
+    {
+      "id": "community_09_13",
+      "start": 9,
+      "end": 13,
+      "label": "构图与脸型",
+      "summary": "身体与面部衔接、脸部轮廓"
+    },
+    {
+      "id": "community_14_17",
+      "start": 14,
+      "end": 17,
+      "label": "眼区与表情",
+      "summary": "眼形、面部纵深与表情观感"
+    },
+    {
+      "id": "community_18_21",
+      "start": 18,
+      "end": 21,
+      "label": "鼻口与下半脸",
+      "summary": "鼻口、下颌与表情衔接"
+    },
+    {
+      "id": "community_22_24",
+      "start": 22,
+      "end": 24,
+      "label": "材质与光影",
+      "summary": "纹理、背景细节与上色"
+    },
+    {
+      "id": "community_25_27",
+      "start": 25,
+      "end": 27,
+      "label": "画风与色彩",
+      "summary": "整体画风、配色与对比度"
+    }
+  ]
+}

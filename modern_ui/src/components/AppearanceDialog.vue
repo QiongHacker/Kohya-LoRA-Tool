@@ -20,6 +20,7 @@ const emit = defineEmits<{
   save: [settings: AppearanceSettings, presetName?: string]
   deletePreset: [id: string]
   restoreBuiltinPresets: []
+  previewFontScale: [percent: number]
 }>()
 
 const draft = ref<AppearanceSettings>({ ...props.settings })
@@ -104,7 +105,7 @@ watch(() => props.presets, () => { if (props.open) void loadPresetPreviews() })
 
 watch(() => props.open, (open) => {
   if (open) {
-    draft.value = { ...props.settings, background_source_path: props.settings.background_source_path || props.settings.background_path }
+    draft.value = { ...props.settings, font_scale: props.settings.font_scale ?? 100, background_source_path: props.settings.background_source_path || props.settings.background_path }
     cropDataUrl.value = ''
     cropSelectionMode.value = false
     namingPreset.value = false
@@ -117,6 +118,10 @@ watch(() => props.open, (open) => {
     presetLoadToken += 1
     cropOpen.value = false
   }
+})
+
+watch(() => draft.value.font_scale, (percent) => {
+  if (props.open) emit('previewFontScale', percent)
 })
 
 function presetSelected(preset: AppearancePreset) {
@@ -391,6 +396,18 @@ function save() {
         </label>
 
         <div class="appearance-section">
+          <div class="appearance-section-heading">
+            <label for="appearance-font-scale">字体大小</label>
+            <button class="appearance-button subtle" type="button" :disabled="saving || draft.font_scale === 100" @click="draft.font_scale = 100">恢复默认</button>
+          </div>
+          <div class="appearance-font-control">
+            <input id="appearance-font-scale" v-model.number="draft.font_scale" type="range" min="90" max="150" step="5" :disabled="saving" :aria-valuetext="`${draft.font_scale}%`" />
+            <output for="appearance-font-scale">{{ draft.font_scale }}%</output>
+          </div>
+          <small class="appearance-font-hint">调整时预览，保存后自动记住。</small>
+        </div>
+
+        <div class="appearance-section">
           <div class="appearance-section-heading"><span>背景图片</span><small>可选 · 仅在本机显示</small></div>
           <div class="appearance-file-row">
             <div class="appearance-file-copy">
@@ -511,6 +528,10 @@ function save() {
 .appearance-select { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--bg); }
 .appearance-section { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--bg) 44%, var(--card)); }
 .appearance-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text); font-size: 11px; }
+.appearance-font-control { display: flex; align-items: center; gap: 14px; }
+.appearance-font-control input { flex: 1; min-width: 0; accent-color: var(--accent); }
+.appearance-font-control output { min-width: 4ch; color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+.appearance-font-hint { color: var(--hint); font-size: 10px; line-height: 1.45; }
 .appearance-theme-gallery { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
 .appearance-theme-item { position: relative; min-width: 0; }
 .appearance-theme-card,.appearance-theme-add { display: grid; width: 100%; min-height: 120px; overflow: hidden; padding: 0; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--card); text-align: left; cursor: pointer; }

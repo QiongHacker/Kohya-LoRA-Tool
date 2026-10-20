@@ -2,6 +2,7 @@
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import type { LoRAInfo, LoRAPreview, LoRAWorkbenchReport, LoRAWeightAnalysis, LoRAProfileConfig, LoRAProfilePicture, LoRAProfileWindow, LoRAPreset, LoRAExploreConfig, LoRAExploreVariant, LoRAProfileBaseline } from '../bridge'
 import UiIcon from './UiIcon.vue'
+import { ANIMA_GUIDE_SOURCE, ANIMA_MOD_GUIDANCE_SOURCE, ANIMA_GUIDE_GROUPS, ANIMA_GROUPING, animaLayerHint, supportsAnimaGuide } from '../animaLayerGuide'
 
 const props = defineProps<{ open: boolean; desktop: boolean; projectName: string }>()
 const emit = defineEmits<{ close: []; notify: [message: string]; environment: [] }>()
@@ -84,7 +85,9 @@ async function readExploration(report: LoRAWorkbenchReport, id: string, restore 
 
 const flowStep = ref(0)
 const selectedWindowId = ref('')
-const panel = ref<'presets' | 'suggestions' | null>(null)
+type WorkbenchPanel = 'presets' | 'suggestions' | 'layer-guide'
+const panel = ref<WorkbenchPanel | null>(null)
+const panelTitle = computed(() => panel.value === 'presets' ? '调整预设' : panel.value === 'layer-guide' ? 'Anima 层级参考' : '官方分析建议')
 const applyingReport = ref(false)
 const mainScroll = ref<HTMLElement | null>(null)
 const stepLabels = ['选择 LoRA', '配置分析', '调整效果', '对照与导出']
@@ -150,20 +153,60 @@ const size = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const blockIds = computed(() => (info.value?.groups || []).flatMap(g => g.blocks.map(b => b.id)).sort())
 const selectedPreset = computed(() => presets.value.find(p => p.id === presetId.value))
 function matchesPreset(p: LoRAPreset) { return p.family === family.value && JSON.stringify([...p.block_ids].sort()) === JSON.stringify(blockIds.value) }
-const profileCount = computed(() => info.value?.profile_windows ? (2 + 2 * info.value.profile_windows.length) * (profileConfig.class_prompt.trim() ? 2 : 1) : null)
-const profileOutdated = computed(() => !!profiler.value && (profiler.value.info.fingerprint !== info.value?.fingerprint ||
+const profileCount = computed(() => comparisonWindows.value.length ? (2 + 2 * comparisonWindows.value.length) * (profileConfig.class_prompt.trim() ? 2 : 1) : null)
+const profileOutdated = computed(() => !!profiler.value && (profileLayoutOutdated.value || profiler.value.info.fingerprint !== info.value?.fingerprint ||
   Object.keys(preview).some(k => k !== 'exact_attention' && String(preview[k as keyof LoRAPreview]) !== String(profiler.value?.recipe?.[k as keyof LoRAPreview])) ||
   profileConfig.class_prompt.trim() !== profiler.value.profile?.class_prompt || JSON.stringify(profileConfig.references) !== JSON.stringify(profiler.value.profile?.references)))
 const progressPercent = computed(() => progress.value == null ? null : Math.round(Math.max(0, Math.min(1, progress.value)) * 100))
 const pct = (value: number | null) => value == null ? '未测量' : `${(100 * value).toFixed(0)}%`
-type EditWindow = { id: string; label: string; blocks: string[]; note: string; tag: string; result: LoRAProfileWindow | null }
-const editWindows = computed<EditWindow[]>(() => {
+type EditWindow = { id: string; label: string; blocks: string[]; note: string; tag: string; result: LoRAProfileWindow | null; community?: boolean; range?: string; summary?: string }
+const animaGuideSupported = computed(() => current.value && supportsAnimaGuide(info.value))
+const communityWindows = computed<EditWindow[]>(() => {
+  if (!animaGuideSupported.value) return []
+  const available = new Set(blockIds.value)
+  const windows: EditWindow[] = ANIMA_GUIDE_GROUPS.map(group => ({
+    id: group.id, label: group.label, blocks: group.layers.map(layer => layer.id).filter(id => available.has(id)),
+    note: '尚未生成对照', summary: group.summary, tag: '', result: null, community: true, range: group.range,
+  })).filter(group => group.blocks.length > 0)
+  const mapped = new Set(windows.flatMap(group => group.blocks))
+  const extra = blockIds.value.filter(id => !mapped.has(id))
+  if (extra.length && info.value?.profile_grouping === ANIMA_GROUPING) {
+    for (const group of info.value.profile_windows || []) {
+      const ids = group.blocks.filter(id => extra.includes(id))
+      if (ids.length) windows.push({ ...group, blocks: ids, note: '尚未生成对照',
+        summary: '不属于 L00–L27，需单独检查。', tag: '', result: null, community: true })
+    }
+  } else if (extra.length) windows.push({ id: 'community_other', label: '其他组件', blocks: extra,
+    note: '尚未生成对照', summary: '不属于 L00–L27，需单独检查。', tag: '', result: null, community: true })
+  return windows
+})
+const comparisonWindows = computed(() => {
   if (!current.value) return []
+  if (animaGuideSupported.value) return communityWindows.value
+  return info.value?.profile_windows || info.value?.groups.map((group, index) => ({ id: `group_${index}`, label: group.label, blocks: group.blocks.map(block => block.id) })) || []
+})
+function sameWindowBlocks(left: string[], right: string[]) {
+  return left.length === right.length && new Set(left).size === left.length && new Set(right).size === right.length && left.every(id => right.includes(id))
+}
+const profileLayoutOutdated = computed(() => {
+  const recorded = profiler.value?.profile?.windows
+  return !!recorded && (recorded.length !== comparisonWindows.value.length || comparisonWindows.value.some(group =>
+    !recorded.some(previous => previous.id === group.id && sameWindowBlocks(previous.blocks, group.blocks))))
+})
+const groupComparisonsReady = computed(() => !!profiler.value?.profile && !profileOutdated.value)
+function guideBlockIds(id: string) { return communityWindows.value.find(group => group.id === id)?.blocks || [] }
+function selectGuideGroup(id: string) {
+  if (locked.value || !animaGuideSupported.value || !guideBlockIds(id).length) return
+  selectedWindowId.value = id
+  workspaceMode.value = 'repair'; flowStep.value = 2; tab.value = 'adjust'
+  showLayers.value = true; inspectorOpen.value = true; panel.value = null
+}
+function blockGuideHint(id: string) { return animaGuideSupported.value ? animaLayerHint(id) : '' }
+const editWindows = computed<EditWindow[]>(() => {
   const results = profiler.value?.profile?.windows || []
-  const groups = info.value?.profile_windows || info.value?.groups.map((g, index) => ({ id: `group_${index}`, label: g.label, blocks: g.blocks.map(b => b.id) })) || []
-  return groups.map(g => {
-    const result = results.find(w => w.id === g.id) || null
-    return { ...g, result, note: result?.text || '尚未分析', tag: result?.tag || '' }
+  return comparisonWindows.value.map(group => {
+    const result = results.find(previous => previous.id === group.id && sameWindowBlocks(previous.blocks, group.blocks)) || null
+    return { ...group, result, note: result?.text || '尚未生成对照', tag: result?.tag || '' }
   })
 })
 const selectedWindow = computed(() => editWindows.value.find(w => w.id === selectedWindowId.value) || editWindows.value[0] || null)
@@ -181,7 +224,7 @@ const selectedPictures = computed(() => {
     { label: '关闭本组', picture: result.removed },
   ] : []
 })
-const canAdoptProfile = computed(() => current.value && !!profiler.value?.recipe && profiler.value.info.fingerprint === info.value?.fingerprint && ready.value && !locked.value)
+const canAdoptProfile = computed(() => current.value && !!profiler.value?.recipe && profiler.value.info.fingerprint === info.value?.fingerprint && ready.value && !profileLayoutOutdated.value && !locked.value)
 async function useProfileBaseline(picture: LoRAProfilePicture) {
   const api = window.pywebview?.api, fingerprint = info.value?.fingerprint, id = profileTaskId.value
   if (!api || !fingerprint || !id || !canAdoptProfile.value) return
@@ -208,9 +251,10 @@ const canProfile = computed(() => previewConfigured.value && preview.strength !=
 const primaryLabel = computed(() => {
   if (tab.value === 'compress') return '压缩并另存'
   if (flowStep.value === 0) return current.value ? '配置分析 →' : '读取 LoRA →'
-  if (flowStep.value === 1) return profiler.value?.profile ? '重新分析 →' : '开始快速分析 →'
+  if (flowStep.value === 1) return groupComparisonsReady.value ? '重新生成分组对照 →' : '生成分组对照 →'
   if (flowStep.value === 2 && workspaceMode.value === 'explore') return exploration.value ? '继续探索' : '生成四个变体'
-  if (flowStep.value === 2) return previewConfigured.value ? '生成对照 →' : '对照与导出 →'
+  if (flowStep.value === 2 && info.value?.can_preview && !groupComparisonsReady.value && !modified.value) return '生成分组对照 →'
+  if (flowStep.value === 2) return previewConfigured.value ? '生成调整版对照 →' : '对照与导出 →'
   return adjustedOutput.value ? '再次另存调整版' : '另存调整版'
 })
 const primaryDisabled = computed(() => {
@@ -226,8 +270,9 @@ const nextHint = computed(() => {
   if (tab.value === 'compress') return compression.value ? '压缩完成，已保存新文件。' : '压缩原始 LoRA，当前分层倍率不参与。'
   if (flowStep.value === 0) return current.value ? '文件已读取，可以配置分析。' : '先选择一个 LoRA 文件。'
   if (flowStep.value === 1 && !info.value?.can_preview) return '此文件暂不支持完整出图分析，可跳过并手动调整。'
-  if (flowStep.value === 1) return missingModels.value ? `还需选择 ${missingModels.value} 个预览模型文件。` : !preview.prompt.trim() ? '填写验证提示词后开始分析。' : preview.strength === 0 ? '分析时 LoRA 使用强度不能为 0。' : `快速分析将生成 ${profileCount.value ?? '多'} 张图片。`
+  if (flowStep.value === 1) return missingModels.value ? `还需选择 ${missingModels.value} 个预览模型文件。` : !preview.prompt.trim() ? '填写验证提示词后开始分析。' : preview.strength === 0 ? '分析时 LoRA 使用强度不能为 0。' : `将生成 ${profileCount.value ?? '多'} 张分组对照图。`
   if (flowStep.value === 2 && workspaceMode.value === 'explore') return !previewConfigured.value ? '先配置底模与验证提示词。' : !activeExploreBlocks.value.length ? '所有层均已冻结，请先解冻。' : '每轮生成 1 张基准与 4 张变体，选择后继续探索。'
+  if (flowStep.value === 2 && info.value?.can_preview && !groupComparisonsReady.value && !modified.value) return previewConfigured.value ? `按 ${comparisonWindows.value.length} 组生成 ${profileCount.value} 张对照图。` : '先配置底模与验证提示词，再生成分组对照。'
   if (flowStep.value === 2) return `已调整 ${modified.value} 层${previewConfigured.value ? '，生成对照检查效果。' : '，可继续另存或返回配置预览。'}`
   return adjustedOutput.value ? (exportOutdated.value ? '倍率已改变，请重新另存调整版。' : '调整版已另存，原始 LoRA 保留。') : outdated.value ? '倍率或采样设置已改变，请重新生成对照。' : '确认效果后另存为新的 LoRA。'
 })
@@ -240,8 +285,14 @@ async function primaryAction() {
   if (tab.value === 'compress') { await start('compress'); return }
   if (flowStep.value === 0) { if (current.value) goStep(1); else await start('inspect') }
   else if (flowStep.value === 1) await start('profile')
-  else if (flowStep.value === 2) { if (workspaceMode.value === 'explore') await rollExploration(); else if (previewConfigured.value) await start('preview'); else goStep(3) }
+  else if (flowStep.value === 2) { if (workspaceMode.value === 'explore') await rollExploration(); else if (info.value?.can_preview && !groupComparisonsReady.value && !modified.value) await generateGroupComparison(); else if (previewConfigured.value) await start('preview'); else goStep(3) }
   else await start('export')
+}
+async function generateGroupComparison() {
+  if (locked.value || !current.value || !info.value?.can_preview) return
+  if (!previewConfigured.value) { goStep(1); message.value = '配置底模与验证提示词后，生成分组对照。'; return }
+  if (preview.strength === 0) { fail('生成分组对照时，LoRA 使用强度不能为 0。'); return }
+  await start('profile')
 }
 function setSelectedStrength(raw: string, keepUndo = true) {
   if (locked.value || !selectedWindow.value || !raw.trim()) return
@@ -256,9 +307,9 @@ function setBlockStrength(id: string, raw: string) {
   if (!Number.isFinite(value) || value < -3 || value > 3) { fail('倍率应为 -3 到 3。'); return }
   remember(); blocks[id] = value
 }
-function openPanel(value: 'presets' | 'suggestions') { panelOpener = document.activeElement as HTMLElement | null; panel.value = value }
+function openPanel(value: WorkbenchPanel) { panelOpener = document.activeElement as HTMLElement | null; panel.value = value }
 function showLarge(url: string, label: string) { panelOpener = document.activeElement as HTMLElement | null; fullProfileImage.value = { url, label } }
-const suggestions = computed(() => profiler.value?.profile?.windows.filter(w => w.blocks.some(id => profiler.value?.profile?.suggested_blocks[id] !== 1)) || [])
+const suggestions = computed(() => profileLayoutOutdated.value ? [] : profiler.value?.profile?.windows.filter(w => w.blocks.some(id => profiler.value?.profile?.suggested_blocks[id] !== 1)) || [])
 function invalidate() { profileBaseline.value = null; undoPreview.value = null; workspaceMode.value = 'repair'; exploration.value = null; explorePictures.value = []; exploreBaseline.value = null; exploreConfig.frozen = []; exploreConfig.last_pick = []; exploreConfig.state = {}; pickedVariant.value = ''; undoExplore.value = null; flowStep.value = 0; selectedWindowId.value = ''; panel.value = null; profiler.value = null; profileTaskId.value = ''; infoTaskId.value = ''; undoBlocks.value = null; fullProfileImage.value = null; profileLoads.clear(); Object.keys(canvasImages).forEach(key => { delete canvasImages[key] }); analysis.value = null; info.value = null; images.value = []; previewReport.value = null; output.value = ''; exportReport.value = null; compression.value = undefined }
 function stopPolling() { if (timer) clearTimeout(timer); timer = undefined }
 function fail(text: string) { error.value = text }
@@ -330,7 +381,7 @@ function keys(event: KeyboardEvent) {
   if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (fullProfileImage.value) fullProfileImage.value = null; else if (panel.value) panel.value = null; else emit('close'); return }
   if (event.key !== 'Tab' || !dialog.value) return
   const focusRoot = fullProfileImage.value ? dialog.value.querySelector<HTMLElement>('.lwb-large-image') || dialog.value : panel.value ? dialog.value.querySelector<HTMLElement>('.lwb-sidepanel') || dialog.value : dialog.value
-  const nodes = [...focusRoot.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary')].filter(n => n.getClientRects().length)
+  const nodes = [...focusRoot.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,a[href]')].filter(n => n.getClientRects().length)
   const first = nodes[0], last = nodes[nodes.length - 1]
   if (!first || !last) { event.preventDefault(); dialog.value.focus(); return }
   if (!focusRoot.contains(document.activeElement)) { event.preventDefault(); (event.shiftKey ? last : first).focus(); return }
@@ -360,8 +411,8 @@ async function defaults() {
 async function applyReport(report: LoRAWorkbenchReport, id: string, restore = false) {
   if (report.info) {
     infoTaskId.value = id
+    info.value = report.info
     if (restore || report.action === 'inspect') {
-      info.value = report.info
       source.value = report.info.source
       family.value = report.info.family
       const savedBlocks = { ...blocks }
@@ -492,7 +543,7 @@ watch(editWindows, windows => {
   if (!windows.some(w => w.id === selectedWindowId.value)) selectedWindowId.value = windows[0]?.id || ''
 }, { immediate: true })
 watch([flowStep, tab], async () => { panel.value = null; await nextTick(); if (mainScroll.value) mainScroll.value.scrollTop = 0 })
-watch(() => selectedWindow.value?.id, async () => { await nextTick(); if (mainScroll.value) mainScroll.value.scrollTop = 0 })
+watch(() => selectedWindow.value?.id, async () => { focusedPicture.value = null; await nextTick(); if (mainScroll.value) mainScroll.value.scrollTop = 0 })
 watch([panel, fullProfileImage], async ([drawer, image]) => {
   await nextTick()
   if (drawer || image) dialog.value?.querySelector<HTMLElement>(image ? '.lwb-large-image button' : '.lwb-sidepanel button')?.focus()
@@ -508,6 +559,7 @@ onUnmounted(stopPolling)
       <header class="lwb-header">
         <div class="lwb-heading"><h2 id="lwb-title">LoRA 工作台</h2><div v-if="current && info" class="lwb-header-file"><strong :title="info.source">{{ info.name }}</strong><span>{{ info.family_label }} · Rank {{ info.ranks.join(' / ') }}</span><button :disabled="locked" @click="goStep(0)">更换</button></div><span v-else class="lwb-header-subtitle">Krea 2 / Anima</span></div>
         <div class="lwb-actions">
+          <button v-if="current && family === 'anima'" class="lwb-subtle" @click="openPanel('layer-guide')">层级参考</button>
           <button v-if="tab === 'adjust'" class="lwb-subtle" :disabled="locked || !current" @click="tab = 'compress'"><UiIcon name="settings" />权重压缩</button>
           <button v-else class="lwb-subtle" :disabled="locked" @click="tab = 'adjust'"><UiIcon name="back" />返回分层调整</button>
           <button class="lwb-icon-button" aria-label="关闭工作台" @click="emit('close')"><UiIcon name="close" /></button>
@@ -605,23 +657,24 @@ onUnmounted(stopPolling)
           <div :class="['lwb-studio-layout', { 'is-explore': workspaceMode === 'explore', 'inspector-hidden': !inspectorOpen }]">
             <aside v-if="workspaceMode === 'repair'" class="lwb-group-rail" aria-label="层级分组">
               <div class="lwb-rail-title"><span>层级分组</span><span>{{ editWindows.length }} 组</span></div>
+              <div v-if="animaGuideSupported" class="lwb-grouping-control"><span>社区分组</span><button class="lwb-guide-link" @click="openPanel('layer-guide')">查看依据</button></div>
               <div class="lwb-group-list"><button v-for="group in editWindows" :key="group.id" :class="['lwb-group-button', { selected: selectedWindow?.id === group.id }]" :aria-pressed="selectedWindow?.id === group.id" :disabled="locked" @click="selectedWindowId = group.id">
                 <span class="lwb-group-top"><strong>{{ group.label }}</strong><span class="lwb-group-value" :class="{ changed: group.blocks.some(id => blocks[id] !== 1) }">{{ windowStrength(group.blocks) == null ? '混合' : `${windowStrength(group.blocks)}×` }}</span></span>
-                <span class="lwb-group-note">{{ profileOutdated ? '分析条件已改变' : group.note }}</span>
+                <span class="lwb-group-note">{{ group.community ? group.range || '独立组件' : profileOutdated ? '上次结果' : group.note }}</span>
               </button></div>
               <div class="lwb-rail-footer"><span>{{ modified }} 层已调整</span><button :disabled="locked" @click="goStep(1)">分析设置</button></div>
             </aside>
             <section class="lwb-viewer" :aria-label="workspaceMode === 'repair' ? '分组图片对照' : '变体探索画布'">
               <template v-if="workspaceMode === 'repair'">
                 <div class="lwb-canvas-toolbar"><strong>{{ selectedWindow?.label || '分组对照' }}</strong>
-                  <div v-if="selectedPictures.length" class="lwb-view-controls"><button :class="{ active: focusedPicture == null }" @click="focusedPicture = null">三图</button><button v-for="(picture, index) in selectedPictures" :key="picture.label" :class="{ active: focusedPicture === index }" @click="focusedPicture = index">{{ picture.label }}</button></div>
+                  <div v-if="selectedPictures.length" class="lwb-view-controls"><button :class="{ active: focusedPicture == null }" @click="focusedPicture = null">三图</button><button v-for="(picture, index) in selectedPictures" :key="picture.label" :class="{ active: focusedPicture === index }" @click="focusedPicture = index">{{ picture.label }}</button></div><button v-if="selectedPictures.length" class="lwb-small" :disabled="locked || !ready" @click="generateGroupComparison">重新生成 · {{ profileCount }} 张</button>
                 </div>
-                <div v-if="profileOutdated" class="lwb-canvas-status">分析条件已改变，显示上次结果。<button :disabled="locked" @click="goStep(1)">重新分析</button></div>
+                <div v-if="profileOutdated" class="lwb-canvas-status">{{ profileLayoutOutdated ? '分组已更新，请重新生成分组对照。' : '采样条件已改变，显示上次结果。' }}<button :disabled="locked" @click="generateGroupComparison">重新生成</button></div>
                 <div v-if="visiblePictures.length" :class="['lwb-canvas-pictures', { single: focusedPicture != null }]">
                   <figure v-for="picture in visiblePictures" :key="picture.label"><button class="lwb-picture-button" :disabled="loadingImage" :aria-label="`放大${picture.label}`" @click="showProfileImage(picture.picture, picture.label)"><img :src="pictureSource(picture.picture)" :alt="picture.label" /></button><figcaption class="lwb-profile-caption"><span>{{ picture.label }}</span><button :disabled="!canAdoptProfile" title="采用此图的完整层级倍率和采样设置，进入变体探索" @click="useProfileBaseline(picture.picture)">以此为基准探索</button></figcaption></figure>
                 </div>
-                <div v-else class="lwb-empty lwb-studio-empty"><UiIcon name="image" /><strong>尚无分组对照</strong><p>配置 Profiler 分析，查看各组的实际影响。</p><button :disabled="locked" @click="goStep(1)">配置分析</button></div>
-                <div class="lwb-canvas-footnote">Profiler 对照使用原始 LoRA；修改倍率后生成新的 A/B 对照。</div>
+                <div v-else class="lwb-empty lwb-studio-empty"><UiIcon name="image" /><strong>{{ selectedWindow?.community ? `${selectedWindow.range || ''} ${selectedWindow.label}` : '尚无分组对照' }}</strong><p>{{ selectedWindow?.summary || '固定提示词与种子，查看各组的实际影响。' }}<br />原版 / 仅保留本组 / 关闭本组</p><button :disabled="locked || !ready || !info?.can_preview" @click="generateGroupComparison">生成分组对照<span v-if="profileCount"> · {{ profileCount }} 张</span></button></div>
+                <div class="lwb-canvas-footnote">分组对照使用原始 LoRA；修改倍率后生成调整版对照。</div>
               </template>
               <template v-else>
                 <div class="lwb-canvas-toolbar"><strong>LoRA 变体探索</strong><span>{{ explorePictures.length ? '选择一个变体，继续迭代' : '同一场景 · 四个候选' }}</span></div>
@@ -643,7 +696,8 @@ onUnmounted(stopPolling)
             <aside v-if="inspectorOpen" class="lwb-inspector lwb-scrolling" aria-label="调整参数">
               <template v-if="workspaceMode === 'repair' && selectedWindow">
                 <div class="lwb-inspector-title"><h4>{{ selectedWindow.label }}</h4><span>{{ selectedWindow.blocks.length }} 层</span></div>
-                <p class="lwb-help">{{ profileOutdated ? '上次分析结果' : selectedWindow.note }}</p>
+                <p class="lwb-help">{{ selectedWindow.community ? `${selectedWindow.range || '独立组件'} · ${selectedWindow.summary}` : profileOutdated ? '上次分析结果' : selectedWindow.note }}</p>
+                <p v-if="selectedWindow.community && selectedWindow.result" class="lwb-help">{{ profileOutdated ? '上次结果：' : '' }}{{ selectedWindow.note }}</p>
                 <section class="lwb-inspector-section"><div class="lwb-section-heading"><h4>本组倍率</h4><span>{{ selectedStrength == null ? '混合' : `${selectedStrength}×` }}</span></div>
                   <input type="range" min="-3" max="3" step="0.05" :value="selectedStrength ?? 1" :disabled="locked" aria-label="本组倍率" @pointerdown="remember" @keydown="rememberSlider" @input="setSelectedStrength(($event.target as HTMLInputElement).value, false)" />
                   <div class="lwb-range-labels"><span>−3</span><input type="number" min="-3" max="3" step="0.05" :value="selectedStrength ?? ''" :placeholder="selectedStrength == null ? '混合' : ''" :disabled="locked" aria-label="本组倍率数值" @change="setSelectedStrength(($event.target as HTMLInputElement).value)" /><span>+3</span></div>
@@ -653,7 +707,7 @@ onUnmounted(stopPolling)
                 </section>
                 <section v-if="selectedWindow.result" class="lwb-inspector-section"><h4>画面变化</h4><div class="lwb-stat-list"><div><span>仅保留本组</span><strong>{{ pct(selectedWindow.result.alone_change) }}</strong></div><div><span>关闭本组</span><strong>{{ pct(selectedWindow.result.removed_change) }}</strong></div><div v-if="selectedWindow.result.likeness_share != null"><span>人脸相似度贡献</span><strong>{{ pct(selectedWindow.result.likeness_share) }}</strong></div><div v-if="selectedWindow.result.bleed_share != null"><span>特征泄漏</span><strong>{{ pct(selectedWindow.result.bleed_share) }}</strong></div></div><p class="lwb-help">变化量相对原版，不代表画质。</p></section>
                 <details class="lwb-detail" :open="showLayers" @toggle="showLayers = ($event.target as HTMLDetailsElement).open"><summary>逐层调整<span>{{ selectedBlocks.length }} 层</span></summary><button class="lwb-small" :disabled="locked" @click="start('analyze')">{{ analysis ? '重新分析权重' : '分析权重规模' }}</button>
-                  <div v-for="block in selectedBlocks" :key="block.id" class="lwb-layer-control"><div><strong>{{ block.label }}</strong><input type="number" min="-3" max="3" step="0.05" :value="blocks[block.id]" :disabled="locked" :aria-label="`${block.label} 倍率数值`" @change="setBlockStrength(block.id, ($event.target as HTMLInputElement).value)" /></div><input type="range" min="-3" max="3" step="0.05" :value="blocks[block.id]" :disabled="locked" :aria-label="`${block.label} 倍率`" @pointerdown="remember" @keydown="rememberSlider" @input="blocks[block.id] = Number(($event.target as HTMLInputElement).value)" /><p class="lwb-help">{{ analysis ? `权重能量占比 ${energy(block.id).toFixed(1)}%` : `${block.modules} 个权重模块` }}</p><label class="lwb-checkbox"><input type="checkbox" :disabled="locked" :checked="exploreConfig.frozen.includes(block.id)" @change="toggleFrozen([block.id], ($event.target as HTMLInputElement).checked)" />探索时冻结</label></div><p v-if="analysis" class="lwb-help">权重规模不代表视觉贡献。</p>
+                  <div v-for="block in selectedBlocks" :key="block.id" class="lwb-layer-control"><div><strong>{{ block.label }}</strong><input type="number" min="-3" max="3" step="0.05" :value="blocks[block.id]" :disabled="locked" :aria-label="`${block.label} 倍率数值`" @change="setBlockStrength(block.id, ($event.target as HTMLInputElement).value)" /></div><input type="range" min="-3" max="3" step="0.05" :value="blocks[block.id]" :disabled="locked" :aria-label="`${block.label} 倍率`" @pointerdown="remember" @keydown="rememberSlider" @input="blocks[block.id] = Number(($event.target as HTMLInputElement).value)" /><p v-if="blockGuideHint(block.id)" class="lwb-help lwb-layer-hint">社区观察：{{ blockGuideHint(block.id) }}</p><p class="lwb-help">{{ analysis ? `权重能量占比 ${energy(block.id).toFixed(1)}%` : `${block.modules} 个权重模块` }}</p><label class="lwb-checkbox"><input type="checkbox" :disabled="locked" :checked="exploreConfig.frozen.includes(block.id)" @change="toggleFrozen([block.id], ($event.target as HTMLInputElement).checked)" />探索时冻结</label></div><p v-if="analysis" class="lwb-help">权重规模不代表视觉贡献。</p>
                 </details>
                 <details v-if="profiler?.profile" class="lwb-detail"><summary>底模基线</summary><div class="lwb-baseline-pictures"><figure><button class="lwb-picture-button" :disabled="loadingImage" @click="showProfileImage(profiler.profile.off, '停用 LoRA')"><img :src="profiler.profile.off.thumbnail" alt="停用 LoRA" /></button><figcaption>停用 LoRA</figcaption></figure><figure><button class="lwb-picture-button" :disabled="loadingImage" @click="showProfileImage(profiler.profile.baseline, '原版 LoRA')"><img :src="profiler.profile.baseline.thumbnail" alt="原版 LoRA" /></button><figcaption>原版 LoRA</figcaption></figure></div></details>
                 <details v-if="selectedWindow.result?.class_alone" class="lwb-detail"><summary>无触发词场景</summary><button class="lwb-picture-button" :disabled="loadingImage" @click="showProfileImage(selectedWindow.result.class_alone, '无触发词场景')"><img :src="selectedWindow.result.class_alone.thumbnail" alt="无触发词场景" /></button></details>
@@ -668,7 +722,7 @@ onUnmounted(stopPolling)
                   <details class="lwb-detail"><summary>随机参数</summary><label>变体随机种子<input v-model.number="exploreConfig.mutation_seed" :disabled="locked" type="number" min="0" max="4294967295" /></label><button class="lwb-small" :disabled="locked || !previewConfigured || !activeExploreBlocks.length || preview.strength === 0" @click="start('explore')">按此种子生成</button><p class="lwb-help">“继续探索”会更换变体种子，采样种子保持不变。</p></details>
                 </section>
                 <section class="lwb-inspector-section"><div class="lwb-section-heading"><h4>冻结层级</h4><span>{{ exploreConfig.frozen.length }} / {{ blockIds.length }}</span></div>
-                  <label v-for="group in editWindows" :key="group.id" class="lwb-checkbox"><input type="checkbox" :checked="group.blocks.every(id => exploreConfig.frozen.includes(id))" :indeterminate="group.blocks.some(id => exploreConfig.frozen.includes(id)) && !group.blocks.every(id => exploreConfig.frozen.includes(id))" :disabled="locked" @change="toggleFrozen(group.blocks, ($event.target as HTMLInputElement).checked)" />{{ group.label }}</label><p class="lwb-help">冻结组保留当前倍率，不参与随机变化。</p>
+                  <label v-for="group in editWindows" :key="group.id" class="lwb-checkbox"><input type="checkbox" :checked="group.blocks.every(id => exploreConfig.frozen.includes(id))" :indeterminate="group.blocks.some(id => exploreConfig.frozen.includes(id)) && !group.blocks.every(id => exploreConfig.frozen.includes(id))" :disabled="locked" @change="toggleFrozen(group.blocks, ($event.target as HTMLInputElement).checked)" />{{ group.label }}<span v-if="group.range" class="lwb-freeze-range">{{ group.range }}</span></label><p class="lwb-help">{{ animaGuideSupported ? '按社区分组冻结，保留当前倍率。' : '冻结组保留当前倍率，不参与随机变化。' }}</p>
                 </section>
                 <section class="lwb-inspector-section"><h4>生成设置</h4><p class="lwb-help">{{ preview.width }} × {{ preview.height }} · {{ preview.steps }} 步<br />CFG {{ preview.cfg }} · 种子 {{ preview.seed }}</p><div class="lwb-actions lwb-quick-values"><button :disabled="locked" @click="goStep(1)">修改设置</button><button :disabled="locked" @click="workspaceMode = 'repair'">逐层调整</button><button :disabled="locked" @click="goStep(3)">对照与导出</button></div></section>
               </template>
@@ -693,8 +747,8 @@ onUnmounted(stopPolling)
         </div>
       </footer>
       <div v-if="panel" class="lwb-panel-backdrop" @click.self="panel = null">
-        <aside class="lwb-sidepanel" role="dialog" aria-modal="true" :aria-label="panel === 'presets' ? '调整预设' : '官方分析建议'">
-          <header><h3>{{ panel === 'presets' ? '调整预设' : '官方分析建议' }}</h3><button class="lwb-icon-button" aria-label="关闭侧栏" @click="panel = null"><UiIcon name="close" /></button></header>
+        <aside class="lwb-sidepanel" role="dialog" aria-modal="true" :aria-label="panelTitle">
+          <header><h3>{{ panelTitle }}</h3><button class="lwb-icon-button" aria-label="关闭侧栏" @click="panel = null"><UiIcon name="close" /></button></header>
           <div class="lwb-panel-content lwb-scrolling">
             <p v-if="starting || message" class="lwb-panel-status" aria-live="polite">{{ starting ? '正在处理…' : message }}</p>
             <div v-if="error" class="lwb-notice" role="alert">{{ error }}</div>
@@ -705,10 +759,25 @@ onUnmounted(stopPolling)
                 <div class="lwb-actions"><button :disabled="locked || !selectedPreset || !matchesPreset(selectedPreset)" @click="applyPreset">应用预设</button><button :disabled="locked || !selectedPreset" @click="deletePreset">删除</button></div>
               </section><div class="lwb-rule"></div><section><h4>保存当前倍率</h4><label>预设名称<input v-model="presetName" :disabled="locked" placeholder="例如：画风减弱方案" maxlength="80" /></label><button :disabled="locked || !presetName.trim() || !current" @click="savePreset">保存预设</button></section>
             </template>
-            <template v-else-if="profiler?.profile">
-              <div v-if="profileOutdated" class="lwb-notice">分析条件已改变，请重新分析后应用建议。</div><p class="lwb-help">建议针对本次采样场景，应用后需生成对照确认。</p>
+            <template v-else-if="panel === 'layer-guide'">
+              <p class="lwb-help lwb-guide-intro">标准 Anima 28 层 · L00–L27。以下来自 {{ ANIMA_GUIDE_SOURCE.author }} 的合并观察，各层影响可能交叠。</p>
+              <div v-if="!animaGuideSupported" class="lwb-notice">尚未确认当前文件为标准 28 层映射，仅供查阅。重新读取 LoRA 后再检查。</div>
+              <p v-else class="lwb-help">按经验分组生成实测对照；仅调整当前 LoRA 已有的层。</p>
+              <section v-for="group in ANIMA_GUIDE_GROUPS" :key="group.id" class="lwb-guide-group">
+                <div class="lwb-guide-heading"><div><h4>{{ group.label }}</h4><span>{{ group.range }}</span></div><button class="lwb-small" :disabled="locked || !guideBlockIds(group.id).length" @click="selectGuideGroup(group.id)">调整此组</button></div>
+                <div v-for="layer in group.layers" :key="layer.id" class="lwb-guide-layer" :class="{ 'is-absent': animaGuideSupported && !blockIds.includes(layer.id) }"><span>{{ layer.label }}</span><span>{{ layer.hint }}<small v-if="animaGuideSupported && !blockIds.includes(layer.id)"> · 文件未包含</small></span></div>
+              </section>
+              <details class="lwb-detail"><summary>使用方法与来源</summary>
+                <p class="lwb-help">先生成分组对照，再根据图片调整倍率；确认后保存预设或另存 LoRA。</p>
+                <p class="lwb-help">Modulation Guidance 的另一组实验发现，L00–L07 也会影响整体布局和色调，L27 存在补偿作用。层的影响取决于修改方式。</p>
+                <p class="lwb-help">这些经验用于已有 LoRA 的权重调整，尚未验证为训练层选择配方。</p>
+                <div class="lwb-guide-sources"><a :href="ANIMA_GUIDE_SOURCE.url" target="_blank" rel="noopener noreferrer">{{ ANIMA_GUIDE_SOURCE.author }} · {{ ANIMA_GUIDE_SOURCE.title }} ↗</a><a :href="ANIMA_MOD_GUIDANCE_SOURCE.url" target="_blank" rel="noopener noreferrer">{{ ANIMA_MOD_GUIDANCE_SOURCE.title }} ↗</a><span>来源核对：{{ ANIMA_GUIDE_SOURCE.checkedAt }}</span></div>
+              </details>
+            </template>
+            <template v-else-if="panel === 'suggestions' && profiler?.profile">
+              <div v-if="profileOutdated" class="lwb-notice">{{ profileLayoutOutdated ? '分组已更新，请重新生成分组对照后应用建议。' : '采样条件已改变，请重新生成对照后应用建议。' }}</div><p class="lwb-help">建议针对本次采样场景，应用后需生成对照确认。</p>
               <div v-for="group in suggestions" :key="group.id" class="lwb-suggestion"><strong>{{ group.label }}</strong><p>{{ group.text }}</p><span>建议倍率 {{ [...new Set(group.blocks.map(id => profiler?.profile?.suggested_blocks[id]))].join(' / ') }}</span></div>
-              <div v-if="!suggestions.length" class="lwb-empty"><strong>本次建议保留原始倍率</strong><p>仍可根据分组对照手动调整。</p></div>
+              <div v-if="!suggestions.length && !profileOutdated" class="lwb-empty"><strong>本次建议保留原始倍率</strong><p>仍可根据分组对照手动调整。</p></div>
               <div v-for="warning in profiler.profile.warnings" :key="warning" class="lwb-notice">{{ warning }}</div><p class="lwb-help">应用将替换当前所有层级倍率，可撤销。</p>
               <button class="lwb-primary" :disabled="locked || profileOutdated || !suggestions.length" @click="applySuggestions">应用建议</button>
             </template>
@@ -731,7 +800,7 @@ onUnmounted(stopPolling)
 .lwb-dialog textarea { resize: vertical; min-height: 80px; }
 .lwb-dialog input[type="range"] { padding: 0; height: 26px; border: 0; accent-color: var(--accent); cursor: pointer; }
 .lwb-dialog input[type="number"] { font-variant-numeric: tabular-nums; }
-.lwb-dialog :is(button, input, textarea, select, summary):focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 3px; }
+.lwb-dialog :is(button, input, textarea, select, summary, a):focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 3px; }
 .lwb-dialog :is(h2, h3, h4, p, figure) { margin: 0; }
 .lwb-dialog h3 { font-size: 20px; line-height: 1.5; font-weight: 600; }
 .lwb-dialog h4 { font-size: 15px; line-height: 1.5; font-weight: 600; }
@@ -1069,5 +1138,21 @@ onUnmounted(stopPolling)
   .lwb-footer-status { font-size: 11px; }
 }
 
+.lwb-grouping-control { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 0 0 auto; padding: 0 10px 9px; color: var(--sub); font-size: 11px; }
+.lwb-dialog .lwb-guide-link { padding: 4px 1px; min-height: 25px; font-size: 10px; color: var(--sub); border: 0; background: transparent; }
+.lwb-layer-hint { color: var(--text); line-height: 1.6; }
+.lwb-freeze-range { color: var(--sub); font-size: 10px; margin-left: auto; }
+.lwb-guide-intro { margin-top: 0 !important; }
+.lwb-guide-group { padding: 16px 0; border-bottom: 1px solid var(--border); }
+.lwb-guide-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.lwb-guide-heading h4 { font-size: 13px; }
+.lwb-guide-heading span { display: block; margin-top: 3px; color: var(--sub); font-size: 11px; }
+.lwb-guide-layer { display: grid; grid-template-columns: 35px minmax(0, 1fr); gap: 8px; padding: 5px 0; font-size: 11px; line-height: 1.6; }
+.lwb-guide-layer > span:first-child { color: var(--sub); font-variant-numeric: tabular-nums; }
+.lwb-guide-layer.is-absent { color: var(--sub); }
+.lwb-guide-layer small { font-size: inherit; }
+.lwb-guide-sources { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; margin-top: 14px; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.lwb-guide-sources a { color: var(--text); text-underline-offset: 3px; }
+.lwb-guide-sources span { color: var(--sub); }
 @media (prefers-reduced-motion: reduce) { .lwb-progress.indeterminate i { animation: none; } }
 </style>

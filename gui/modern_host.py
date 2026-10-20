@@ -490,7 +490,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             task = self._task
             if not task or task.get("id") != str(task_id or "") or task.get("kind") != "training":
                 raise ValueError("训练任务已不存在，请重新打开训练窗口。")
-            return self.core.data_sub("output", task.get("key") or ""), float(task.get("started") or 0), dict(task.get("sample_baseline") or {})
+            directory = task.get("output_dir") or self.core.data_sub("output", task.get("key") or "")
+            return directory, float(task.get("started") or 0), dict(task.get("sample_baseline") or {})
 
     def list_task_samples(self, task_id, offset=0):
         """Only list images written during this task, with bounded page sizes."""
@@ -1779,7 +1780,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             if config.get("training_kind") == "multi_character":
                 from kohya_core.multi_character import scan
                 try:
-                    scanned = scan(config.get("multi_character", {}))
+                    scanned = scan(config.get("multi_character", {}), mode=mode, resolution=params.get("resolution", 512))
                 except (ValueError, OSError) as exc:
                     return {"ok": False, "error": str(exc)}
                 result["plan"].update(training_kind="multi_character", training_type="multi_character", mode_label="多角色 LoRA",
@@ -1789,6 +1790,12 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 result["plan"]["warnings"].append("多角色当前使用新训练任务，不自动续训；先分别验证角色，再验证目标组合。")
                 result["plan"]["execution_summary"].append({"label": "均衡后样本", "value": "%d 个；步数按均衡后的数据集计算。" % scanned["training_images"]})
                 result["plan"]["execution_summary"].append({"label": "身份标注", "value": "按角色触发词训练；保留完整构图，最多 3 倍均衡采样。"})
+                if mode == "moss_fz":
+                    from kohya_core.moss_multi_character import options
+                    moss = options(scanned["settings"])
+                    result["plan"]["execution_summary"] += [
+                        {"label": "同框验证", "value": "MOSS JSON 布局、单人及换位对照" if moss["layout"] else "自然语言单人、同框及换位对照"},
+                        {"label": "DOP 约束", "value": "开启（每 2 步，权重 2）；增加缓存与训练开销" if moss["dop"] else "关闭"}]
         return result
 
     def _execution_summary(self, mode, params, plan):
@@ -2061,18 +2068,20 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         return {"ok": True, "plan": plan}
 
     def inspect_multi_character(self, project_name, settings):
-        if not self.core.load_project(str(project_name or "")):
+        config = self.core.load_project(str(project_name or ""))
+        if not config:
             return {"ok": False, "error": "项目不存在。"}
         try:
             from kohya_core.multi_character import public_scan
-            return {"ok": True, **public_scan(settings)}
+            resolution = (config.get("params") or {}).get("resolution") or 512
+            return {"ok": True, **public_scan(settings, mode=config.get("mode"), resolution=resolution)}
         except (ValueError, OSError) as exc:
             return {"ok": False, "error": str(exc)}
 
     def _training_image_count(self, params):
         if params.get("training_kind") == "multi_character":
             from kohya_core.multi_character import scan
-            return scan(params["multi_character"])["images"]
+            return scan(params["multi_character"], mode=params.get("mode"), resolution=params.get("resolution", 512))["images"]
         return self._count_preprocessable_images(params["raw_dir"])
 
     def _safe_vram(self):
@@ -2457,7 +2466,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             # are reused without silently selecting another dataset or engine.
             if patch.get("mode") != current.get("mode") or patch.get("base_type") != current.get("base_type"):
                 return {"ok": False, "error": "当前模式或底模类型已变化，不能直接恢复这条记录。"}
-            for key in ("raw_dir", "reg_dir", "base_model", "train_env", "h3_models", "krea2_models", "zimage_fz_models", "moss_models", "at_model"):
+            for key in ("raw_dir", "reg_dir", "base_model", "train_env", "h3_models", "krea2_models", "zimage_fz_models", "moss_models", "at_model", "output_dir"):
                 patch.pop(key, None)
             if current.get("training_kind") == "slider":
                 if patch.get("training_kind") != "slider":
@@ -2495,8 +2504,9 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if not task_id:
             return {"ok": False, "error": "已有环境、模型或训练任务正在运行，请等它完成后再试。"}
         review_event = threading.Event()
+        output_directory = self.core.data_sub("output", project_name)
         try:
-            baseline = {item["name"]: item["version"] for item in sample_files(self.core.data_sub("output", project_name), 0)}
+            baseline = {item["name"]: item["version"] for item in sample_files(output_directory, 0)}
         except OSError:
             baseline = {}
         with self._task_lock:
@@ -2504,12 +2514,13 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 self._task["review_event"] = review_event
                 self._task["plan"] = plan
                 self._task["sample_baseline"] = baseline
+                self._task["output_dir"] = output_directory
                 self._task["normalized_params"] = dict(params)
         self.core.reset_stop()
         getattr(self.core, "reset_effective", lambda: None)()
         root_keys = ("mode", "base_type", "at_sub_mode", "concept_type", "fast_tier", "trigger",
                      "raw_dir", "reg_dir", "base_model", "style_preset", "style_caption",
-                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "krea2_models", "zimage_fz_models", "moss_models", "training_kind", "multi_character")
+                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "krea2_models", "zimage_fz_models", "moss_models", "training_kind", "multi_character", "output_dir")
         record_config = {key: config[key] for key in root_keys if key in config}
         stored_params = config.get("params") if isinstance(config.get("params"), dict) else {}
         record_config["params"] = {key: value for key, value in stored_params.items() if key in WORKSPACE_PARAM_KEYS}
@@ -2522,7 +2533,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         run_record = {"id": task_id, "project_name": project_name, "mode": params["mode"],
                       "mode_label": plan["mode_label"], "started": started, "ended": None,
                       "status": "running", "message": "准备训练", "config": record_config,
-                      "normalized_params": dict(params), "resume_path": str(resume_path or "")}
+                      "normalized_params": dict(params), "resume_path": str(resume_path or ""),
+                      "output_dir": output_directory}
         try:
             self._history_store().save(run_record)
         except Exception as exc:
@@ -3123,7 +3135,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         root_string_fields = {
             "mode", "base_type", "base_model", "raw_dir", "trigger", "reg_dir",
             "style_preset", "style_caption", "at_sub_mode", "concept_type", "fast_tier",
-            "global_pos", "global_neg", "train_env", "training_kind",
+            "global_pos", "global_neg", "train_env", "training_kind", "output_dir",
         }
         root_bool_fields = {"unet_only"}
         param_fields = set(WORKSPACE_PARAM_KEYS)
@@ -3144,6 +3156,19 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             if not isinstance(value, str) or len(value) > 32768:
                 return {"ok": False, "error": "字段「%s」的格式无效。" % key}
             config[key] = value
+        if "output_dir" in patch:
+            directory = config["output_dir"].strip()
+            if directory:
+                if not os.path.isabs(directory) or not os.path.isdir(directory):
+                    return {"ok": False, "error": "请选择已存在的输出文件夹（完整路径）。"}
+                directory = os.path.realpath(directory)
+                try:
+                    import tempfile
+                    with tempfile.TemporaryFile(dir=directory):
+                        pass
+                except OSError as exc:
+                    return {"ok": False, "error": "输出目录不可写：%s" % exc}
+            config["output_dir"] = directory
         for key in root_bool_fields:
             if key not in patch:
                 continue
@@ -3228,8 +3253,11 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             if config.get("mode") not in IMAGE_MODES: return {"ok": False, "error": "多角色模式请选择图像人物 LoRA 入口。"}
             config.update(trigger="", at_sub_mode="character")
             params.update(strong_bind=False, clean_concept=False, keep_user_captions=True, caption_method="existing", crop_ratio="")
-        if not self.core.save_project(name, config):
-            return {"ok": False, "error": "项目保存失败，请检查磁盘空间和写入权限。"}
+        with self._task_lock:
+            if "output_dir" in patch and self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "请等待当前任务结束，再切换输出目录。"}
+            if not self.core.save_project(name, config):
+                return {"ok": False, "error": "项目保存失败，请检查磁盘空间和写入权限。"}
         self._log("[项目] 已保存「%s」的训练配置。" % name)
         return {"ok": True, "project": next((p for p in self.list_projects() if p["name"] == name), None)}
 
@@ -3392,6 +3420,10 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         except (TypeError, ValueError):
             component_opacity = 100
         idle_fade_enabled = settings.get("modern_ui_idle_fade_enabled", False)
+        try:
+            font_scale = max(90, min(150, int(settings.get("modern_ui_font_scale", 100))))
+        except (TypeError, ValueError, OverflowError):
+            font_scale = 100
         background_history = settings.get("modern_ui_background_history", [])
         history_paths = ModernUIBridge._normalize_appearance_background_history(
             background_history, background, background_source
@@ -3407,6 +3439,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             ],
             "component_opacity": component_opacity,
             "idle_fade_enabled": bool(idle_fade_enabled),
+            "font_scale": font_scale,
         }
 
     @staticmethod
@@ -3534,6 +3567,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         background_history=None,
         background_source_path=None,
         background_data_url=None,
+        font_scale=None,
     ):
         theme = str(theme or "dark")
         if theme not in ("dark", "light", "system"):
@@ -3556,6 +3590,14 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         current_settings = self.core._load_app_settings() or {}
         current_settings = current_settings if isinstance(current_settings, dict) else {}
         old_background_path = str(current_settings.get("modern_ui_background") or "")
+        if font_scale is None:
+            font_scale = self._appearance_settings_from_core(self.core)["font_scale"]
+        try:
+            font_scale = int(font_scale)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "字体大小无效，请选择 90%–150%。"}
+        if not 90 <= font_scale <= 150:
+            return {"ok": False, "error": "字体大小请选择 90%–150%。"}
         settings = dict(current_settings) if isinstance(current_settings, dict) else {}
         if component_opacity is None:
             component_opacity = current_settings.get("modern_ui_component_opacity", 100)
@@ -3589,6 +3631,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         settings["modern_ui_background_opacity"] = opacity
         settings["modern_ui_component_opacity"] = component_opacity
         settings["modern_ui_idle_fade_enabled"] = bool(idle_fade_enabled)
+        settings["modern_ui_font_scale"] = font_scale
         settings["modern_ui_background_history"] = history_paths
         if not self.core._save_app_settings(settings):
             if created_background_path:
@@ -4252,6 +4295,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 from kohya_core.multi_character import IMAGE_MODES
                 if mode not in IMAGE_MODES: return {"ok": False, "error": "多角色模式请选择图像人物 LoRA 入口。"}
                 data.update(training_kind="multi_character", multi_character={"roles": [], "groups": [], "targets": [], "balance": True})
+                if mode == "moss_fz": data["multi_character"]["moss"] = {"layout": True, "dop": False}
                 data["params"].update(strong_bind=False, clean_concept=False, keep_user_captions=True, caption_method="existing")
             data["at_sub_mode"] = "character" if training_type == "multi_character" else training_type
             if model_choice: data["model_choice"] = {k: model_choice[k] for k in ("model", "variant", "engine")}
@@ -4427,7 +4471,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
     def run_action(self, action, project_name=None):
         """Open legacy secondary utilities as isolated popups; never fall back to its workspace."""
         action = str(action or "")
-        view_action = action in ("output_dir", "export_training_feedback", "export_log", "export_diagnostics")
+        view_action = action in ("output_dir", "output_dir_info", "export_training_feedback", "export_log", "export_diagnostics")
         with self._task_lock:
             task = self._task or {}
             reviewing_labels = (action == "label_editor" and task.get("kind") == "training"
@@ -4485,6 +4529,32 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             message = "[模型] 已打开 %s 模型目录：%s" % (mode, path)
             self._log(message)
             return {"ok": True, "message": "已打开模型目录。", "log": message}
+
+        if action in ("output_dir_info", "choose_output_dir", "reset_output_dir"):
+            name = str(project_name or "").strip()
+            config = self.core.load_project(name) if name else None
+            if not isinstance(config, dict):
+                return {"ok": False, "error": "请先打开一个有效项目。"}
+            if action == "output_dir_info":
+                from kohya_core.paths import project_output_dir
+                return {"ok": True, "path": project_output_dir(name)}
+            with self._task_lock:
+                if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                    return {"ok": False, "error": "请等待当前任务结束，再切换输出目录。"}
+            directory = ""
+            if action == "choose_output_dir":
+                selected = self.choose_path("folder", self.core.data_sub("output", name), "project_output")
+                if not selected.get("ok"):
+                    return selected
+                if selected.get("cancelled") or not selected.get("path"):
+                    return {"ok": True, "message": "已取消，输出目录保持原设置。"}
+                directory = selected["path"]
+            result = self.save_project_config(name, {"output_dir": directory})
+            if not result.get("ok"):
+                return result
+            path = self.core.data_sub("output", name)
+            self._log("[目录] 项目「%s」的输出目录：%s；已有文件保留在原目录。" % (name, path))
+            return {"ok": True, "path": path, "message": "输出目录已保存；已有文件保留在原目录。"}
 
         if action == "output_dir":
             path = self.core.data_sub("output", project_name) if project_name else self.core.data_sub("output")

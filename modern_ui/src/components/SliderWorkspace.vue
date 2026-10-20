@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OutputDirectoryControl from './OutputDirectoryControl.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig, SliderSettings } from '../bridge'
 import SliderSampleStrip from './SliderSampleStrip.vue'
@@ -129,7 +130,7 @@ defineExpose({ hasUnsavedChanges: () => unsaved.value, startTraining, save: () =
           <div class="launch"><span>{{ missing || '确认训练配置后启动' }}</span><button class="primary" type="button" :disabled="Boolean(missing)" @click="startTraining">{{ draft.preset==='trial' ? '开始试训' : '开始训练' }}</button></div>
         </section>
       </div>
-      <aside class="result-column"><SliderSampleStrip :project-name="project.name" :desktop="desktop"/><div class="quality-note"><details><summary>使用说明</summary><ul><li>权重 0 停用 LoRA，使用底模基线。</li><li>文字模式依赖底模已有概念；自定义视觉效果可使用图片对。</li><li>每次从头训练；试训结束时采样，正式训练定期采样。</li><li>比较变化方向、内容保持及跨场景效果；损失值仅供参考。</li></ul></details><button type="button" @click="emit('classicAction','output_dir',patch)">打开输出目录</button></div></aside>
+      <aside class="result-column"><SliderSampleStrip :project-name="project.name" :desktop="desktop"/><div class="quality-note"><OutputDirectoryControl :project-name="project.name" :config="config" :desktop="desktop" @action="emit('classicAction', $event, patch)" /><details><summary>使用说明</summary><ul><li>权重 0 停用 LoRA，使用底模基线。</li><li>文字模式依赖底模已有概念；自定义视觉效果可使用图片对。</li><li>每次从头训练；试训结束时采样，正式训练定期采样。</li><li>比较变化方向、内容保持及跨场景效果；损失值仅供参考。</li></ul></details><button type="button" @click="emit('classicAction','output_dir',patch)">打开输出目录</button></div></aside>
     </div>
     <Teleport to="body"><div v-if="view" class="pair-preview" role="dialog" aria-modal="true" aria-label="图片对预览" @click.self="view=null" @keydown.esc="view=null"><div><header><strong>对照图片</strong><button type="button" autofocus @click="view=null">关闭</button></header><div class="pair-images"><figure v-for="side in ['negative','positive'] as const" :key="side"><img v-if="pairImages[side]" :src="pairImages[side]" :alt="side==='negative' ? negativeLabel : positiveLabel"><figcaption>{{ side==='negative' ? negativeLabel : positiveLabel }}</figcaption></figure></div></div></div></Teleport>
   </div>

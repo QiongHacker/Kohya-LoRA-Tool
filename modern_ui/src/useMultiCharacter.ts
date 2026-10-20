@@ -14,7 +14,14 @@ export function importedMultiSettings(value: unknown): MultiCharacterSettings {
     if (typeof value !== 'string' || value.length > 4096 || value.includes('\0')) throw new Error('多角色字段格式无效。')
     return value.trim()
   }
-  const roles = rows('roles').map(row => ({ id: text(row.id), name: text(row.name), trigger: text(row.trigger), directory: '', description: text(row.description) }))
+  const roles = rows('roles').map(row => {
+    const role: MultiCharacterSettings['roles'][number] = { id: text(row.id), name: text(row.name), trigger: text(row.trigger), directory: '', description: text(row.description) }
+    if (row.class_word !== undefined) {
+      if (typeof row.class_word !== 'string' || !['person', 'woman', 'man', 'girl', 'boy'].includes(row.class_word)) throw new Error('MOSS 角色类别无效。')
+      role.class_word = row.class_word
+    }
+    return role
+  })
   const ids = new Set(roles.map(r => r.id))
   if (ids.size !== roles.length || roles.some(r => !/^[a-zA-Z0-9_-]{1,64}$/.test(r.id))) throw new Error('角色 ID 无效或重复。')
   const triggers = roles.map(r => r.trigger.toLowerCase()).filter(Boolean)
@@ -34,7 +41,14 @@ export function importedMultiSettings(value: unknown): MultiCharacterSettings {
   if (groupIds.size !== groups.length || groups.some(g => ids.has(g.id) || !/^[a-zA-Z0-9_-]{1,64}$/.test(g.id))) throw new Error('同框组 ID 无效或重复。')
   const targets = rows('targets').map(row => ({ role_ids: roleIds(row.role_ids ?? []), prompt: text(row.prompt) }))
   if (data.balance !== undefined && typeof data.balance !== 'boolean') throw new Error('角色采样开关无效。')
-  return { roles, groups, targets, balance: data.balance !== false }
+  const settings: MultiCharacterSettings = { roles, groups, targets, balance: data.balance !== false }
+  if (data.moss !== undefined) {
+    if (!data.moss || typeof data.moss !== 'object' || Array.isArray(data.moss)) throw new Error('MOSS 多角色选项无效。')
+    const moss = data.moss as Record<string, unknown>
+    if (['layout', 'dop'].some(key => moss[key] !== undefined && typeof moss[key] !== 'boolean')) throw new Error('MOSS 多角色开关无效。')
+    settings.moss = { layout: moss.layout !== false, dop: moss.dop === true }
+  }
+  return settings
 }
 
 export function useMultiCharacter(config: () => ProjectConfig | null | undefined, dirty: Set<string>) {

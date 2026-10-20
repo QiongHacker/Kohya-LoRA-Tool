@@ -184,6 +184,16 @@ def preview_prompts(params, subsets):
     """One stable, relevant caption for automatic previews; explicit prompts stay intact."""
     custom = str(params.get("sample_prompt") or "").strip()
     positive = str(params.get("global_pos") or "").strip()
+    if params.get("mode") == "moss_fz":
+        from .moss_multi_character import prompt_lines, preview_selection
+        if custom:
+            return prompt_lines(custom, positive), "custom"
+        if params.get("training_kind") == "multi_character":
+            from .multi_character import normalize, validation_prompts
+            settings = normalize(params.get("multi_character", {}))
+            prompts = validation_prompts(settings, mode="moss_fz", resolution=params.get("resolution", 512))
+            selected = preview_selection(prompts)
+            return [line for item in selected for line in prompt_lines(item["prompt"], positive)], "multi_character"
     if custom:
         lines, origin = [line.strip() for line in custom.splitlines() if line.strip()], "custom"
     else:
@@ -367,6 +377,8 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         if family == "sdxl": env["FIZGIG_SDXL_CONFIG_DIR"] = folder
     if family == "qwen_image21":
         env["FIZGIG_QWEN21_PROCESSOR_DIR"] = str(Path(core._ensure_at_image_qwen21_assets(logf)) / "processor")
+    enabled = core._sample_preview_enabled(params, vram_gb)
+    planned_preview = preview_prompts(dict(params, mode=mode), subsets) if enabled else None
     fingerprint, identity = _cache_identity(core, family, files, subsets, resolution, commit,
                                             training_type=h3_training_type if family == "minimax" else None)
     cache = Path(core.data_sub("dataset", proj, "fizgig_v7_cache", family, fingerprint))
@@ -399,6 +411,23 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if files.get("training_adapter"): cmd += ["--training_adapter", files["training_adapter"]]
     if adaptive: cmd += ["--adaptive_lr", "--adaptive_lr_min", str(adaptive[0]), "--adaptive_lr_max", str(adaptive[1])]
     if params.get("trigger"): cmd += ["--trigger_word", str(params["trigger"])]
+    if family == "moss_image" and params.get("training_kind") == "multi_character":
+        from .multi_character import normalize
+        from .moss_multi_character import options as moss_options
+        settings = normalize(params.get("multi_character", {}))
+        roles = settings["roles"]
+        if len(roles) < 2 or any(not r["trigger"] for r in roles):
+            raise ValueError("MOSS 多角色训练请补齐至少两个角色及其触发词。")
+        cmd += ["--metadata_trigger_phrase", ", ".join(r["trigger"] for r in roles)]
+        dop = moss_options(settings)["dop"]
+        if dop:
+            cmd += ["--dop", "--dop_trigger", ",".join(r["trigger"] for r in roles),
+                    "--dop_class", ",".join(r.get("class_word", "person") for r in roles),
+                    "--dop_every", "2", "--dop_weight", "2"]
+        core._record_effective(training_kind="multi_character", multi_character_dop=dop,
+                               multi_character_triggers=[r["trigger"] for r in roles],
+                               multi_character_layout=moss_options(settings)["layout"])
+        logf("[MOSS 多角色] %d 个角色；保留原触发词；DOP %s。" % (len(roles), "开启：每 2 步、权重 2" if dop else "关闭"))
     if resume_from: cmd += ["--resume", str(resume_from)]
     options = []
     if family == "minimax":
@@ -415,10 +444,9 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if progress is not None:
         progress.set_total(total)
         if resume_from: progress.set_step(core.resume_step_from(resume_from))
-    enabled = core._sample_preview_enabled(params, vram_gb)
     sample_epochs = core._fizgig_sample_epochs(params, sum(r * n for _, r, n in subsets), epochs)
     if enabled:
-        prompt_lines, prompt_source = preview_prompts(params, subsets)
+        prompt_lines, prompt_source = planned_preview
         prompts = cache / "sample_prompts.txt"; prompts.write_text("\n".join(prompt_lines) + "\n", encoding="utf-8")
         steps, cfg = ((30, 4.5) if family == "anima" else (30, 3.0) if family == "sdxl" else (8, 1.0) if family == "zimage" else (30, 4.0) if family == "moss_image" else (20, 3.5))
         cmd += ["--sample_prompts", str(prompts), "--sample_every_n_epochs", str(sample_epochs),
@@ -434,7 +462,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         core._record_effective(sample_prompt="\n".join(prompt_lines), sample_prompt_source=prompt_source,
                                sample_prompt_file=str(prompts), sample_preview_checkpoint=preview_model,
                                sample_negative=str(params.get("global_neg") or "") if family != "zimage" else "")
-        monitored("[Fizgig] 预览提示词（%s）：%s" % ("自定义" if prompt_source == "custom" else "训练标签" if prompt_source == "dataset_caption" else "通用回退", " | ".join(prompt_lines)))
+        monitored("[Fizgig] 预览提示词（%s）：%s" % ("自定义" if prompt_source == "custom" else "多角色验证" if prompt_source == "multi_character" else "训练标签" if prompt_source == "dataset_caption" else "通用回退", " | ".join(prompt_lines)))
         monitored("[Fizgig] 预览底模：%s；使用引擎当前轮次 LoRA / EMA 权重，固定种子用于比较训练变化。" % preview_model)
         if (output / ".sample_override.json").is_file():
             monitored("[Fizgig] 注意：项目含外部引擎的 .sample_override.json，非空覆盖设置可能替代上述采样参数；请核对后续 [sample override] 日志。")

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OutputDirectoryControl from './OutputDirectoryControl.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
@@ -304,7 +305,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
     <div class="engine-scroll-area">
       <div class="engine-scroll-content" :inert="componentBusy || switchingVersion">
         <p v-if="isKrea2" class="krea2-workflow">环境准备 <span>→</span> 模型与组件 <span>→</span> 图集与标签 <span>→</span> 开始训练</p>
-        <MultiCharacterPanel v-if="isMulti" :model-value="multiSettings" :project-name="project.name" :desktop="desktop" :choose-path="choosePath" @update:model-value="updateMulti" @notify="emit('notify',$event)" />
+        <MultiCharacterPanel v-if="isMulti" :mode="mode" :model-value="multiSettings" :project-name="project.name" :desktop="desktop" :choose-path="choosePath" @update:model-value="updateMulti" @notify="emit('notify',$event)" />
         <component :is="isKrea2 ? 'details' : 'section'" v-if="isFizgig" class="engine-card runtime-card">
           <summary v-if="isKrea2" class="runtime-summary">环境与引擎 · {{ details.fizgig_version }}<span>{{ switchingVersion ? '正在切换版本' : componentVersionPending ? '版本修改待保存' : details.engine_ready ? '已就绪 · 可展开调整' : '未就绪 · 展开安装' }}</span></summary>
           <div class="runtime-choice"><label class="engine-field"><span>此项目的训练引擎版本</span><select v-model="draft.fizgig_version" class="engine-select" :disabled="switchingVersion" @change="onVersionChange"><option v-for="v in versions" :key="v" :value="v">{{ v }}{{ details.fizgig_versions?.includes(v) ? ' · 已安装' : ' · 需安装 / 更新' }}</option></select></label><button v-if="desktop && !details.engine_ready" class="engine-button compact" type="button" :disabled="componentVersionPending || switchingVersion" @click="requestAction('cmd_install_fizgig')">配置 {{ draft.fizgig_version }}</button></div>
@@ -419,6 +420,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           </div>
         </section>
 
+        <OutputDirectoryControl :project-name="project.name" :config="config" :desktop="desktop" @action="requestAction" />
         <div class="engine-utility-row">
           <button v-if="!isH3Fizgig" class="engine-utility" type="button" :title="legacyTooltips.preprocess" @click="requestAction('preprocess')">数据预处理</button>
           <button v-if="!isVideo || isH3Fizgig" class="engine-utility" type="button" :title="legacyTooltips.labelEditor" @click="requestAction('label_editor')">标签编辑器</button>

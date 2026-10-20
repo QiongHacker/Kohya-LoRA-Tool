@@ -26,6 +26,61 @@ def phase(message, progress=None):
     print("WORKBENCH:" + json.dumps({"message": message, "progress": progress}, ensure_ascii=False), flush=True)
 
 
+def profile_layout(desc, driver, have):
+    """Define one layout for inspection, render conditions and saved results."""
+    from fizgig.families.block_profile import windows
+    native = windows(SimpleNamespace(primary_block_ids=set(have), block_groups=driver.block_map))
+    if desc.key != "anima" or desc.n_blocks != 28:
+        return "native", native
+    catalog = json.loads(Path(__file__).with_name("anima_layer_guide.json").read_text(encoding="utf-8"))
+    if catalog.get("schema") != 1 or len(catalog["layers"]) != 28:
+        raise ValueError("Anima 分组资料无效，请使用完整安装包。")
+    available, covered, result = set(have), set(), []
+    for group in catalog["groups"]:
+        ids = [f"block_{i}" for i in range(group["start"], group["end"] + 1) if f"block_{i}" in available]
+        if not ids:
+            continue
+        if covered.intersection(ids) or len(ids) > 6:
+            raise ValueError("Anima 分组层级配置无效。")
+        covered.update(ids)
+        label = f"{group['label']} · L{group['start']:02d}–L{group['end']:02d}"
+        result.append((group["id"], label, ids))
+    # Keep text adapters / other mapped components separate from the DiT guide.
+    for wid, label, ids in native:
+        extra = [bid for bid in ids if bid not in covered]
+        if extra:
+            result.append(("component_" + wid, label, extra))
+            covered.update(extra)
+    if covered != available or not result or any(len(ids) > 6 for _, _, ids in result):
+        raise ValueError("Anima 分组与文件层级不匹配，请重新读取。")
+    return catalog["grouping"], result
+
+
+@contextmanager
+def profile_group_map(engine, info):
+    """Present the chosen groups to upstream Profiler, only on this job's engine.
+
+    Upstream windows() keeps groups of at most six blocks whole. Stable group IDs
+    are used as temporary labels; friendly labels are restored in our report.
+    Sampling, conditions, image metrics and suggestions remain upstream code.
+    """
+    if info.get("profile_grouping") != "anima_community_v1":
+        yield
+        return
+    original = engine.block_groups
+    indexed = {block.id: block for group in original() for block in group.blocks}
+    expected = info["profile_windows"]
+    ids = [bid for group in expected for bid in group["blocks"]]
+    if set(ids) != set(engine.primary_block_ids) or len(ids) != len(set(ids)) or set(ids) - set(indexed):
+        raise ValueError("采样引擎的层级与当前 LoRA 分组不一致。")
+    groups = [SimpleNamespace(label=group["id"], blocks=[indexed[bid] for bid in group["blocks"]]) for group in expected]
+    engine.block_groups = lambda: groups
+    try:
+        yield
+    finally:
+        engine.block_groups = original
+
+
 def inspect(path, family):
     from safetensors import safe_open
     from fizgig.families.registry import get, family_of_lora
@@ -79,11 +134,10 @@ def inspect(path, family):
         if unknown or extra:
             warnings.append("%d 个未映射权重对 / %d 个附加张量将原样保留；此文件暂不提供预览与压缩。" % (len(unknown), len(extra)))
         linear = all(not isinstance(up, tuple) and len(f.get_slice(dk).get_shape()) == 2 and len(f.get_slice(up).get_shape()) == 2 for _, dk, up, _ in pairs)
-    from fizgig.families.block_profile import windows
-    profile_windows = [{"id": wid, "label": label, "blocks": ids} for wid, label, ids in
-                       windows(SimpleNamespace(primary_block_ids=set(counts), block_groups=driver.block_map))]
-    return desc, pairs, {"profile_windows": profile_windows, "source": str(path.resolve()), "name": path.name, "fingerprint": digest, "family": desc.key,
-        "family_label": desc.display_name, "bytes": path.stat().st_size, "ranks": sorted(ranks), "groups": groups,
+    grouping, layout = profile_layout(desc, driver, counts)
+    profile_windows = [{"id": wid, "label": label, "blocks": ids} for wid, label, ids in layout]
+    return desc, pairs, {"profile_windows": profile_windows, "profile_grouping": grouping, "source": str(path.resolve()), "name": path.name, "fingerprint": digest, "family": desc.key,
+        "family_label": desc.display_name, "architecture_blocks": desc.n_blocks, "bytes": path.stat().st_size, "ranks": sorted(ranks), "groups": groups,
         "pairs": len(pairs), "mapped_pairs": len(pairs) - len(unknown), "warnings": warnings,
         "can_preview": not unknown and not extra and desc.key != "minimax",
         "can_compress": not unknown and not extra and linear}
@@ -347,7 +401,13 @@ def profile(desc, pairs, source, info, options, folder):
                 raise ValueError("参考照片未识别出可用人脸：" + Path(path).name + "。请选择清晰的单人照片，或清空参考照片。")
             baselines.append(vector)
         embed = embedding_for_image
-    with preview_engine(desc, pairs, source, info, params) as engine:
+    with preview_engine(desc, pairs, source, info, params) as engine, profile_group_map(engine, info):
+        from fizgig.families.block_profile import windows
+        actual = windows(engine)
+        expected = info["profile_windows"]
+        if [(wid, ids) for wid, _, ids in actual] != [(group["id"], group["blocks"]) for group in expected]:
+            raise ValueError("采样分组已发生变化，请重新读取 LoRA。")
+        engine_windows = [(group["id"], group["label"], group["blocks"]) for group in expected]
         conds = conditions(engine, per_block=False)
         kinds = ["trigger"] + (["class"] if class_prompt else [])
         sequence = [(kind, cid, label) for kind in kinds for cid, label, _ in conds]
@@ -363,8 +423,8 @@ def profile(desc, pairs, source, info, options, folder):
                 ("仅保留 " if cid.startswith("keep:") else "关闭 ") + next(l for w, l, _ in engine_windows if cid.split(":", 1)[1] == w))
             state.primary_scale = params["strength"]
             kwargs["steps"] = params["steps"]
-            phase("Profiler %d / %d · %s" % (index + 1, total, label), index / total)
-            engine.on_step = lambda done, steps: phase("Profiler %d / %d · %s · %d / %d" % (index + 1, total, label, done, steps), (index + done / max(1, steps)) / total)
+            phase("分组对照 %d / %d · %s" % (index + 1, total, label), index / total)
+            engine.on_step = lambda done, steps: phase("分组对照 %d / %d · %s · %d / %d" % (index + 1, total, label, done, steps), (index + done / max(1, steps)) / total)
             image = generate(state, **kwargs)
             name = "profile_%04d.png" % index
             image.save(folder / name)
@@ -372,16 +432,15 @@ def profile(desc, pairs, source, info, options, folder):
             names[(kind, cid)] = name
             return image
 
-        from fizgig.families.block_profile import windows
-        engine_windows = windows(engine)
         engine.generate_preview = render
         try:
             abl = run_ablation(engine, prompt=params["prompt"], class_prompt=class_prompt,
                                seeds=(params["seed"],), width=params["width"], height=params["height"],
                                embed=embed, baselines=baselines, per_block=False,
-                               on_progress=lambda done, count, *_: phase("Profiler 已完成 %d / %d 张" % (done, count), done / count))
+                               on_progress=lambda done, count, *_: phase("分组对照已完成 %d / %d 张" % (done, count), done / count))
         finally:
             engine.generate_preview = generate
+        abl["windows"] = engine_windows
         vd = verdicts(abl)
         suggested, _ = repair_settings(abl)
         values = {b["id"]: 1.0 for g in info["groups"] for b in g["blocks"]}
@@ -415,7 +474,7 @@ def profile(desc, pairs, source, info, options, folder):
         steps, cfg, _, _ = engine.sampling()
         return {"recipe": dict(params, steps=steps, cfg=cfg), "blocks": factors(info, options),
                 "profile_images": manifest,
-                "profile": {"mode": "quick", "scope": "original", "windows": results, "renders": total,
+                "profile": {"mode": "quick", "scope": "original", "grouping": info["profile_grouping"], "windows": results, "renders": total,
                             "baseline": picture("trigger", "full"), "off": picture("trigger", "none"),
                             "class_baseline": picture("class", "full") if class_prompt else None,
                             "class_off": picture("class", "none") if class_prompt else None,

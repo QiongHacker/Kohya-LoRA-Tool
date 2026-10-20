@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import type { MultiCharacterSettings, MultiCharacterScan } from '../bridge'
 import DatasetInspection from './DatasetInspection.vue'
 const props = defineProps<{
-  modelValue: MultiCharacterSettings; projectName: string; desktop: boolean;
+  modelValue: MultiCharacterSettings; projectName: string; desktop: boolean; mode?: string;
   choosePath: (kind: 'folder' | 'model', currentPath?: string, memoryKey?: string) => Promise<string | null>;
 }>()
 const emit = defineEmits<{ 'update:modelValue': [value: MultiCharacterSettings]; notify: [message: string] }>()
@@ -11,6 +11,25 @@ const inspection = ref<MultiCharacterScan | null>(null)
 const inspecting = ref(false)
 const error = ref('')
 const roleCount = computed(() => props.modelValue.roles.length)
+const isMoss = computed(() => props.mode === 'moss_fz')
+const moss = computed(() => props.modelValue.moss || { layout: true, dop: false })
+function mossOption(key: 'layout' | 'dop', event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  change(s => { s.moss = { ...moss.value, [key]: checked } })
+}
+function classWord(index: number, event: Event) {
+  change(s => { s.roles[index]!.class_word = (event.target as HTMLSelectElement).value })
+}
+function targetsFromGroups() {
+  change(s => {
+    const seen = new Set(s.targets.map(t => [...t.role_ids].sort().join(',')))
+    for (const group of s.groups) {
+      const ids = group.members.map(m => m.role_id)
+      const key = [...ids].sort().join(',')
+      if (ids.length >= 2 && !seen.has(key)) { s.targets.push({ role_ids: ids, prompt: '' }); seen.add(key) }
+    }
+  })
+}
 const newId = () => 'r_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 function change(apply: (settings: MultiCharacterSettings) => void) {
   const value: MultiCharacterSettings = JSON.parse(JSON.stringify(props.modelValue))
@@ -18,7 +37,15 @@ function change(apply: (settings: MultiCharacterSettings) => void) {
 }
 function addRole() {
   const id = newId()
-  change(s => s.roles.push({ id, name: `角色 ${s.roles.length + 1}`, trigger: 'char_' + id.slice(2, 10), directory: '', description: '' }))
+  change(s => {
+    const candidates = ['zwxem', 'knurv', 'gwelt', 'jeskv', 'vorlk', 'thrisk', 'dlor']
+    const unusedInitial = (initial: string) => s.roles.every(r => !r.trigger.toLowerCase().startsWith(initial))
+    const initial = [...'abcdefghijklmnopqrstuvwxyz'].find(unusedInitial) || 'x'
+    const trigger = isMoss.value
+      ? candidates.find(word => unusedInitial(word[0]!)) || initial + id.slice(2, 10)
+      : 'char_' + id.slice(2, 10)
+    s.roles.push({ id, name: `角色 ${s.roles.length + 1}`, trigger, directory: '', description: '' })
+  })
 }
 function removeRole(id: string) {
   change(s => {
@@ -82,7 +109,7 @@ async function inspect() {
 
 <template>
   <section class="multi-panel">
-    <header class="multi-heading"><div><span class="eyebrow">多角色 LoRA · 实验性</span><h2>角色与同框素材</h2><p>每个角色使用独立触发词。先验证单人身份，再验证同框组合。</p></div><span class="count">{{ roleCount }} 个角色</span></header>
+    <header class="multi-heading"><div><span class="eyebrow">{{ isMoss ? 'MOSS 多角色 LoRA' : '多角色 LoRA' }} · 实验性</span><h2>角色与同框素材</h2><p>{{ isMoss ? '独立角色 + 同框素材，Base 训练、SFT 预览。用单人、合照和换位对照检查身份。' : '每个角色使用独立触发词。先验证单人身份，再验证同框组合。' }}</p></div><span class="count">{{ roleCount }} 个角色</span></header>
     <section class="multi-section">
       <header><h3>01 角色库</h3><button type="button" @click="addRole">＋ 添加角色</button></header>
       <p v-if="!roleCount" class="empty">添加至少两个角色，并分别选择单人素材。</p>
@@ -92,6 +119,7 @@ async function inspect() {
           <div class="fields"><label>名称<input :value="role.name" @input="field(i, 'name', $event)" /></label><label>触发词<input :value="role.trigger" spellcheck="false" @input="field(i, 'trigger', $event)" /></label></div>
           <label>单人素材目录<div class="path"><input :value="role.directory" placeholder="图片与同名 .txt" @input="field(i, 'directory', $event)" /><button type="button" @click="browse('role', i)">选择</button></div></label>
           <label>角色描述<textarea :value="role.description" placeholder="缺少逐图标签时使用；建议描述身份、外观和服装" rows="2" @input="field(i, 'description', $event)"></textarea></label>
+          <label v-if="isMoss && moss.dop">DOP 中的通用类别<select :value="role.class_word || 'person'" @change="classWord(i, $event)"><option value="person">person · 人物</option><option value="woman">woman · 女性</option><option value="man">man · 男性</option><option value="girl">girl · 女孩</option><option value="boy">boy · 男孩</option></select></label>
           <details v-if="role.directory"><summary>查看原图与标签</summary><DatasetInspection :directory="role.directory" :desktop="desktop" :natural="true" :keep-captions="true" /></details>
         </article>
       </div>
@@ -99,7 +127,7 @@ async function inspect() {
     </section>
     <section class="multi-section">
       <header><h3>02 同框素材</h3><button type="button" :disabled="roleCount < 2" @click="addGroup">＋ 添加同框组</button></header>
-      <p class="hint">同组图片应包含相同角色。站位不同请分组，或为每张图准备准确的身份与位置描述。</p>
+      <p class="hint">同组图片应包含相同角色。站位不同请分组，或为每张图准备准确的身份与位置描述。{{ isMoss ? '建议逐人写清触发词、外观、服装和动作，避免只堆人物标签。' : '' }}</p>
       <p v-if="!modelValue.groups.length" class="empty">尚无同框素材；可以训练分别调用角色，同框效果待验证。</p>
       <article v-for="(group, i) in modelValue.groups" :key="group.id" class="group-card">
         <header><input :value="group.name" aria-label="同框组名称" @input="groupField(i,'name',$event)" /><button class="text-button" type="button" @click="change(s => { s.groups.splice(i,1) })">移除</button></header>
@@ -114,14 +142,21 @@ async function inspect() {
     <section class="multi-section">
       <header><h3>03 目标组合</h3><button type="button" :disabled="roleCount < 2" @click="change(s => s.targets.push({role_ids:[],prompt:''}))">＋ 添加组合</button></header>
       <p class="hint">按勾选顺序生成默认站位，也可填写完整提示词。没有对应同框素材的组合会标记为待验证。</p>
+      <button v-if="isMoss && modelValue.groups.some(g => g.members.length >= 2)" type="button" @click="targetsFromGroups">从同框素材添加组合</button>
       <article v-for="(target, i) in modelValue.targets" :key="i" class="target-card">
         <header><strong>{{ target.role_ids.map(roleName).join(' ＋ ') || '选择至少两个角色' }}</strong><button class="text-button" type="button" @click="change(s => { s.targets.splice(i,1) })">移除</button></header>
         <div class="role-chips"><label v-for="role in modelValue.roles" :key="role.id"><input type="checkbox" :checked="target.role_ids.includes(role.id)" @change="toggleTarget(i,role.id,$event)" />{{ role.name }}</label></div>
         <textarea :value="target.prompt" placeholder="验证提示词（可选）；留空按勾选顺序生成从左到右的站位" rows="2" @input="change(s => { s.targets[i]!.prompt = ($event.target as HTMLTextAreaElement).value })"></textarea>
       </article>
-      <p v-if="!modelValue.targets.length" class="empty">添加希望验证的同框组合。</p>
+      <p v-if="!modelValue.targets.length" class="empty">{{ isMoss ? '留空按同框素材生成验证组合；无同框素材时验证双人和全角色组合。' : '添加希望验证的同框组合。' }}</p>
     </section>
-    <footer class="multi-footer"><span>训练参数沿用当前模型。默认生成最多 6 条采样提示词，完整验证提示词保存到输出目录。</span><button type="button" :disabled="inspecting || !desktop" @click="inspect">{{ inspecting ? '检查中…' : '检查素材与标签' }}</button></footer>
+    <section v-if="isMoss" class="multi-section moss-options">
+      <header><h3>04 MOSS 同框验证与约束</h3></header>
+      <label class="check"><input type="checkbox" :checked="moss.layout" @change="mossOption('layout', $event)" />使用 MOSS 原生布局验证<span>默认组合生成分区 JSON 提示词和换位对照；自填提示词按原文使用。</span></label>
+      <label class="check"><input type="checkbox" :checked="moss.dop" @change="mossOption('dop', $event)" />DOP 角色泄漏约束（实验性）<span>每 2 步增加一次约束，权重 2；不含触发词时约束 LoRA 保留底模输出。会增加缓存和训练耗时。</span></label>
+      <p class="hint">DOP 默认关闭，MOSS 效果待验证；此项不包含上游完整隔离方案的拼图增强和触发词拼接。</p>
+    </section>
+    <footer class="multi-footer"><span>训练参数沿用当前模型。默认生成最多 6 条采样提示词，完整验证提示词保存到输出目录。{{ isMoss ? '低显存自动档可能关闭训练中采样，可在采样预览中手动开启。' : '' }}</span><button type="button" :disabled="inspecting || !desktop" @click="inspect">{{ inspecting ? '检查中…' : '检查素材与标签' }}</button></footer>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <div v-if="inspection" class="inspection" role="status">
       <strong>{{ inspection.images }} 张原图 · 均衡后 {{ inspection.training_images }} 个训练样本</strong>
@@ -132,5 +167,5 @@ async function inspect() {
   </section>
 </template>
 <style scoped>
-.multi-panel{padding:22px;background:var(--card);border:1px solid var(--border);border-radius:14px;min-width:0;margin-bottom:20px;color:var(--text)}.multi-heading,.multi-section>header,.role-card>header,.group-card>header,.target-card>header,.multi-footer{display:flex;justify-content:space-between;align-items:center;gap:12px}.multi-heading h2{font-size:20px;margin:5px 0}.eyebrow,.count{color:var(--hint);font-size:12px}.multi-heading p,.hint,.empty,.multi-footer>span{font-size:12px;line-height:1.7;color:var(--hint);margin:7px 0}.multi-section{padding-top:20px;margin-top:18px;border-top:1px solid var(--border)}h3{font-size:14px;margin:0}.role-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px;margin:14px 0}.role-card,.group-card,.target-card{display:grid;gap:12px;min-width:0;border:1px solid var(--border);border-radius:10px;padding:15px;background:var(--bg)}.group-card,.target-card{margin:12px 0}.role-card>header strong,.target-card strong{font-size:13px}.fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}label{display:grid;gap:6px;font-size:12px;min-width:0}input:not([type=checkbox]),textarea{width:100%;min-width:0;box-sizing:border-box;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:9px;font:inherit;line-height:1.5}textarea{resize:vertical}.path{display:flex;gap:8px;min-width:0}.path input{flex:1}button{flex-shrink:0;padding:8px 11px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font:inherit;font-size:12px;cursor:pointer}button:disabled{opacity:.5;cursor:default}.text-button{padding:3px 0;border:0;background:transparent;color:var(--hint)}.check{display:flex;align-items:center;gap:8px;flex-wrap:wrap;line-height:1.6}.check span{color:var(--hint)}.role-chips{display:flex;flex-wrap:wrap;gap:8px}.role-chips label{display:flex;align-items:center;padding:6px 9px;border:1px solid var(--border);border-radius:6px}.multi-footer{padding-top:20px;align-items:flex-start}.error{font-size:13px;color:var(--warning,#e5ad6c);line-height:1.6;white-space:pre-wrap}.inspection{display:grid;gap:8px;padding:14px;margin-top:14px;background:var(--bg);border-radius:8px;font-size:12px}.inspection-row{display:flex;justify-content:space-between;gap:10px;color:var(--hint)}summary{font-size:12px;color:var(--hint);cursor:pointer}.prompt{overflow-wrap:anywhere;line-height:1.7}details{min-width:0}input:focus-visible,textarea:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:650px){.multi-panel{padding:15px}.fields{grid-template-columns:1fr}.multi-footer{flex-direction:column}.inspection-row{flex-direction:column;gap:3px}}
+.multi-panel{padding:22px;background:var(--card);border:1px solid var(--border);border-radius:14px;min-width:0;margin-bottom:20px;color:var(--text)}.multi-heading,.multi-section>header,.role-card>header,.group-card>header,.target-card>header,.multi-footer{display:flex;justify-content:space-between;align-items:center;gap:12px}.multi-heading h2{font-size:20px;margin:5px 0}.eyebrow,.count{color:var(--hint);font-size:12px}.multi-heading p,.hint,.empty,.multi-footer>span{font-size:12px;line-height:1.7;color:var(--hint);margin:7px 0}.multi-section{padding-top:20px;margin-top:18px;border-top:1px solid var(--border)}h3{font-size:14px;margin:0}.role-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px;margin:14px 0}.role-card,.group-card,.target-card{display:grid;gap:12px;min-width:0;border:1px solid var(--border);border-radius:10px;padding:15px;background:var(--bg)}.group-card,.target-card{margin:12px 0}.role-card>header strong,.target-card strong{font-size:13px}.fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}label{display:grid;gap:6px;font-size:12px;min-width:0}input:not([type=checkbox]),textarea,select{width:100%;min-width:0;box-sizing:border-box;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:9px;font:inherit;line-height:1.5}textarea{resize:vertical}.path{display:flex;gap:8px;min-width:0}.path input{flex:1}button{flex-shrink:0;padding:8px 11px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font:inherit;font-size:12px;cursor:pointer}button:disabled{opacity:.5;cursor:default}.text-button{padding:3px 0;border:0;background:transparent;color:var(--hint)}.check{display:flex;align-items:center;gap:8px;flex-wrap:wrap;line-height:1.6}.check span{color:var(--hint)}.role-chips{display:flex;flex-wrap:wrap;gap:8px}.role-chips label{display:flex;align-items:center;padding:6px 9px;border:1px solid var(--border);border-radius:6px}.multi-footer{padding-top:20px;align-items:flex-start}.moss-options{display:grid;gap:12px}.error{font-size:13px;color:var(--warning,#e5ad6c);line-height:1.6;white-space:pre-wrap}.inspection{display:grid;gap:8px;padding:14px;margin-top:14px;background:var(--bg);border-radius:8px;font-size:12px}.inspection-row{display:flex;justify-content:space-between;gap:10px;color:var(--hint)}summary{font-size:12px;color:var(--hint);cursor:pointer}.prompt{overflow-wrap:anywhere;line-height:1.7}details{min-width:0}input:focus-visible,textarea:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:650px){.multi-panel{padding:15px}.fields{grid-template-columns:1fr}.multi-footer{flex-direction:column}.inspection-row{flex-direction:column;gap:3px}}
 </style>

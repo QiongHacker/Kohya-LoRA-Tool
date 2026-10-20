@@ -15,7 +15,7 @@ import os
 import shutil
 
 from kohya_core.configs import OUTPUT_NAMES
-from kohya_core.paths import data_dir, _sanitize_dirname
+from kohya_core.paths import project_output_dir, _sanitize_dirname
 
 __all__ = ["find_final_lora", "export_project_named_lora"]
 
@@ -29,7 +29,7 @@ def _mtime(path):
 
 def _probe_output_dir(name):
     """输出子目录探测路径（只拼不建；data_sub 会 makedirs，探测阶段不能产生空目录）。"""
-    return os.path.join(data_dir(), "output", name)
+    return project_output_dir(name)
 
 
 def find_final_lora(out_dir, prefer_prefix=None, exclude_names=()):

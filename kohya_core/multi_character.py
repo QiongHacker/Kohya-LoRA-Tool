@@ -11,7 +11,7 @@ from pathlib import Path
 
 KIND = "multi_character"
 IMAGE_MODES = {"character", "krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz",
-               "qwen21_fz", "anima_fz", "sdxl_fz", "qwen_image", "zimage"}
+               "qwen21_fz", "anima_fz", "sdxl_fz", "qwen_image", "zimage", "moss_fz"}
 _ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _TRIGGER = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{2,63}$")
 
@@ -43,6 +43,12 @@ def normalize(value):
         roles.append({"id": rid, "name": _text(row.get("name", ""), 100), "trigger": trigger,
                       "directory": _text(row.get("directory", "")),
                       "description": _text(row.get("description", ""))})
+        if "class_word" in row:
+            from .moss_multi_character import CLASS_WORDS
+            word = row["class_word"]
+            if not isinstance(word, str) or word not in CLASS_WORDS:
+                raise ValueError("MOSS 角色类别请选择 person、woman、man、girl 或 boy。")
+            roles[-1]["class_word"] = word
     group_ids = set()
     for row in value.get("groups", []):
         if not isinstance(row, dict): raise ValueError("同框素材配置无效。")
@@ -69,14 +75,21 @@ def normalize(value):
             raise ValueError("目标组合引用了未知或重复角色。")
         targets.append({"role_ids": list(members), "prompt": _text(row.get("prompt", ""))})
     if not isinstance(value.get("balance", True), bool): raise ValueError("采样均衡必须是开关值。")
-    return {"roles": roles, "groups": groups, "targets": targets, "balance": value.get("balance", True)}
+    result = {"roles": roles, "groups": groups, "targets": targets, "balance": value.get("balance", True)}
+    if "moss" in value:
+        from .moss_multi_character import options
+        result["moss"] = options(value)
+    return result
 
 
 def _contains(text, trigger):
     return bool(re.search(r"(?<![\w])" + re.escape(trigger) + r"(?![\w])", text, re.I))
 
 
-def validation_prompts(settings):
+def validation_prompts(settings, *, mode=None, resolution=512):
+    if mode == "moss_fz":
+        from .moss_multi_character import validation_prompts as moss_prompts
+        return moss_prompts(settings, resolution)
     roles = {r["id"]: r for r in settings["roles"]}
     prompts = [{"kind": "solo", "roles": [r["id"]], "prompt":
                 f'{r["trigger"]}, {" ".join(r["description"].splitlines()) or "a person"}, medium shot, plain background'}
@@ -97,22 +110,26 @@ def validation_prompts(settings):
 
 def parameters(core, config, params):
     if config.get("mode") not in IMAGE_MODES: raise ValueError("多角色模式请选择图像人物 LoRA 训练入口。")
-    if config.get("mode", "").endswith("_fz") and params.get("fizgig_version") != "v7.0.1":
-        raise ValueError("多角色 Fizgig 入口请使用 v7.0.1；旧版本项目保留原训练方式。")
+    if config.get("mode", "").endswith("_fz"):
+        from .fizgig_engine import SUPPORTED_V7, MOSS_VERSION
+        allowed = (MOSS_VERSION,) if config["mode"] == "moss_fz" else SUPPORTED_V7
+        if params.get("fizgig_version") not in allowed:
+            raise ValueError("此多角色入口需要 Fizgig " + " / ".join(allowed) + "，请选择兼容版本。")
     settings = normalize(config.get("multi_character", {}))
     directories = [r["directory"] for r in settings["roles"]] + [g["directory"] for g in settings["groups"]]
     params.update(training_kind=KIND, multi_character=settings, at_sub_mode="character", trigger="",
                   strong_bind=False, clean_concept=False, keep_user_captions=True, caption_method="existing",
                   crop_ratio="", overwrite=True, raw_dir=next((d for d in directories if d), ""))
-    if not params.get("sample_prompt"):
-        prompts = validation_prompts(settings)
+    if not str(params.get("sample_prompt") or "").strip():
+        prompts = validation_prompts(settings, mode=config.get("mode"), resolution=params.get("resolution", 512))
         # Bound automatic preview cost; the full validation set is exported separately.
-        selected = [p for p in prompts if p["kind"] == "solo"][:2] + [p for p in prompts if p["kind"] != "solo"][:4]
-        params["sample_prompt"] = "\n".join(p["prompt"] for p in selected)
+        if config.get("mode") != "moss_fz":
+            selected = [p for p in prompts if p["kind"] == "solo"][:2] + [p for p in prompts if p["kind"] != "solo"][:4]
+            params["sample_prompt"] = "\n".join(p["prompt"] for p in selected)
     return params
 
 
-def scan(value, check_stop=lambda: None):
+def scan(value, check_stop=lambda: None, *, mode=None, resolution=512):
     from .project_config import dataset_images, read_caption
     settings = normalize(value)
     if len(settings["roles"]) < 2: raise ValueError("请至少添加两个角色。")
@@ -151,8 +168,12 @@ def scan(value, check_stop=lambda: None):
             elif group:
                 if any(not m["position"] for m in row["members"]):
                     raise ValueError(f"{image.name} 没有标签，请填写同框组各角色的位置，或准备逐图标签。")
+                def subject(member):
+                    role = role_map[member["role_id"]]
+                    description = " ".join(role["description"].split()).rstrip(".。")
+                    return role["trigger"] + (", " + description + "," if mode == "moss_fz" and description else "")
                 caption = f'{len(member_ids)} people. ' + " ".join(
-                    f'{role_map[m["role_id"]]["trigger"]} is {m["position"]}.' for m in row["members"])
+                    f'{subject(m)} is {m["position"]}.' for m in row["members"])
                 caption += " " + row["caption"]
                 generated += 1
             else:
@@ -177,22 +198,31 @@ def scan(value, check_stop=lambda: None):
         if len(target["role_ids"]) < 2: raise ValueError("目标组合至少选择两个角色。")
         if not any(set(target["role_ids"]) <= set(m["role_id"] for m in g["members"]) for g in settings["groups"]):
             warnings.append("目标组合「%s」没有对应同框样本，属于待验证组合。" % " + ".join(role_map[rid]["name"] for rid in target["role_ids"]))
+    prompts = validation_prompts(settings, mode=mode, resolution=resolution)
+    if mode == "moss_fz":
+        from .moss_multi_character import preview_selection, options
+        if len(preview_selection(prompts)) < len(prompts):
+            warnings.append("训练中自动预览最多 6 条；完整单人、同框及换位提示词会导出到输出目录。")
+        if not settings["targets"]:
+            warnings.append("未指定目标组合：验证将按同框组生成组合；无同框组时生成双人及全角色组合。")
+        if options(settings)["dop"]:
+            warnings.append("DOP 为实验性约束，会增加文本缓存和训练开销；MOSS 效果需验证，不等同于完整 Fizgig LoRA Isolation。")
     factors = {r["id"]: r["sampling_copies"] for r in summary}
     return {"settings": settings, "entries": entries, "roles": summary, "images": len(entries),
             "training_images": sum(factors[e["group_id"]] for e in entries), "warnings": warnings,
-            "validation": validation_prompts(settings)}
+            "validation": prompts}
 
 
-def public_scan(value):
-    result = scan(value)
+def public_scan(value, *, mode=None, resolution=512):
+    result = scan(value, mode=mode, resolution=resolution)
     return {k: v for k, v in result.items() if k not in ("entries", "settings")}
 
 
-def prepare(core, project, settings, resolution, logf=print, report=None):
+def prepare(core, project, settings, resolution, logf=print, report=None, *, mode=None):
     """Build a complete new flat dataset, then replace only the managed project directory."""
     from PIL import Image, ImageOps
     check_stop = core.check_stop
-    result = scan(settings, check_stop)
+    result = scan(settings, check_stop, mode=mode, resolution=resolution)
     resolution = int(resolution)
     if resolution < 64 or resolution > 4096: raise ValueError("训练分辨率应在 64～4096 范围内。")
     intended_root = Path(core.data_sub("dataset", project)).resolve()
@@ -248,11 +278,18 @@ def prepare(core, project, settings, resolution, logf=print, report=None):
             logf(f"[多角色] 旧预处理数据已保留：{backup}")
         output = Path(core.data_sub("output", project)); output.mkdir(parents=True, exist_ok=True)
         (output / "多角色验证提示词.txt").write_text("\n\n".join(p["prompt"] for p in result["validation"]), encoding="utf-8")
+        if mode == "moss_fz":
+            (output / "MOSS_多角色验证.jsonl").write_text("\n".join(
+                json.dumps({**p, "width": int(resolution), "height": int(resolution)}, ensure_ascii=False)
+                for p in result["validation"]) + "\n", encoding="utf-8")
         (output / "多角色使用说明.txt").write_text(
             "多角色 LoRA\n请使用训练时相同底模验证。角色触发词：\n" +
             "\n".join(f'{r["name"]}: {r["trigger"]}' for r in result["settings"]["roles"]) +
             "\n\n先分别验证角色，再检查目标组合及位置互换。重点检查身份、人数、服装归属和位置。\n" +
             "组描述仅是人工提供的标签模板，不代表已检查图片。采样关闭时可在出图工具使用验证提示词。\n" +
+            ("MOSS：Base 训练、默认 SFT 预览。JSON 布局只用于验证，不是局部重绘或逐人训练。\n"
+             "布局坐标按本次采样尺寸生成；在出图工具中保持相同宽高，整段 JSON 作为正向提示词。\n"
+             "DOP " + ("已开启" if settings.get("moss", {}).get("dop") else "未开启") + "；触发词保留原样，不做自动拼接或改名。\n" if mode == "moss_fz" else "") +
             "\n".join(result["warnings"]), encoding="utf-8")
         stats = {"ok": written, "skipped_existing": 0, "unique_images": result["images"], "multi_character": {k: result[k] for k in ("roles", "warnings", "validation")}}
         if report: Path(report).write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")

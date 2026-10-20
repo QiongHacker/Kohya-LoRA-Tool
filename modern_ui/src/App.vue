@@ -130,8 +130,9 @@ const appearanceDialogOpen = ref(false)
 const appearanceSaving = ref(false)
 const appearance = ref<AppearanceSettings>({
   theme: 'dark', background_path: '', background_source_path: '', background_opacity: 18, background_available: false,
-  background_history: [], component_opacity: 100, idle_fade_enabled: false,
+  background_history: [], component_opacity: 100, idle_fade_enabled: false, font_scale: 100,
 })
+const appearanceFontPreview = ref<number | null>(null)
 const appearanceImage = ref('')
 const appearancePresets = ref<AppearancePreset[]>([])
 const hiddenBuiltinPresetIds = ref<string[]>([])
@@ -1243,6 +1244,7 @@ async function saveAppearance(next: AppearanceSettings, presetName = '') {
       next.background_history.map((entry) => entry.path),
       next.background_source_path || next.background_path,
       next.background_data_url ?? '',
+      next.font_scale,
     )
     if (!saved.ok) {
       showToast(saved.error ?? '外观设置保存失败。')
@@ -1355,6 +1357,9 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
     return
   }
   const result = await window.pywebview.api.run_action(action, workspaceProject.value.name)
+  if (result.ok && ['choose_output_dir', 'reset_output_dir'].includes(action)) {
+    await restoredTrainingSettings()
+  }
   if (result.ok && result.task_id) return openAgentTask(result.task_id, workspaceProject.value.name, true)
   if (result.log) appendLog(result.log)
   if (!result.ok) showToast(result.error ?? '无法打开该功能。')
@@ -1479,6 +1484,10 @@ onUnmounted(() => {
 })
 
 watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
+watch(() => appearanceFontPreview.value ?? appearance.value.font_scale ?? 100, (percent) => {
+  document.documentElement.style.setProperty('--ui-font-scale', String(percent / 100))
+}, { immediate: true })
+watch(appearanceDialogOpen, (open) => { if (!open) appearanceFontPreview.value = null })
 </script>
 
 <template>
@@ -1698,6 +1707,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       :choose-background="chooseAppearanceBackground"
       :get-background-preview="getAppearanceImagePreview"
       @close="appearanceDialogOpen = false"
+      @preview-font-scale="appearanceFontPreview = $event"
       @save="saveAppearance"
       @delete-preset="deleteAppearancePreset"
       @restore-builtin-presets="restoreAppearanceBuiltinPresets"

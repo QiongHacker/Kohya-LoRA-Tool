@@ -6,6 +6,18 @@ import { resolve } from 'node:path'
 
 export default defineConfig({
   base: './',
+  css: {
+    postcss: {
+      plugins: [{
+        postcssPlugin: 'kohya-font-scale',
+        Declaration(declaration) {
+          if (!['font-size', 'font'].includes(declaration.prop) || declaration.value.includes('--ui-font-scale')) return
+          // Scale explicit sizes once, including scoped dialogs and monospace logs.
+          declaration.value = declaration.value.replace(/(\d*\.?\d+)px\b/g, 'calc($1px * var(--ui-font-scale, 1))')
+        },
+      }],
+    },
+  },
   plugins: [vue(), {
     name: 'kohya-ui-integrity',
     apply: 'build',

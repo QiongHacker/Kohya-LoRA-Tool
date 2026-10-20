@@ -49,6 +49,7 @@ export interface CreateProjectResult {
 }
 
 export interface ProjectConfig {
+  output_dir?: string
   [key: string]: unknown
   params?: Record<string, unknown>
   training_kind?: 'standard' | 'slider' | 'multi_character'
@@ -181,7 +182,7 @@ export interface AgentRun {
 }
 
 export interface LoRABlockGroup { label: string; blocks: Array<{ id: string; label: string; modules: number }> }
-export interface LoRAInfo { source: string; name: string; fingerprint: string; family: string; family_label: string; bytes: number; ranks: number[]; groups: LoRABlockGroup[]; pairs: number; mapped_pairs: number; warnings: string[]; profile_windows?: Array<{ id: string; label: string; blocks: string[] }>; can_preview: boolean; can_compress: boolean }
+export interface LoRAInfo { source: string; name: string; fingerprint: string; family: string; family_label: string; architecture_blocks?: number; profile_grouping?: string; bytes: number; ranks: number[]; groups: LoRABlockGroup[]; pairs: number; mapped_pairs: number; warnings: string[]; profile_windows?: Array<{ id: string; label: string; blocks: string[] }>; can_preview: boolean; can_compress: boolean }
 export interface LoRAPreview { exact_attention?: boolean; dit: string; vae: string; te: string; prompt: string; negative: string; seed: number; width: number; height: number; steps: number; cfg: number; strength: number; precision: string; swap: number }
 export interface LoRAWorkbenchOptions { source: string; family: string; fingerprint?: string; blocks?: Record<string, number>; rank?: number; preview?: LoRAPreview; profile?: LoRAProfileConfig; explore?: LoRAExploreConfig }
 export interface LoRAWeightAnalysis { blocks: Record<string, { norm: number; retained: Record<string, number> }>; max_rank: number; modules: number; rank_for: Record<string, number> }
@@ -189,7 +190,7 @@ export interface LoRAProfileConfig { class_prompt: string; references: string[] 
 export interface LoRAProfilePicture { name: string; thumbnail: string; blocks?: Record<string, number> }
 export interface LoRAProfileBaseline { task_id: string; name: string; label: string; fingerprint: string; blocks: Record<string, number>; recipe: LoRAPreview }
 export interface LoRAProfileWindow { id: string; label: string; blocks: string[]; tag: string; text: string; alone_change: number | null; removed_change: number | null; likeness_share: number | null; bleed_share: number | null; alone: LoRAProfilePicture; removed: LoRAProfilePicture; class_alone: LoRAProfilePicture | null }
-export interface LoRAProfile { mode: string; scope: string; windows: LoRAProfileWindow[]; renders: number; baseline: LoRAProfilePicture; off: LoRAProfilePicture; class_baseline: LoRAProfilePicture | null; class_off: LoRAProfilePicture | null; suggested_blocks: Record<string, number>; suggestion_count: number; warnings: string[]; class_prompt: string; references: string[] }
+export interface LoRAProfile { mode: string; scope: string; grouping?: string; windows: LoRAProfileWindow[]; renders: number; baseline: LoRAProfilePicture; off: LoRAProfilePicture; class_baseline: LoRAProfilePicture | null; class_off: LoRAProfilePicture | null; suggested_blocks: Record<string, number>; suggestion_count: number; warnings: string[]; class_prompt: string; references: string[] }
 export interface LoRAPreset { id: string; name: string; family: string; block_ids: string[]; fingerprint: string; source_name: string; kernel: string; created_at: string; blocks: Record<string, number> }
 export interface LoRAExploreState { strength: number; enabled: boolean }
 export interface LoRAExploreConfig { state?: Record<string, LoRAExploreState>; intensity: number; structure: number; mutations: number; mutation_seed: number; frozen: string[]; last_pick: string[] }
@@ -289,6 +290,7 @@ export interface DesktopApi {
     background_history?: string[],
     background_source_path?: string,
     background_data_url?: string,
+    font_scale?: number,
   ): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
   get_appearance_background(): Promise<{ ok: boolean; data_url?: string; error?: string }>
   get_appearance_image_preview(path: string, thumbnail?: boolean): Promise<{ ok: boolean; data_url?: string; error?: string }>
@@ -319,7 +321,7 @@ export interface DesktopApi {
   reset_env_locations(): Promise<EnvLocations>
   get_log_export_status(export_id: string): Promise<LogExportStatus>
   open_log_export(export_id: string, target: 'file' | 'folder'): Promise<{ ok: boolean; error?: string }>
-  run_action(action: string, project_name?: string): Promise<{ ok: boolean; error?: string; message?: string; log?: string; export_id?: string; task_id?: string }>
+  run_action(action: string, project_name?: string): Promise<{ ok: boolean; error?: string; message?: string; log?: string; path?: string; export_id?: string; task_id?: string }>
 }
 
 export interface LogExportStatus {
@@ -339,6 +341,7 @@ export interface AppearanceSettings {
   background_history: AppearanceBackgroundHistoryEntry[]
   component_opacity: number
   idle_fade_enabled: boolean
+  font_scale: number
   background_data_url?: string
 }
 
@@ -656,10 +659,11 @@ export interface SliderResults {
 }
 
 export interface MultiCharacterSettings {
-  roles: Array<{ id: string; name: string; trigger: string; directory: string; description: string }>
+  roles: Array<{ id: string; name: string; trigger: string; directory: string; description: string; class_word?: string }>
   groups: Array<{ id: string; name: string; directory: string; members: Array<{ role_id: string; position: string }>; caption: string; reviewed: boolean }>
   targets: Array<{ role_ids: string[]; prompt: string }>
   balance: boolean
+  moss?: { layout: boolean; dop: boolean }
 }
 export interface MultiCharacterScan {
   ok: boolean; error?: string; images: number; training_images: number; warnings: string[]

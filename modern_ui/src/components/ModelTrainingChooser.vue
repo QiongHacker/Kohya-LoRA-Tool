@@ -12,7 +12,7 @@ const model = computed(() => props.catalog.models.find(m => m.key === modelKey.v
 const variant = computed(() => model.value?.variants.find(v => v.key === variantKey.value) || model.value?.variants[0])
 const engine = computed(() => variant.value?.engines.find(e => e.key === engineKey.value))
 function available(e: { vendors: string[]; supported?: boolean; mode?: string }) {
-  if (goal.value === 'multi_character' && ['video', 'h3_fz', 'moss_fz'].includes(e.mode || '')) return false
+  if (goal.value === 'multi_character' && ['video', 'h3_fz'].includes(e.mode || '')) return false
   if (goal.value === 'slider' && !['sdxl_fz', 'anima_fz'].includes(e.mode || '')) return false
   return e.supported ?? (props.catalog.gpu_vendor === 'unknown' || e.vendors.includes(props.catalog.gpu_vendor))
 }

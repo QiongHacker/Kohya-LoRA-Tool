@@ -222,7 +222,10 @@ def _directory_has_files(directory):
     return False
 
 def data_sub(*parts):
-    d = os.path.join(data_dir(), *parts)
+    if len(parts) >= 2 and parts[0] == "output" and parts[1]:
+        d = os.path.join(project_output_dir(parts[1]), *parts[2:])
+    else:
+        d = os.path.join(data_dir(), *parts)
     try:
         os.makedirs(d, exist_ok=True)
     except Exception:
@@ -387,7 +390,11 @@ def rename_project(old_name, new_name):
         if os.path.exists(_project_path(new_name)):
             return False, "已存在同名项目。"
         moves = []
-        for resolver in (project_data_dir, project_output_dir):
+        resolvers = [project_data_dir]
+        # A user-selected directory keeps its name and location when the project is renamed.
+        if not data.get("output_dir"):
+            resolvers.append(project_output_dir)
+        for resolver in resolvers:
             source = resolver(old_name)
             if not source:
                 continue
@@ -407,7 +414,7 @@ def rename_project(old_name, new_name):
             saved = True
             if not delete_project(old_name):
                 raise OSError("旧项目配置无法移除")
-            return True, "项目配置、图集及训练产物已同步改名。"
+            return True, "项目配置、图集已改名；自定义输出目录保持原位置。" if data.get("output_dir") else "项目配置、图集及训练产物已同步改名。"
         except Exception as exc:
             rollback_errors = []
             if saved and not delete_project(new_name):
@@ -453,6 +460,12 @@ def project_output_dir(name):
     proj = _sanitize_dirname(name)
     if not proj:
         return ""
+    config = load_project(name) or {}
+    custom = config.get("output_dir")
+    if custom:
+        if not isinstance(custom, str) or not os.path.isabs(custom):
+            raise ValueError("项目输出目录必须为绝对路径，请重新指定。")
+        return os.path.abspath(custom)
     current_root = data_dir()
     current = os.path.join(current_root, "output", proj)
     if not _directory_has_files(current):
